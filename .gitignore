@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+node_modules/
+dist/
+cache_data/
+*.log
+.env
+.DS_Store
+*.npy
+*.safetensors
