@@ -91,14 +91,20 @@ function ProgressBar() {
 
 function RefinePanel() {
   const { phase, tau, multiplier, setTau, setMultiplier, submitRefine,
-          cells, currentGridSize } = useRidgeStore();
+          cells, currentGridSize, manualSelection } = useRidgeStore();
   if (phase !== 'complete') return null;
 
   const median = computeRealMedian(cells);
   const threshold = median * tau;
-  // Only span=1 cells can be refined (matching backend logic)
-  const refinableCells = cells.filter(c => c.span === 1 && c.sensitivity !== null && c.sensitivity! >= threshold);
-  const aboveCount = refinableCells.length;
+  const tauSelected = new Set<string>();
+  cells.forEach(c => {
+    if (c.span === 1 && c.sensitivity !== null && c.sensitivity! >= threshold)
+      tauSelected.add(`${c.row},${c.col}`);
+  });
+  // Union of tau + manual
+  const combined = new Set([...tauSelected, ...manualSelection]);
+  const aboveCount = combined.size;
+  const manualOnly = [...manualSelection].filter(k => !tauSelected.has(k)).length;
   const newGs = currentGridSize * multiplier;
   const newCells = aboveCount * multiplier * multiplier;
 
@@ -116,7 +122,9 @@ function RefinePanel() {
                onChange={e => setMultiplier(+e.target.value)} style={{ display: 'block', width: 80 }} />
       </div>
       <span style={{ fontSize: 11, color: '#aaa' }}>
-        <span style={{ color: '#4ecca3' }}>{aboveCount}</span> cells → {newCells} new
+        <span style={{ color: '#4ecca3' }}>{aboveCount}</span> cells
+        {manualOnly > 0 && <span style={{ color: '#e94560' }}> (+{manualOnly} manual)</span>}
+        {' → '}{newCells} new
       </span>
       <button onClick={submitRefine} disabled={aboveCount === 0}
               style={{ padding: '4px 16px', background: aboveCount === 0 ? '#333' : '#4ecca3',
@@ -143,7 +151,8 @@ function computeRealMedian(cells: { sensitivity: number | null; span: number }[]
 type LayerToggle = { images: boolean; heatmap: boolean; tau: boolean };
 
 function UnifiedViewport() {
-  const { phase, cells, currentGridSize, tau, seeds, seedCells, activeSeedIdx, setActiveSeedIdx } = useRidgeStore();
+  const { phase, cells, currentGridSize, tau, seeds, seedCells, activeSeedIdx, setActiveSeedIdx,
+          manualSelection, toggleManualCell, clearManualSelection } = useRidgeStore();
 
   // Layer toggles
   const [layers, setLayers] = useState<LayerToggle>({ images: true, heatmap: false, tau: true });
@@ -152,7 +161,7 @@ function UnifiedViewport() {
   // Full-res overlay + seed probe
   const [overlayImg, setOverlayImg] = useState<{ url: string; alpha: number; beta: number } | null>(null);
   const [probeSeedStart, setProbeSeedStart] = useState(0);
-  const [probeSeedEnd, setProbeSeedEnd] = useState(19);
+  const [probeSeedEnd, setProbeSeedEnd] = useState(3);
   const [probeImages, setProbeImages] = useState<{ seeds: number[]; images: (string | null)[] } | null>(null);
   const [probeLoading, setProbeLoading] = useState(false);
 
@@ -218,9 +227,36 @@ function UnifiedViewport() {
     return s;
   }, [cells]);
 
+  // Recenter: fit the full grid in the viewport
+  const recenter = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) return;
+    const gs = currentGridSize;
+    const ts = Math.max(4, Math.min(64, Math.floor(800 / gs)));
+    const gpx = gs * ts;
+    // Fit: scale so the grid fills the viewport with some padding
+    const fitZoom = Math.min(rect.width / gpx, rect.height / gpx) * 0.95;
+    setZoom(fitZoom);
+    setPan({ x: (rect.width - gpx * fitZoom) / 2, y: (rect.height - gpx * fitZoom) / 2 });
+  }, [currentGridSize]);
+
+  // "H" key to recenter
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'h' || e.key === 'H') {
+        // Don't trigger if typing in an input
+        const tag = (e.target as HTMLElement).tagName;
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+        recenter();
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [recenter]);
+
   // Center the grid whenever grid size changes.
-  // Use a pending flag so ResizeObserver can fire the centering
-  // once the container has actual dimensions.
   const { shouldCenter } = useRidgeStore();
   const needsCenter = useRef(true);
 
@@ -231,13 +267,7 @@ function UnifiedViewport() {
     if (!el) return;
     const doCenter = () => {
       if (!needsCenter.current) return;
-      const rect = el.getBoundingClientRect();
-      if (rect.width === 0 || rect.height === 0) return;
-      const gs = currentGridSize;
-      const ts = Math.max(4, Math.min(64, Math.floor(800 / gs)));
-      const gpx = gs * ts;
-      setZoom(1);
-      setPan({ x: (rect.width - gpx) / 2, y: (rect.height - gpx) / 2 });
+      recenter();
       needsCenter.current = false;
     };
     doCenter();
@@ -339,13 +369,45 @@ function UnifiedViewport() {
             ))}
           </>
         )}
+        {manualSelection.size > 0 && (
+          <button onClick={clearManualSelection}
+                  style={{ padding: '2px 8px', border: 'none', borderRadius: 3, fontSize: 10,
+                           background: '#e94560', color: '#fff', cursor: 'pointer', marginLeft: 4 }}>
+            clear {manualSelection.size} selected
+          </button>
+        )}
         <span style={{ fontSize: 10, color: '#555', marginLeft: 8 }}>
-          scroll=zoom | drag=pan | dblclick=fullres
+          scroll=zoom | drag=pan | dblclick=fullres | rightclick=select | H=recenter
         </span>
       </div>
 
       {/* Viewport */}
       <div ref={containerRef}
+           onContextMenu={(e) => {
+             e.preventDefault();
+             // Right-click: toggle manual selection of the cell under cursor
+             const rect = containerRef.current?.getBoundingClientRect();
+             if (!rect || phase !== 'complete') return;
+             const mx = e.clientX - rect.left;
+             const my = e.clientY - rect.top;
+             const wx = (mx - pan.x) / zoom;
+             const wy = (my - pan.y) / zoom;
+             const col = Math.floor(wx / ts);
+             const row = Math.floor(wy / ts);
+             if (col >= 0 && col < gs && row >= 0 && row < gs) {
+               const alphaIdx = col;
+               const betaIdx = gs - 1 - row;
+               // Find the cell that covers this position (any span)
+               const cell = displayCells.find(c => {
+                 const s = c.span || 1;
+                 return alphaIdx >= c.row && alphaIdx < c.row + s &&
+                        betaIdx >= c.col && betaIdx < c.col + s;
+               });
+               if (cell) {
+                 toggleManualCell(cell.row, cell.col);
+               }
+             }
+           }}
            onDoubleClick={(e) => {
              const rect = containerRef.current?.getBoundingClientRect();
              if (!rect) return;
@@ -406,7 +468,6 @@ function UnifiedViewport() {
            }}
            onPointerUp={() => { isPanning.current = false; }}
            onLostPointerCapture={() => { isPanning.current = false; }}
-           onContextMenu={(e) => e.preventDefault()}
            style={{
              flex: 1, overflow: 'hidden', cursor: 'grab',
              background: '#0a0a12', position: 'relative', minHeight: 400,
@@ -466,6 +527,16 @@ function UnifiedViewport() {
                   <div style={{
                     position: 'absolute', inset: 0,
                     border: '1px solid #4ecca3',
+                    boxSizing: 'border-box',
+                    pointerEvents: 'none',
+                  }} />
+                )}
+
+                {/* Layer: manual selection borders */}
+                {phase === 'complete' && manualSelection.has(`${cell.row},${cell.col}`) && (
+                  <div style={{
+                    position: 'absolute', inset: 0,
+                    border: '2px solid #e94560',
                     boxSizing: 'border-box',
                     pointerEvents: 'none',
                   }} />

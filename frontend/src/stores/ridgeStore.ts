@@ -32,6 +32,7 @@ interface RidgeState {
   pollInterval: ReturnType<typeof setInterval> | null;
   currentGridSize: number;
   shouldCenter: boolean;
+  manualSelection: Set<string>;  // "row,col" keys for manually selected cells
 
   setPromptA: (v: string) => void;
   setPromptB: (v: string) => void;
@@ -45,6 +46,8 @@ interface RidgeState {
   setResolution: (v: number) => void;
   setSeedCount: (v: number) => void;
   setActiveSeedIdx: (v: number) => void;
+  toggleManualCell: (row: number, col: number) => void;
+  clearManualSelection: () => void;
   generate: () => Promise<void>;
   submitRefine: () => Promise<void>;
   stopPolling: () => void;
@@ -116,6 +119,7 @@ export const useRidgeStore = create<RidgeState>((set, get) => ({
   pollInterval: null,
   currentGridSize: 12,
   shouldCenter: true,
+  manualSelection: new Set<string>(),
 
   setPromptA: (v) => set({ promptA: v }),
   setPromptB: (v) => set({ promptB: v }),
@@ -129,6 +133,13 @@ export const useRidgeStore = create<RidgeState>((set, get) => ({
   setResolution: (v) => set({ resolution: v }),
   setSeedCount: (v) => set({ seedCount: v }),
   setActiveSeedIdx: (v) => set({ activeSeedIdx: v }),
+  toggleManualCell: (row, col) => set(state => {
+    const key = `${row},${col}`;
+    const next = new Set(state.manualSelection);
+    if (next.has(key)) next.delete(key); else next.add(key);
+    return { manualSelection: next };
+  }),
+  clearManualSelection: () => set({ manualSelection: new Set<string>() }),
 
   stopPolling: () => {
     const { pollInterval } = get();
@@ -142,7 +153,7 @@ export const useRidgeStore = create<RidgeState>((set, get) => ({
     set({
       phase: 'generating', cellsGenerated: 0, cellsTotal: 0, cells: [],
       heatmapUrl: null, overlayUrl: null, clusterUrl: null, imageGridUrl: null,
-      jobId: null, currentGridSize: gridSize, activeView: 'images', shouldCenter: true,
+      jobId: null, currentGridSize: gridSize, activeView: 'images', shouldCenter: true, manualSelection: new Set<string>(),
     });
     try {
       const res = await startGrid({
@@ -159,21 +170,28 @@ export const useRidgeStore = create<RidgeState>((set, get) => ({
   },
 
   submitRefine: async () => {
-    const { jobId, tau, multiplier, stopPolling, currentGridSize } = get();
+    const { jobId, tau, multiplier, stopPolling, currentGridSize, manualSelection } = get();
     if (!jobId) return;
     stopPolling();
 
+    // Convert manual selection set to position tuples
+    const extraPositions: [number, number][] = [];
+    manualSelection.forEach(key => {
+      const [r, c] = key.split(',').map(Number);
+      extraPositions.push([r, c]);
+    });
+
     const newGs = currentGridSize * multiplier;
-    // Clear everything and switch to images view
     set({
       phase: 'generating', activeView: 'images',
       heatmapUrl: null, overlayUrl: null, clusterUrl: null, imageGridUrl: null,
       cells: [], cellsGenerated: 0, currentGridSize: newGs, shouldCenter: false,
+      manualSelection: new Set<string>(),
     });
 
     try {
-      console.log('[Ridge] Refining...', { tau, multiplier, newGs });
-      const res = await refineGrid(jobId, { tau, multiplier });
+      console.log('[Ridge] Refining...', { tau, multiplier, newGs, extraPositions: extraPositions.length });
+      const res = await refineGrid(jobId, { tau, multiplier, extra_positions: extraPositions });
       console.log('[Ridge] Refine response:', res);
       if (res.status === 'error' || res.status === 'no_cells') {
         // Reload current state

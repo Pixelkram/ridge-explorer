@@ -49,6 +49,7 @@ class SeedProbeStatus(BaseModel):
 class RefineRequest(BaseModel):
     tau: float = 1.5       # threshold: refine cells with sensitivity >= median*tau
     multiplier: int = 4    # resolution multiplier (e.g., 4 means 4x4 sub-grid per cell)
+    extra_positions: list[tuple[int, int]] = []  # manually selected (row, col) pairs to also refine
 
 
 class RefineResponse(BaseModel):

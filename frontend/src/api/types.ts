@@ -73,6 +73,7 @@ export interface SeedProbeStatus {
 export interface RefineRequest {
   tau: number;
   multiplier: number;
+  extra_positions?: [number, number][];  // manually selected (row, col) pairs
 }
 
 export interface RefineResponse {

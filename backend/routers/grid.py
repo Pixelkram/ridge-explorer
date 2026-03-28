@@ -172,13 +172,18 @@ def _refine_single_job(sub_id, jobs, refine_positions, mult, cache, pool):
             ci, cj = cell["row"], cell["col"]
             old_span = cell.get("span", 1)
 
-            # Use the pre-computed refine_positions from master (averaged) sensitivity
-            should_refine = (old_span == 1 and (ci, cj) in refine_positions)
+            # Use the pre-computed refine_positions from master (averaged sensitivity + manual)
+            should_refine = (ci, cj) in refine_positions
 
             if should_refine:
-                for si in range(mult):
-                    for sj in range(mult):
-                        ni, nj = ci * mult + si, cj * mult + sj
+                # Subdivide the full span×span area into fine cells
+                # A span=S cell at (ci,cj) covers old positions ci..ci+S-1, cj..cj+S-1
+                # In the new grid, that maps to ci*mult .. (ci+S)*mult - 1
+                total_sub = old_span * mult
+                base_i, base_j = ci * mult, cj * mult
+                for si in range(total_sub):
+                    for sj in range(total_sub):
+                        ni, nj = base_i + si, base_j + sj
                         if 0 <= ni < new_gs and 0 <= nj < new_gs:
                             needs_generation.add((ni, nj))
                             new_cells[ni][nj] = {
@@ -302,7 +307,7 @@ async def refine_grid(job_id: str, req: RefineRequest, request: Request):
     cache = request.app.state.cache
     pool = request.app.state.gpu_pool
 
-    # Compute which positions to refine ONCE from master (averaged) sensitivity
+    # Compute which positions to refine from tau threshold + manual selection
     refine_positions = set()
     for row in master["cells"]:
         for cell in row:
@@ -310,6 +315,18 @@ async def refine_grid(job_id: str, req: RefineRequest, request: Request):
                 sens = cell.get("sensitivity")
                 if sens is not None and sens >= threshold:
                     refine_positions.add((cell["row"], cell["col"]))
+
+    # Add manually selected positions (any span — will be subdivided)
+    all_cell_positions = set()
+    for row in master["cells"]:
+        for cell in row:
+            if cell is not None:
+                all_cell_positions.add((cell["row"], cell["col"]))
+
+    for pos in req.extra_positions:
+        p = (pos[0], pos[1])
+        if p in all_cell_positions:
+            refine_positions.add(p)
 
     if not refine_positions:
         return RefineResponse(refine_job_id=job_id, parent_job_id=job_id,
