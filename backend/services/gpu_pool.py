@@ -32,7 +32,29 @@ class GenerateTask:
     width: int
     steps: int
     guidance_scale: float
-    active_cells: set | None = None  # if set, only generate these (row, col) pairs
+    active_cells: set | None = None
+    # 3D mode
+    prompt_d: str = ""
+    gammas: np.ndarray | None = None
+    grid_size_z: int = 0  # 0 = 2D mode
+    use_slerp: bool = False
+
+
+@dataclass
+class FastScanTask:
+    """Generate 1-step latents for fast ridge detection (no images, no DINOv2)."""
+    job_id: str
+    row_indices: list[int]
+    alphas: np.ndarray
+    betas: np.ndarray
+    prompt_a: str
+    prompt_b: str
+    prompt_c: str
+    grid_size: int
+    seed: int
+    height: int
+    width: int
+    guidance_scale: float = 1.0  # 1.0 = no CFG, single forward pass
 
 
 @dataclass
@@ -49,6 +71,26 @@ class HQTask:
 
 
 @dataclass
+class LatentResult:
+    """Result for one grid cell from fast scan — normalized latent vector."""
+    job_id: str
+    gpu_id: int
+    row: int
+    col: int
+    latent_vector: np.ndarray  # normalized flattened latent
+
+
+@dataclass
+class LatentBatchResult:
+    """Batch result for an entire row from fast scan — reduces queue overhead."""
+    job_id: str
+    gpu_id: int
+    row: int
+    cols: list[int]
+    latent_vectors: np.ndarray  # (n_cols, latent_dim) normalized
+
+
+@dataclass
 class CellResult:
     """Result for one grid cell."""
     job_id: str
@@ -59,6 +101,7 @@ class CellResult:
     thumbnail_hash: str
     dino_embedding: np.ndarray  # (768,)
     is_hq: bool = False
+    depth: int = 0  # z-index for 3D grids
 
 
 def worker_main(gpu_id: int, task_queue, result_queue):
@@ -89,33 +132,45 @@ def worker_main(gpu_id: int, task_queue, result_queue):
 
         if isinstance(task, GenerateTask):
             _process_generate(gpu_id, device, pipe, dino, dino_transform, task, result_queue)
+        elif isinstance(task, FastScanTask):
+            _process_fast_scan(gpu_id, device, pipe, task, result_queue)
         elif isinstance(task, HQTask):
             _process_hq(gpu_id, device, pipe, dino, dino_transform, task, result_queue)
 
 
-def _encode_prompts(pipe, prompt_a, prompt_b, prompt_c):
-    """Encode 2 or 3 prompts and return embeddings."""
+def _encode_prompts(pipe, prompt_a, prompt_b, prompt_c, prompt_d=""):
+    """Encode 2, 3, or 4 prompts and return embeddings."""
     with torch.no_grad():
         emb_a, _ = pipe.encode_prompt(prompt=prompt_a)
         emb_b, _ = pipe.encode_prompt(prompt=prompt_b)
+        emb_c = None
+        emb_d = None
         if prompt_c:
             emb_c, _ = pipe.encode_prompt(prompt=prompt_c)
-        else:
-            emb_c = None
-    return emb_a, emb_b, emb_c
+        if prompt_d:
+            emb_d, _ = pipe.encode_prompt(prompt=prompt_d)
+    return emb_a, emb_b, emb_c, emb_d
 
 
-def _interpolate_embedding(emb_a, emb_b, emb_c, alpha, beta):
-    """Compute interpolated embedding for grid position (alpha, beta).
+def _nlerp(embs, weights):
+    """Normalized linear interpolation (NLERP) — LERP then normalize to preserve norm.
+    Approximates SLERP for embeddings on a hypersphere."""
+    result = sum(w * e for w, e in zip(weights, embs))
+    # Normalize to the average norm of the inputs
+    avg_norm = sum(e.norm() for e in embs) / len(embs)
+    result_norm = result.norm()
+    if result_norm > 1e-8:
+        result = result * (avg_norm / result_norm)
+    return result
 
-    3-prompt mode: emb = (1-α-β)*A + α*B + β*C
-    2-prompt mode: emb = (1-α)*A + α*B + β*perp  (perp computed externally)
-    """
+
+def _interpolate_2d(emb_a, emb_b, emb_c, alpha, beta, use_slerp=False):
+    """2D interpolation: emb = (1-α-β)*A + α*B + β*C"""
     if emb_c is not None:
+        if use_slerp:
+            return _nlerp([emb_a, emb_b, emb_c], [1 - alpha - beta, alpha, beta])
         return (1 - alpha - beta) * emb_a + alpha * emb_b + beta * emb_c
     else:
-        # 2-prompt: alpha interpolates A→B, beta is perpendicular
-        # For 2-prompt, caller should pass perp_dir as emb_c
         return (1 - alpha) * emb_a + alpha * emb_b + beta * emb_c
 
 
@@ -126,53 +181,178 @@ def _image_to_thumbnail(image, size=None):
     return buf.getvalue()
 
 
+class _ScanContext:
+    """Shared state for batched 1-step latent evaluation."""
+    __slots__ = ('emb_a', 'emb_b', 'emb_c', 'noise_t', 'text_ids_t',
+                 'latent_ids_t', 'batch_t', 'transformer', 'img_tokens')
+
+    def __init__(self, pipe, device, task):
+        from diffusers.pipelines.flux2.pipeline_flux2 import compute_empirical_mu
+
+        with torch.no_grad():
+            self.emb_a, text_ids = pipe.encode_prompt(prompt=task.prompt_a)
+            self.emb_b, _ = pipe.encode_prompt(prompt=task.prompt_b)
+            self.emb_c = None
+            if task.prompt_c:
+                self.emb_c, _ = pipe.encode_prompt(prompt=task.prompt_c)
+
+        gen = torch.Generator(device=device).manual_seed(task.seed)
+        in_ch = pipe.transformer.config.in_channels
+        noise, latent_ids = pipe.prepare_latents(
+            batch_size=1, num_latents_channels=in_ch // 4,
+            height=task.height, width=task.width,
+            dtype=self.emb_a.dtype, device=device, generator=gen,
+        )
+
+        self.img_tokens = noise.shape[1]
+        mu = compute_empirical_mu(image_seq_len=self.img_tokens, num_steps=1)
+        pipe.scheduler.set_timesteps(num_inference_steps=1, device=device, mu=mu)
+        t_val = pipe.scheduler.timesteps[0]
+
+        self.transformer = pipe.transformer
+        t_dtype = self.transformer.dtype
+        self.noise_t = noise.to(t_dtype)
+        self.text_ids_t = text_ids
+        self.latent_ids_t = latent_ids
+        self.batch_t = (t_val / 1000).to(t_dtype)
+
+    def evaluate_points(self, points, batch_size=8):
+        """Evaluate a list of (alpha, beta) points. Returns (N, D) normalized latents."""
+        all_latents = []
+        for b_start in range(0, len(points), batch_size):
+            batch = points[b_start:b_start + batch_size]
+            bs = len(batch)
+
+            embeds = []
+            for alpha, beta in batch:
+                if self.emb_c is not None:
+                    e = (1 - alpha - beta) * self.emb_a + alpha * self.emb_b + beta * self.emb_c
+                else:
+                    e = (1 - alpha) * self.emb_a + alpha * self.emb_b
+                embeds.append(e)
+            batch_embeds = torch.cat(embeds, dim=0).to(self.noise_t.dtype)
+
+            batch_noise = self.noise_t.expand(bs, -1, -1)
+            with torch.no_grad():
+                velocity = self.transformer(
+                    hidden_states=batch_noise,
+                    timestep=self.batch_t.expand(bs),
+                    guidance=None,
+                    encoder_hidden_states=batch_embeds,
+                    txt_ids=self.text_ids_t.expand(bs, -1, -1),
+                    img_ids=self.latent_ids_t.expand(bs, -1, -1),
+                    return_dict=False,
+                )[0]
+
+            velocity = velocity[:, :self.img_tokens, :]
+            denoised = batch_noise - velocity
+
+            for idx in range(bs):
+                flat = denoised[idx].flatten().float()
+                norm = flat.norm()
+                if norm > 1e-8:
+                    flat = flat / norm
+                all_latents.append(flat.cpu().numpy())
+
+        return np.stack(all_latents)
+
+
+def _process_fast_scan(gpu_id, device, pipe, task, result_queue):
+    """Batched fast scan: bypass pipeline overhead, call transformer directly.
+
+    Evaluates all grid points assigned to this worker using batched
+    direct transformer calls, eliminating per-point pipeline overhead.
+    """
+    BATCH_SIZE = 8
+
+    ctx = _ScanContext(pipe, device, task)
+    gs = task.grid_size
+    alphas = task.alphas
+    betas = task.betas
+
+    print(f"[GPU {gpu_id}] Fast scan setup done: {ctx.img_tokens} img tokens, "
+          f"batch={BATCH_SIZE}", flush=True)
+
+    for i in task.row_indices:
+        points = [(float(alphas[i]), float(betas[j])) for j in range(gs)]
+        latents = ctx.evaluate_points(points, BATCH_SIZE)
+        result_queue.put(LatentBatchResult(
+            job_id=task.job_id, gpu_id=gpu_id,
+            row=i, cols=list(range(gs)),
+            latent_vectors=latents,
+        ))
+        print(f"[GPU {gpu_id}] Fast scan {task.job_id} row {i+1}/{gs}", flush=True)
+
+
+
 def _process_generate(gpu_id, device, pipe, dino, dino_transform, task, result_queue):
     """Generate images for assigned rows and compute DINOv2 embeddings."""
-    emb_a, emb_b, emb_c = _encode_prompts(pipe, task.prompt_a, task.prompt_b, task.prompt_c)
+    emb_a, emb_b, emb_c, emb_d = _encode_prompts(
+        pipe, task.prompt_a, task.prompt_b, task.prompt_c, task.prompt_d)
+
+    is_3d = task.grid_size_z > 0 and task.gammas is not None
 
     for i in task.row_indices:
         alpha = task.alphas[i]
+        z_range = range(task.grid_size_z) if is_3d else [0]
+
         for j in range(task.grid_size):
-            # Skip cells not in active set (for refine tasks)
-            if task.active_cells is not None and (i, j) not in task.active_cells:
-                continue
+            for k in z_range:
+                # Skip cells not in active set
+                if task.active_cells is not None:
+                    key = (i, j, k) if is_3d else (i, j)
+                    if key not in task.active_cells:
+                        continue
 
-            beta = task.betas[j]
+                beta = task.betas[j]
+                gamma = task.gammas[k] if is_3d else 0.0
 
-            # Interpolated embedding
-            if emb_c is not None:
-                emb = (1 - alpha - beta) * emb_a + alpha * emb_b + beta * emb_c
-            else:
-                emb = (1 - alpha) * emb_a + alpha * emb_b
+                # Interpolated embedding
+                if is_3d and emb_d is not None:
+                    # 4-prompt 3D: (1-α-β-γ)*A + α*B + β*C + γ*D
+                    if task.use_slerp:
+                        emb = _nlerp([emb_a, emb_b, emb_c, emb_d],
+                                     [1 - alpha - beta - gamma, alpha, beta, gamma])
+                    else:
+                        emb = ((1 - alpha - beta - gamma) * emb_a +
+                               alpha * emb_b + beta * emb_c + gamma * emb_d)
+                elif emb_c is not None:
+                    if task.use_slerp:
+                        emb = _nlerp([emb_a, emb_b, emb_c],
+                                     [1 - alpha - beta, alpha, beta])
+                    else:
+                        emb = (1 - alpha - beta) * emb_a + alpha * emb_b + beta * emb_c
+                else:
+                    emb = (1 - alpha) * emb_a + alpha * emb_b
 
-            gen = torch.Generator(device=device).manual_seed(task.seed)
-            with torch.no_grad():
-                image = pipe(
-                    prompt_embeds=emb,
-                    height=task.height, width=task.width,
-                    num_inference_steps=task.steps,
-                    guidance_scale=task.guidance_scale,
-                    generator=gen,
-                ).images[0]
+                gen = torch.Generator(device=device).manual_seed(task.seed)
+                with torch.no_grad():
+                    image = pipe(
+                        prompt_embeds=emb,
+                        height=task.height, width=task.width,
+                        num_inference_steps=task.steps,
+                        guidance_scale=task.guidance_scale,
+                        generator=gen,
+                    ).images[0]
 
-            # DINOv2 embedding
-            dino_input = dino_transform(image).unsqueeze(0).to(device)
-            with torch.no_grad():
-                emb_dino = dino(dino_input)
-                emb_dino = emb_dino / emb_dino.norm(dim=-1, keepdim=True)
+                # DINOv2 embedding
+                dino_input = dino_transform(image).unsqueeze(0).to(device)
+                with torch.no_grad():
+                    emb_dino = dino(dino_input)
+                    emb_dino = emb_dino / emb_dino.norm(dim=-1, keepdim=True)
 
-            # Thumbnail
-            thumb_bytes = _image_to_thumbnail(image)
-            thumb_hash = hashlib.md5(thumb_bytes).hexdigest()
+                # Thumbnail
+                thumb_bytes = _image_to_thumbnail(image)
+                thumb_hash = hashlib.md5(thumb_bytes).hexdigest()
 
-            result_queue.put(CellResult(
-                job_id=task.job_id,
-                gpu_id=gpu_id,
-                row=i, col=j,
-                thumbnail_bytes=thumb_bytes,
-                thumbnail_hash=thumb_hash,
-                dino_embedding=emb_dino.cpu().numpy().flatten(),
-            ))
+                result_queue.put(CellResult(
+                    job_id=task.job_id,
+                    gpu_id=gpu_id,
+                    row=i, col=j, depth=k,
+                    thumbnail_bytes=thumb_bytes,
+                    thumbnail_hash=thumb_hash,
+                    dino_embedding=emb_dino.cpu().numpy().flatten(),
+                ))
 
         print(f"[GPU {gpu_id}] Job {task.job_id} row {i+1}/{task.grid_size}", flush=True)
 
@@ -267,7 +447,7 @@ class GPUPool:
         while not self.result_queue.empty():
             try:
                 r = self.result_queue.get_nowait()
-                if isinstance(r, CellResult):
+                if isinstance(r, (CellResult, LatentResult, LatentBatchResult)):
                     results.append(r)
             except Exception:
                 break

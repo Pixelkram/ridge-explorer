@@ -1,8 +1,9 @@
+import os
 from pathlib import Path
 
 MODEL_ID = "black-forest-labs/FLUX.2-klein-base-4B"
 MODEL_DTYPE = "bfloat16"
-N_GPUS = 6
+N_GPUS = int(os.environ.get("RIDGE_N_GPUS", "6"))
 
 # Generation defaults — 256px/4step for fast exploration, 512px/20step for detail
 DEFAULT_GRID_SIZE = 15

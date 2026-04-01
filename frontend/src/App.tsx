@@ -1,14 +1,16 @@
-import { useMemo, useRef, useState, useCallback, useEffect } from 'react';
+import { useMemo, useRef, useState, useCallback, useEffect, lazy, Suspense } from 'react';
 import { useRidgeStore } from './stores/ridgeStore';
 import { startSeedProbe, getSeedProbeStatus } from './api/client';
+
+const Plot = lazy(() => import('react-plotly.js'));
 
 const RESOLUTION_OPTIONS = [128, 256, 384, 512];
 const STEPS_OPTIONS = [2, 4, 8, 12, 20, 50];
 
 function PromptInput() {
-  const { promptA, promptB, promptC, gridSize, seed, steps, resolution, seedCount, phase,
-          setPromptA, setPromptB, setPromptC, setGridSize, setSeed, setSteps, setResolution, setSeedCount, generate } = useRidgeStore();
-  const busy = phase !== 'idle' && phase !== 'complete';
+  const { promptA, promptB, promptC, promptD, dimensions, gridSize, seed, steps, resolution, seedCount, phase,
+          setPromptA, setPromptB, setPromptC, setPromptD, setDimensions, setGridSize, setSeed, setSteps, setResolution, setSeedCount, generate, fastScan, cancel } = useRidgeStore();
+  const busy = phase !== 'idle' && phase !== 'complete' && phase !== 'scan_complete';
 
   const inputStyle = { width: '100%', padding: 6, background: '#0f3460', border: '1px solid #333',
                        color: '#fff', borderRadius: 4, fontSize: 12 };
@@ -18,21 +20,34 @@ function PromptInput() {
   return (
     <div style={{ display: 'flex', gap: 10, padding: 10, background: '#16213e',
                   alignItems: 'flex-end', flexWrap: 'wrap' }}>
-      <div style={{ flex: 1, minWidth: 150 }}>
+      <div>
+        <label style={{ fontSize: 10, color: '#888' }}>Mode</label>
+        <select value={dimensions} onChange={e => setDimensions(+e.target.value)} style={selectStyle}>
+          <option value={2}>2D</option>
+          <option value={3}>3D</option>
+        </select>
+      </div>
+      <div style={{ flex: 1, minWidth: 130 }}>
         <label style={{ fontSize: 10, color: '#888' }}>Prompt A (origin)</label>
         <input value={promptA} onChange={e => setPromptA(e.target.value)} style={inputStyle} />
       </div>
-      <div style={{ flex: 1, minWidth: 150 }}>
+      <div style={{ flex: 1, minWidth: 130 }}>
         <label style={{ fontSize: 10, color: '#888' }}>Prompt B (x-axis)</label>
         <input value={promptB} onChange={e => setPromptB(e.target.value)} style={inputStyle} />
       </div>
-      <div style={{ flex: 1, minWidth: 150 }}>
+      <div style={{ flex: 1, minWidth: 130 }}>
         <label style={{ fontSize: 10, color: '#888' }}>Prompt C (y-axis)</label>
         <input value={promptC} onChange={e => setPromptC(e.target.value)} style={inputStyle} />
       </div>
+      {dimensions === 3 && (
+        <div style={{ flex: 1, minWidth: 130 }}>
+          <label style={{ fontSize: 10, color: '#888' }}>Prompt D (z-axis)</label>
+          <input value={promptD} onChange={e => setPromptD(e.target.value)} style={inputStyle} />
+        </div>
+      )}
       <div>
         <label style={{ fontSize: 10, color: '#888' }}>Grid {gridSize}x{gridSize}</label>
-        <input type="range" min={3} max={30} step={1} value={gridSize}
+        <input type="range" min={3} max={100} step={1} value={gridSize}
                onChange={e => setGridSize(+e.target.value)} style={{ display: 'block', width: 70 }} />
       </div>
       <div>
@@ -65,6 +80,22 @@ function PromptInput() {
                        cursor: busy ? 'not-allowed' : 'pointer', fontSize: 12 }}>
         {busy ? 'Working...' : 'Explore'}
       </button>
+      {busy && (
+        <button onClick={cancel}
+                style={{ padding: '5px 14px', background: '#333', color: '#e94560',
+                         border: '1px solid #e94560', borderRadius: 4, fontWeight: 'bold',
+                         cursor: 'pointer', fontSize: 12 }}>
+          Cancel
+        </button>
+      )}
+      {dimensions === 2 && (
+        <button onClick={fastScan} disabled={busy}
+                style={{ padding: '5px 14px', background: busy ? '#555' : '#0f3460',
+                         color: '#fff', border: '1px solid #4ecca3', borderRadius: 4, fontWeight: 'bold',
+                         cursor: busy ? 'not-allowed' : 'pointer', fontSize: 12 }}>
+          {busy ? '...' : 'Fast Scan'}
+        </button>
+      )}
     </div>
   );
 }
@@ -73,18 +104,66 @@ function ProgressBar() {
   const { phase, cellsGenerated, cellsTotal, currentGridSize } = useRidgeStore();
   if (phase === 'idle') return null;
   const pct = cellsTotal > 0 ? (cellsGenerated / cellsTotal * 100) : 0;
-  const label = phase === 'generating' ? `Generating: ${cellsGenerated}/${cellsTotal}`
+  const label = phase === 'scanning' ? `Fast scan: ${cellsGenerated}/${cellsTotal} latents`
+    : phase === 'generating' ? `Generating: ${cellsGenerated}/${cellsTotal}`
     : phase === 'analyzing' ? 'Computing ridges...'
-    : `${currentGridSize}x${currentGridSize} grid`;
+    : phase === 'scan_complete' ? `Fast scan complete (${currentGridSize}×${currentGridSize})`
+    : `${currentGridSize}×${currentGridSize} grid`;
 
   return (
     <div style={{ padding: '4px 12px', background: '#1a1a2e', display: 'flex', alignItems: 'center', gap: 8 }}>
       <span style={{ fontSize: 11, color: '#888', minWidth: 160 }}>{label}</span>
-      {phase !== 'complete' && (
+      {phase !== 'complete' && phase !== 'scan_complete' && (
         <div style={{ flex: 1, background: '#333', borderRadius: 3, height: 4 }}>
-          <div style={{ width: `${pct}%`, background: '#e94560', borderRadius: 3, height: '100%', transition: 'width 0.3s' }} />
+          <div style={{ width: `${pct}%`, background: phase === 'scanning' ? '#4ecca3' : '#e94560', borderRadius: 3, height: '100%', transition: 'width 0.3s' }} />
         </div>
       )}
+    </div>
+  );
+}
+
+function ScanCompletePanel() {
+  const { phase, tau, setTau, cells, steps, resolution, setSteps, setResolution,
+          generateSelectedImages } = useRidgeStore();
+  if (phase !== 'scan_complete') return null;
+
+  const median = computeRealMedian(cells);
+  const threshold = median * tau;
+  const aboveCount = cells.filter(c => c.sensitivity != null && c.sensitivity! >= threshold).length;
+  const totalCells = cells.length;
+  const selectStyle = { padding: 4, background: '#0f3460', border: '1px solid #333',
+                        color: '#fff', borderRadius: 4, fontSize: 11 };
+
+  return (
+    <div style={{ display: 'flex', gap: 12, padding: '6px 12px', background: '#1a1a2e',
+                  borderTop: '1px solid #333', alignItems: 'center', flexWrap: 'wrap' }}>
+      <span style={{ fontSize: 11, color: '#4ecca3', fontWeight: 'bold' }}>Jacobian ridge map</span>
+      <div>
+        <label style={{ fontSize: 10, color: '#888' }}>τ={tau.toFixed(2)}</label>
+        <input type="range" min={0} max={4} step={0.05} value={tau}
+               onChange={e => setTau(+e.target.value)} style={{ display: 'block', width: 140 }} />
+      </div>
+      <span style={{ fontSize: 11, color: '#aaa' }}>
+        <span style={{ color: '#4ecca3' }}>{aboveCount}</span>/{totalCells} cells above threshold
+      </span>
+      <div>
+        <label style={{ fontSize: 10, color: '#888' }}>Resolution</label>
+        <select value={resolution} onChange={e => setResolution(+e.target.value)} style={selectStyle}>
+          {[128, 256, 384, 512].map(r => <option key={r} value={r}>{r}px</option>)}
+        </select>
+      </div>
+      <div>
+        <label style={{ fontSize: 10, color: '#888' }}>Steps</label>
+        <select value={steps} onChange={e => setSteps(+e.target.value)} style={selectStyle}>
+          {[2, 4, 8, 12, 20, 50].map(s => <option key={s} value={s}>{s}</option>)}
+        </select>
+      </div>
+      <button onClick={generateSelectedImages} disabled={aboveCount === 0}
+              style={{ padding: '5px 16px', background: aboveCount === 0 ? '#333' : '#e94560',
+                       color: aboveCount === 0 ? '#888' : '#fff', border: 'none', borderRadius: 4,
+                       fontWeight: 'bold', cursor: aboveCount === 0 ? 'not-allowed' : 'pointer', fontSize: 12 }}>
+        Generate {aboveCount} Images
+      </button>
     </div>
   );
 }
@@ -136,6 +215,214 @@ function RefinePanel() {
   );
 }
 
+function RidgeViewer3D() {
+  const { phase, cells, currentGridSize, ridgeMeshUrl, sliceIndex, setSliceIndex, dimensions, tau } = useRidgeStore();
+  const plotRef = useRef<any>(null);
+  const [selectedImg, setSelectedImg] = useState<{ url: string; alpha: number; beta: number; gamma: number } | null>(null);
+  const [hoverImg, setHoverImg] = useState<{ url: string; x: number; y: number } | null>(null);
+  const [showSurface, setShowSurface] = useState(true);
+
+  // Compute threshold for filtering
+  const realSens = useMemo(() =>
+    cells.filter(c => c.sensitivity != null).map(c => c.sensitivity!), [cells]);
+  const median3d = realSens.length > 0
+    ? [...realSens].sort((a, b) => a - b)[Math.floor(realSens.length / 2)] : 0;
+  const threshold3d = median3d * tau;
+
+  // Build 3D scatter data — only points above tau threshold
+  const scatterData = useMemo(() => {
+    const x: number[] = [], y: number[] = [], z: number[] = [];
+    const color: number[] = [], text: string[] = [];
+    const customdata: any[] = [];
+
+    cells.forEach(c => {
+      if (c.sensitivity != null && c.sensitivity >= threshold3d) {
+        x.push(c.alpha);
+        y.push(c.beta);
+        z.push(c.gamma);
+        color.push(c.sensitivity);
+        text.push(`α=${c.alpha.toFixed(2)} β=${c.beta.toFixed(2)} γ=${c.gamma.toFixed(2)}<br>sens=${c.sensitivity.toFixed(4)}`);
+        customdata.push({ url: c.thumbnail_url, alpha: c.alpha, beta: c.beta, gamma: c.gamma });
+      }
+    });
+    return { x, y, z, color, text, customdata, count: x.length, total: cells.length };
+  }, [cells, threshold3d]);
+
+  // Mesh data from ridge_mesh_url
+  const [meshData, setMeshData] = useState<any>(null);
+  useEffect(() => {
+    if (!ridgeMeshUrl) { setMeshData(null); return; }
+    fetch(ridgeMeshUrl).then(r => r.json()).then(setMeshData).catch(() => setMeshData(null));
+  }, [ridgeMeshUrl]);
+
+  // H hotkey for recentering
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if ((e.key === 'h' || e.key === 'H') && !['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement).tagName)) {
+        // Reset Plotly camera to default
+        const plotEl = document.querySelector('.js-plotly-plot') as any;
+        if (plotEl && (window as any).Plotly) {
+          (window as any).Plotly.relayout(plotEl, {
+            'scene.camera': { eye: { x: 1.5, y: 1.5, z: 1.5 }, center: { x: 0, y: 0, z: 0 } },
+          });
+        }
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, []);
+
+  // 2D slice of the 3D grid for image browsing
+  const gs = currentGridSize;
+  const sliceCells = useMemo(() =>
+    cells.filter(c => c.depth === sliceIndex), [cells, sliceIndex]);
+
+  if (phase === 'idle' || dimensions !== 3) return null;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
+      {/* 3D Plot */}
+      <div style={{ flex: 1, minHeight: 300 }}>
+        <Suspense fallback={<div style={{ padding: 20, color: '#666' }}>Loading 3D viewer...</div>}>
+          <Plot
+            ref={plotRef}
+            data={[
+              {
+                type: 'scatter3d' as const,
+                mode: 'markers' as const,
+                x: scatterData.x, y: scatterData.y, z: scatterData.z,
+                marker: {
+                  size: 4,
+                  color: scatterData.color,
+                  colorscale: 'Hot',
+                  opacity: 0.7,
+                  colorbar: { title: { text: 'Sensitivity' }, thickness: 15, len: 0.5 },
+                },
+                text: scatterData.text,
+                customdata: scatterData.customdata as any,
+                hoverinfo: 'text' as const,
+                name: 'Grid points',
+              },
+              ...(meshData && showSurface ? [{
+                type: 'mesh3d' as const,
+                x: meshData.vertices.map((v: number[]) => v[0]),
+                y: meshData.vertices.map((v: number[]) => v[1]),
+                z: meshData.vertices.map((v: number[]) => v[2]),
+                i: meshData.faces.map((f: number[]) => f[0]),
+                j: meshData.faces.map((f: number[]) => f[1]),
+                k: meshData.faces.map((f: number[]) => f[2]),
+                opacity: 0.3,
+                colorscale: [[0, '#e94560'], [1, '#e94560']] as any,
+                name: 'Ridge surface',
+                hoverinfo: 'skip' as const,
+              }] : []),
+            ]}
+            layout={{
+              paper_bgcolor: '#0a0a1a',
+              plot_bgcolor: '#0a0a1a',
+              font: { color: '#aaa', size: 10 },
+              scene: {
+                xaxis: { title: { text: 'α (→B)' }, color: '#666', gridcolor: '#222' },
+                yaxis: { title: { text: 'β (→C)' }, color: '#666', gridcolor: '#222' },
+                zaxis: { title: { text: 'γ (→D)' }, color: '#666', gridcolor: '#222' },
+                bgcolor: '#0a0a1a',
+                dragmode: 'orbit',
+              },
+              margin: { l: 0, r: 0, t: 30, b: 0 },
+              title: { text: `${scatterData.count}/${scatterData.total} points above τ=${tau.toFixed(1)}${meshData ? ` | ridge surface` : ''}`, font: { size: 12, color: '#aaa' } },
+              showlegend: false,
+              autosize: true,
+            }}
+            useResizeHandler
+            style={{ width: '100%', height: '100%' }}
+            config={{
+              responsive: true,
+              scrollZoom: true,
+              displayModeBar: true,
+              modeBarButtonsToRemove: ['toImage', 'sendDataToCloud'] as any,
+            }}
+            onClick={(event: any) => {
+              if (selectedImg) return; // don't re-trigger while overlay is open
+              const point = event.points?.[0];
+              if (point?.customdata?.url) {
+                setSelectedImg(point.customdata);
+              }
+            }}
+            onHover={(event: any) => {
+              const point = event.points?.[0];
+              if (point?.customdata?.url && event.event) {
+                setHoverImg({ url: point.customdata.url, x: event.event.clientX, y: event.event.clientY });
+              }
+            }}
+            onUnhover={() => setHoverImg(null)}
+          />
+        </Suspense>
+      </div>
+
+      {/* Slice browser */}
+      <div style={{ padding: '6px 12px', background: '#16213e', borderTop: '1px solid #333',
+                    display: 'flex', gap: 12, alignItems: 'center' }}>
+        <span style={{ fontSize: 11, color: '#888' }}>Z-slice: {sliceIndex}/{gs - 1}</span>
+        <input type="range" min={0} max={Math.max(0, gs - 1)} step={1} value={sliceIndex}
+               onChange={e => setSliceIndex(+e.target.value)}
+               style={{ flex: 1, maxWidth: 300 }} />
+        <span style={{ fontSize: 11, color: '#666' }}>
+          γ={gs > 0 ? (sliceIndex / Math.max(gs - 1, 1)).toFixed(2) : '0'} | {sliceCells.length} cells
+        </span>
+        {meshData && (
+          <button onClick={() => setShowSurface(s => !s)}
+                  style={{ padding: '2px 10px', border: 'none', borderRadius: 3, fontSize: 10,
+                           background: showSurface ? '#e94560' : '#333',
+                           color: showSurface ? '#fff' : '#888', cursor: 'pointer' }}>
+            {showSurface ? 'surface ON' : 'surface OFF'}
+          </button>
+        )}
+        <span style={{ fontSize: 10, color: '#444' }}>
+          click=image | H=recenter | scroll=zoom
+        </span>
+      </div>
+
+      {/* Hover image preview */}
+      {hoverImg && !selectedImg && (
+        <div style={{
+          position: 'fixed',
+          left: Math.min(hoverImg.x + 15, window.innerWidth - 180),
+          top: Math.min(hoverImg.y + 15, window.innerHeight - 180),
+          pointerEvents: 'none', zIndex: 900,
+        }}>
+          <img src={hoverImg.url}
+               style={{ width: 160, height: 160, borderRadius: 6,
+                        border: '2px solid #444', boxShadow: '0 0 20px rgba(0,0,0,0.8)' }} />
+        </div>
+      )}
+
+      {/* Full image overlay on click */}
+      {selectedImg && (
+        <div onMouseDown={(e) => { e.stopPropagation(); setSelectedImg(null); }}
+             style={{
+               position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.92)',
+               display: 'flex', alignItems: 'center', justifyContent: 'center',
+               zIndex: 1000, cursor: 'pointer',
+             }}>
+          <div style={{ textAlign: 'center' }} onMouseDown={e => e.stopPropagation()}>
+            <img src={selectedImg.url}
+                 style={{ maxWidth: '80vw', maxHeight: '70vh', borderRadius: 8,
+                          boxShadow: '0 0 40px rgba(0,0,0,0.5)' }} />
+            <div style={{ marginTop: 8, fontSize: 12, color: '#aaa' }}>
+              α={selectedImg.alpha.toFixed(3)} β={selectedImg.beta.toFixed(3)} γ={selectedImg.gamma.toFixed(3)}
+            </div>
+            <button onClick={() => setSelectedImg(null)}
+                    style={{ marginTop: 8, padding: '4px 16px', background: '#333', color: '#aaa',
+                             border: '1px solid #555', borderRadius: 4, cursor: 'pointer', fontSize: 11 }}>
+              Close (or click outside)
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Compute median from only real (span=1) cells to match backend. */
 function computeRealMedian(cells: { sensitivity: number | null; span: number }[]): number {
   const real = cells.filter(c => c.span === 1 && c.sensitivity !== null).map(c => c.sensitivity!);
@@ -157,6 +444,15 @@ function UnifiedViewport() {
   // Layer toggles
   const [layers, setLayers] = useState<LayerToggle>({ images: true, heatmap: false, tau: true });
   const toggle = (key: keyof LayerToggle) => setLayers(l => ({ ...l, [key]: !l[key] }));
+
+  // Auto-enable heatmap layer when fast scan completes
+  const prevPhase = useRef(phase);
+  useEffect(() => {
+    if (phase === 'scan_complete' && prevPhase.current !== 'scan_complete') {
+      setLayers(l => ({ ...l, heatmap: true }));
+    }
+    prevPhase.current = phase;
+  }, [phase]);
 
   // Full-res overlay + seed probe
   const [overlayImg, setOverlayImg] = useState<{ url: string; alpha: number; beta: number } | null>(null);
@@ -523,7 +819,7 @@ function UnifiedViewport() {
                 )}
 
                 {/* Layer: tau selection borders */}
-                {layers.tau && phase === 'complete' && isAboveTau && (
+                {layers.tau && (phase === 'complete' || phase === 'scan_complete') && isAboveTau && (
                   <div style={{
                     position: 'absolute', inset: 0,
                     border: '1px solid #4ecca3',
@@ -533,7 +829,7 @@ function UnifiedViewport() {
                 )}
 
                 {/* Layer: manual selection borders */}
-                {phase === 'complete' && manualSelection.has(`${cell.row},${cell.col}`) && (
+                {(phase === 'complete' || phase === 'scan_complete') && manualSelection.has(`${cell.row},${cell.col}`) && (
                   <div style={{
                     position: 'absolute', inset: 0,
                     border: '2px solid #e94560',
@@ -671,6 +967,15 @@ function UnifiedViewport() {
   );
 }
 
+function MainViewport() {
+  const { dimensions } = useRidgeStore();
+
+  if (dimensions === 3) {
+    return <RidgeViewer3D />;
+  }
+  return <UnifiedViewport />;
+}
+
 export default function App() {
   return (
     <div style={{ background: '#0a0a1a', height: '100vh', color: '#fff', fontFamily: 'system-ui',
@@ -682,8 +987,9 @@ export default function App() {
       </div>
       <PromptInput />
       <ProgressBar />
+      <ScanCompletePanel />
       <RefinePanel />
-      <UnifiedViewport />
+      <MainViewport />
     </div>
   );
 }

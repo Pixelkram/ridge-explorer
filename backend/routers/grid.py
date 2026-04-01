@@ -7,12 +7,33 @@ from backend.models import (
     GridStartRequest, GridStartResponse, GridStatusResponse, CellStatus,
     RenderHQRequest, RefineRequest, RefineResponse,
     SeedProbeRequest, SeedProbeResponse, SeedProbeStatus,
+    FastScanRequest, FastScanResponse,
+    GenerateSelectedRequest, GenerateSelectedResponse,
 )
-from backend.services.gpu_pool import GenerateTask, HQTask
+from backend.services.gpu_pool import GenerateTask, HQTask, FastScanTask
 from backend import config
 
 
 router = APIRouter(prefix="/api/grid")
+
+
+def _flatten_cells(job):
+    """Flatten 2D or 3D cell arrays into a flat list of CellStatus."""
+    flat = []
+    is_3d = job.get("dimensions", 2) == 3
+
+    if is_3d:
+        for row in job["cells"]:
+            for col_list in row:
+                for cell in col_list:
+                    if cell is not None:
+                        flat.append(CellStatus(**cell))
+    else:
+        for row in job["cells"]:
+            for cell in row:
+                if cell is not None:
+                    flat.append(CellStatus(**cell))
+    return flat
 
 
 @router.post("/start", response_model=GridStartResponse)
@@ -22,11 +43,16 @@ async def start_grid(req: GridStartRequest, request: Request):
     alphas = np.linspace(config.ALPHA_RANGE[0], config.ALPHA_RANGE[1], gs)
     betas = np.linspace(config.BETA_RANGE[0], config.BETA_RANGE[1], gs)
 
+    is_3d = req.dimensions == 3
+    gammas = np.linspace(config.ALPHA_RANGE[0], config.ALPHA_RANGE[1], gs) if is_3d else None
+    use_slerp = is_3d  # enable SLERP for 3D by default
+
     jobs = request.app.state.jobs
     pool = request.app.state.gpu_pool
 
     seeds = list(range(req.seed, req.seed + req.seed_count))
-    total_cells_all = gs * gs * len(seeds)
+    cells_per_seed = gs * gs * gs if is_3d else gs * gs
+    total_cells_all = cells_per_seed * len(seeds)
 
     # Create a sub-job per seed
     sub_job_ids = []
@@ -35,7 +61,9 @@ async def start_grid(req: GridStartRequest, request: Request):
         jobs[sub_id] = _make_job(sub_id, gs, alphas, betas,
                                  req.prompt_a, req.prompt_b, req.prompt_c, seed,
                                  height=req.height, width=req.width,
-                                 steps=req.steps, guidance_scale=req.guidance_scale)
+                                 steps=req.steps, guidance_scale=req.guidance_scale,
+                                 dimensions=req.dimensions, prompt_d=req.prompt_d,
+                                 gammas=gammas, use_slerp=use_slerp)
         sub_job_ids.append(sub_id)
 
         chunks = [list(range(gs))[i::pool.n_gpus] for i in range(pool.n_gpus)]
@@ -48,6 +76,9 @@ async def start_grid(req: GridStartRequest, request: Request):
                     grid_size=gs, seed=seed,
                     height=req.height, width=req.width,
                     steps=req.steps, guidance_scale=req.guidance_scale,
+                    prompt_d=req.prompt_d, gammas=gammas,
+                    grid_size_z=gs if is_3d else 0,
+                    use_slerp=use_slerp,
                 ))
 
     # Master job aggregates all seeds
@@ -61,69 +92,89 @@ async def start_grid(req: GridStartRequest, request: Request):
         jobs[master_id] = {
             "phase": "generating",
             "status": "running",
+            "dimensions": req.dimensions,
             "grid_size": gs,
             "total_cells": total_cells_all,
             "cells_generated": 0,
             "prompt_a": req.prompt_a,
             "prompt_b": req.prompt_b,
             "prompt_c": req.prompt_c,
+            "prompt_d": req.prompt_d,
             "seed": req.seed,
             "seeds": seeds,
             "sub_job_ids": sub_job_ids,
             "height": req.height, "width": req.width,
             "steps": req.steps, "guidance_scale": req.guidance_scale,
-            "alphas": alphas, "betas": betas,
-            "embeddings": np.zeros((gs, gs, 768)),
+            "use_slerp": use_slerp,
+            "alphas": alphas, "betas": betas, "gammas": gammas,
+            "embeddings": np.zeros((gs, gs, gs, 768)) if is_3d else np.zeros((gs, gs, 768)),
             "sensitivity": None, "clusters": None,
             "thumbnails": {}, "thumbnail_hashes": {},
-            "cells": [[{
-                "row": i, "col": j,
-                "alpha": float(alphas[i]), "beta": float(betas[j]),
-                "status": "pending",
-                "sensitivity": None, "cluster": None,
-                "thumbnail_url": None, "hq_url": None, "span": 1,
-            } for j in range(gs)] for i in range(gs)],
+            "cells": jobs[sub_job_ids[0]]["cells"],  # use first sub's cell structure
             "heatmap_path": None, "overlay_path": None,
             "cluster_path": None, "image_grid_path": None,
+            "ridge_mesh_path": None,
             "render_version": 0,
         }
 
-    return GridStartResponse(job_id=master_id, total_cells=total_cells_all, status="running")
+    return GridStartResponse(job_id=master_id, total_cells=total_cells_all,
+                             dimensions=req.dimensions, status="running")
 
 
 def _make_job(job_id, gs, alphas, betas, prompt_a, prompt_b, prompt_c, seed,
-              height=256, width=256, steps=4, guidance_scale=4.0):
+              height=256, width=256, steps=4, guidance_scale=4.0,
+              dimensions=2, prompt_d="", gammas=None, use_slerp=False):
+    if dimensions == 3 and gammas is not None:
+        gs_z = len(gammas)
+        total = gs * gs * gs_z
+        cells = [[[{
+            "row": i, "col": j, "depth": k,
+            "alpha": float(alphas[i]), "beta": float(betas[j]), "gamma": float(gammas[k]),
+            "status": "pending",
+            "sensitivity": None, "cluster": None,
+            "thumbnail_url": None, "hq_url": None, "span": 1,
+        } for k in range(gs_z)] for j in range(gs)] for i in range(gs)]
+        embeddings = np.zeros((gs, gs, gs_z, 768))
+    else:
+        total = gs * gs
+        cells = [[{
+            "row": i, "col": j,
+            "alpha": float(alphas[i]), "beta": float(betas[j]),
+            "status": "pending",
+            "sensitivity": None, "cluster": None,
+            "thumbnail_url": None, "hq_url": None, "span": 1,
+        } for j in range(gs)] for i in range(gs)]
+        embeddings = np.zeros((gs, gs, 768))
+
     return {
         "phase": "generating",
         "status": "running",
+        "dimensions": dimensions,
         "grid_size": gs,
-        "total_cells": gs * gs,
+        "total_cells": total,
         "cells_generated": 0,
         "prompt_a": prompt_a,
         "prompt_b": prompt_b,
         "prompt_c": prompt_c,
+        "prompt_d": prompt_d,
         "seed": seed,
         "height": height,
         "width": width,
         "steps": steps,
         "guidance_scale": guidance_scale,
+        "use_slerp": use_slerp,
         "alphas": alphas,
         "betas": betas,
-        "embeddings": np.zeros((gs, gs, 768)),
+        "gammas": gammas,
+        "embeddings": embeddings,
         "sensitivity": None,
         "clusters": None,
         "thumbnails": {},
         "thumbnail_hashes": {},
-        "cells": [[{
-            "row": i, "col": j,
-            "alpha": float(alphas[i]), "beta": float(betas[j]),
-            "status": "pending",
-            "sensitivity": None, "cluster": None,
-            "thumbnail_url": None, "hq_url": None,
-            "span": 1,
-        } for j in range(gs)] for i in range(gs)],
+        "cells": cells,
         "heatmap_path": None, "overlay_path": None,
         "cluster_path": None, "image_grid_path": None,
+        "ridge_mesh_path": None,
         "render_version": 0,
     }
 
@@ -231,7 +282,7 @@ def _refine_single_job(sub_id, jobs, refine_positions, mult, cache, pool):
 
     pre_filled = sum(1 for row in new_cells for c in row if c is not None and c["status"] == "generated")
 
-    jobs[sub_id] = {
+    new_job = {
         "phase": "generating", "status": "running",
         "grid_size": new_gs,
         "total_cells": pre_filled + len(needs_generation),
@@ -252,6 +303,12 @@ def _refine_single_job(sub_id, jobs, refine_positions, mult, cache, pool):
         "cluster_path": None, "image_grid_path": None,
         "render_version": old.get("render_version", 0) + 1,
     }
+    # Propagate job type (e.g. fast_scan) so analysis phase knows the context
+    if old.get("type"):
+        new_job["type"] = old["type"]
+    # Refine always runs full analysis (unlike initial generate-selected)
+    new_job["_run_analysis"] = True
+    jobs[sub_id] = new_job
 
     # Submit GPU tasks
     active_frozen = frozenset(needs_generation)
@@ -275,6 +332,305 @@ def _refine_single_job(sub_id, jobs, refine_positions, mult, cache, pool):
     return needs_generation, new_gs
 
 
+async def _refine_3d(job_id: str, req: RefineRequest, request: Request):
+    """3D refine: expand grid, only generate new cells where sensitivity >= tau threshold.
+    Non-selected cells get their embeddings copied from the nearest old cell."""
+    jobs = request.app.state.jobs
+    master = jobs.get(job_id)
+    pool = request.app.state.gpu_pool
+    cache = request.app.state.cache
+    mult = req.multiplier
+    old_gs = master["grid_size"]
+    new_gs = old_gs * mult
+    sensitivity = master["sensitivity"]
+
+    # Compute threshold from 3D sensitivity
+    real_sens = sensitivity[sensitivity > 0]
+    if len(real_sens) == 0:
+        return RefineResponse(refine_job_id=job_id, parent_job_id=job_id,
+                              total_cells=0, status="no_cells")
+    median = float(np.median(real_sens))
+    threshold = median * req.tau
+
+    old_alphas = master["alphas"]
+    old_betas = master["betas"]
+    old_gammas = master["gammas"]
+
+    # New coordinates
+    da = old_alphas[1] - old_alphas[0] if old_gs > 1 else 1.0
+    new_alphas = np.zeros(new_gs)
+    new_betas = np.zeros(new_gs)
+    new_gammas = np.zeros(new_gs)
+    for i in range(old_gs):
+        for si in range(mult):
+            new_alphas[i * mult + si] = old_alphas[i] - da / 2 + da * (si + 0.5) / mult
+            new_betas[i * mult + si] = old_betas[i] - da / 2 + da * (si + 0.5) / mult
+            new_gammas[i * mult + si] = old_gammas[i] - da / 2 + da * (si + 0.5) / mult
+    new_alphas = np.clip(new_alphas, 0, 1)
+    new_betas = np.clip(new_betas, 0, 1)
+    new_gammas = np.clip(new_gammas, 0, 1)
+
+    # Determine which old cells are above threshold → need generation
+    needs_generation = set()  # (ni, nj, nk) in new grid
+    new_embeddings = np.zeros((new_gs, new_gs, new_gs, 768))
+
+    for i in range(old_gs):
+        for j in range(old_gs):
+            for k in range(old_gs):
+                above = sensitivity[i, j, k] >= threshold
+                for si in range(mult):
+                    for sj in range(mult):
+                        for sk in range(mult):
+                            ni, nj, nk = i*mult+si, j*mult+sj, k*mult+sk
+                            if above:
+                                needs_generation.add((ni, nj, nk))
+                            else:
+                                # Copy parent embedding
+                                new_embeddings[ni, nj, nk] = master["embeddings"][i, j, k]
+
+    cells_to_gen = len(needs_generation)
+    if cells_to_gen == 0:
+        return RefineResponse(refine_job_id=job_id, parent_job_id=job_id,
+                              total_cells=0, status="no_cells")
+
+    # Build new 3D cell array
+    new_cells = [[[None for _ in range(new_gs)] for _ in range(new_gs)] for _ in range(new_gs)]
+    pre_filled = 0
+
+    for i in range(new_gs):
+        for j in range(new_gs):
+            for k in range(new_gs):
+                if (i, j, k) in needs_generation:
+                    new_cells[i][j][k] = {
+                        "row": i, "col": j, "depth": k,
+                        "alpha": float(new_alphas[i]), "beta": float(new_betas[j]),
+                        "gamma": float(new_gammas[k]),
+                        "status": "pending",
+                        "sensitivity": None, "cluster": None,
+                        "thumbnail_url": None, "hq_url": None, "span": 1,
+                    }
+                else:
+                    # Copy from nearest parent
+                    oi, oj, ok = i // mult, j // mult, k // mult
+                    parent_key = (oi, oj, ok) if (oi, oj, ok) in master["thumbnails"] else None
+                    thumb_url = None
+                    if parent_key and parent_key in master["thumbnail_hashes"]:
+                        h = master["thumbnail_hashes"][parent_key]
+                        thumb_url = cache.url(h)
+
+                    new_cells[i][j][k] = {
+                        "row": i, "col": j, "depth": k,
+                        "alpha": float(new_alphas[i]), "beta": float(new_betas[j]),
+                        "gamma": float(new_gammas[k]),
+                        "status": "generated",
+                        "sensitivity": None, "cluster": None,
+                        "thumbnail_url": thumb_url, "hq_url": None, "span": 1,
+                    }
+                    pre_filled += 1
+
+    total = pre_filled + cells_to_gen
+
+    jobs[job_id] = {
+        "phase": "generating", "status": "running",
+        "dimensions": 3,
+        "grid_size": new_gs,
+        "total_cells": total,
+        "cells_generated": pre_filled,
+        "prompt_a": master["prompt_a"], "prompt_b": master["prompt_b"],
+        "prompt_c": master.get("prompt_c", ""), "prompt_d": master.get("prompt_d", ""),
+        "seed": master["seed"],
+        "height": master.get("height", 256), "width": master.get("width", 256),
+        "steps": master.get("steps", 4), "guidance_scale": master.get("guidance_scale", 4.0),
+        "use_slerp": master.get("use_slerp", True),
+        "alphas": new_alphas, "betas": new_betas, "gammas": new_gammas,
+        "embeddings": new_embeddings,
+        "sensitivity": None, "clusters": None,
+        "thumbnails": {}, "thumbnail_hashes": {},
+        "cells": new_cells,
+        "heatmap_path": None, "overlay_path": None,
+        "cluster_path": None, "image_grid_path": None,
+        "ridge_mesh_path": None,
+        "render_version": master.get("render_version", 0) + 1,
+    }
+
+    # Copy parent thumbnails for pre-filled cells
+    for i in range(new_gs):
+        for j in range(new_gs):
+            for k in range(new_gs):
+                if (i, j, k) not in needs_generation:
+                    oi, oj, ok = i // mult, j // mult, k // mult
+                    if (oi, oj, ok) in master["thumbnails"]:
+                        jobs[job_id]["thumbnails"][(i, j, k)] = master["thumbnails"][(oi, oj, ok)]
+                        jobs[job_id]["thumbnail_hashes"][(i, j, k)] = master["thumbnail_hashes"].get((oi, oj, ok), "")
+
+    # Submit GPU tasks only for cells above threshold
+    active_frozen = frozenset(needs_generation)
+    rows_needing = sorted(set(ni for ni, nj, nk in needs_generation))
+    chunks = [rows_needing[i::pool.n_gpus] for i in range(pool.n_gpus)]
+
+    for chunk in chunks:
+        if chunk:
+            pool.submit(GenerateTask(
+                job_id=job_id, row_indices=chunk,
+                alphas=new_alphas, betas=new_betas,
+                prompt_a=master["prompt_a"], prompt_b=master["prompt_b"],
+                prompt_c=master.get("prompt_c", ""),
+                grid_size=new_gs, seed=master["seed"],
+                height=master.get("height", 256), width=master.get("width", 256),
+                steps=master.get("steps", 4), guidance_scale=master.get("guidance_scale", 4.0),
+                prompt_d=master.get("prompt_d", ""), gammas=new_gammas,
+                grid_size_z=new_gs, use_slerp=master.get("use_slerp", True),
+                active_cells=active_frozen,
+            ))
+
+    return RefineResponse(
+        refine_job_id=job_id, parent_job_id=job_id,
+        total_cells=cells_to_gen, status="running",
+    )
+
+
+@router.post("/fast-scan", response_model=FastScanResponse)
+async def fast_scan(req: FastScanRequest, request: Request):
+    """Fast ridge detection: 1-step latents + Jacobian spectral norm.
+
+    ~33x cheaper than full DINOv2 (1 forward pass per point, no image decode).
+    Returns sensitivity map in ~1-2 minutes for a 50×50 grid on 6 GPUs.
+    """
+    job_id = str(uuid.uuid4())[:8]
+    gs = req.grid_size
+    alphas = np.linspace(config.ALPHA_RANGE[0], config.ALPHA_RANGE[1], gs)
+    betas = np.linspace(config.BETA_RANGE[0], config.BETA_RANGE[1], gs)
+
+    jobs = request.app.state.jobs
+    pool = request.app.state.gpu_pool
+
+    total = gs * gs
+
+    cells = [[{
+        "row": i, "col": j,
+        "alpha": float(alphas[i]), "beta": float(betas[j]),
+        "status": "scanning",
+        "sensitivity": None, "cluster": None,
+        "thumbnail_url": None, "hq_url": None, "span": 1,
+    } for j in range(gs)] for i in range(gs)]
+
+    jobs[job_id] = {
+        "type": "fast_scan",
+        "phase": "scanning",
+        "status": "running",
+        "dimensions": 2,
+        "grid_size": gs,
+        "grid_size_b": gs,
+        "total_cells": total,
+        "cells_generated": 0,
+        "prompt_a": req.prompt_a,
+        "prompt_b": req.prompt_b,
+        "prompt_c": req.prompt_c,
+        "prompt_d": "",
+        "seed": req.seed,
+        "seeds": [req.seed],
+        "sub_job_ids": [],
+        "height": req.height, "width": req.width,
+        "guidance_scale": req.guidance_scale,
+        "alphas": alphas, "betas": betas,
+        "latents": None,  # initialized when first LatentResult arrives
+        "anisotropy": None,
+        "sensitivity": None,
+        "clusters": None,
+        "embeddings": np.zeros((gs, gs, 768)),
+        "thumbnails": {}, "thumbnail_hashes": {},
+        "cells": cells,
+        "heatmap_path": None, "overlay_path": None,
+        "cluster_path": None, "image_grid_path": None,
+        "render_version": 0,
+    }
+
+    # Distribute rows across GPUs
+    chunks = [list(range(gs))[i::pool.n_gpus] for i in range(pool.n_gpus)]
+    for chunk in chunks:
+        if chunk:
+            pool.submit(FastScanTask(
+                job_id=job_id, row_indices=chunk,
+                alphas=alphas, betas=betas,
+                prompt_a=req.prompt_a, prompt_b=req.prompt_b, prompt_c=req.prompt_c,
+                grid_size=gs, seed=req.seed,
+                height=req.height, width=req.width,
+                guidance_scale=req.guidance_scale,
+            ))
+
+    return FastScanResponse(job_id=job_id, total_cells=total, status="running")
+
+
+@router.post("/{job_id}/generate-selected", response_model=GenerateSelectedResponse)
+async def generate_selected(job_id: str, req: GenerateSelectedRequest, request: Request):
+    """Generate full images for cells above tau threshold after a fast scan."""
+    jobs = request.app.state.jobs
+    job = jobs.get(job_id)
+    if not job or job.get("type") != "fast_scan" or job["phase"] != "scan_complete":
+        return GenerateSelectedResponse(status="error", total_cells=0)
+
+    pool = request.app.state.gpu_pool
+    gs = job["grid_size"]
+    sensitivity = job["sensitivity"]
+
+    # Compute threshold
+    real_sens = sensitivity[sensitivity > 0]
+    if len(real_sens) == 0:
+        return GenerateSelectedResponse(status="no_cells", total_cells=0)
+    median = float(np.median(real_sens))
+    threshold = median * req.tau
+
+    # Find cells above threshold
+    active_cells = set()
+    for i in range(gs):
+        for j in range(gs):
+            if sensitivity[i, j] >= threshold:
+                active_cells.add((i, j))
+
+    if not active_cells:
+        return GenerateSelectedResponse(status="no_cells", total_cells=0)
+
+    # Transition job to generating phase
+    job["phase"] = "generating"
+    job["status"] = "running"
+    job["total_cells"] = len(active_cells)
+    job["cells_generated"] = 0
+    job["height"] = req.height
+    job["width"] = req.width
+    job["steps"] = req.steps
+    job["guidance_scale"] = req.guidance_scale
+    job["embeddings"] = np.zeros((gs, gs, 768))
+    job["render_version"] = job.get("render_version", 0) + 1
+
+    # Update cell statuses
+    for i in range(gs):
+        for j in range(gs):
+            if (i, j) in active_cells:
+                job["cells"][i][j]["status"] = "pending"
+            else:
+                job["cells"][i][j]["status"] = "skipped"
+
+    # Submit GPU tasks
+    active_frozen = frozenset(active_cells)
+    rows_needing = sorted(set(i for i, j in active_cells))
+    chunks = [rows_needing[i::pool.n_gpus] for i in range(pool.n_gpus)]
+
+    for chunk in chunks:
+        if chunk:
+            pool.submit(GenerateTask(
+                job_id=job_id, row_indices=chunk,
+                alphas=job["alphas"], betas=job["betas"],
+                prompt_a=job["prompt_a"], prompt_b=job["prompt_b"],
+                prompt_c=job.get("prompt_c", ""),
+                grid_size=gs, seed=job["seed"],
+                height=req.height, width=req.width,
+                steps=req.steps, guidance_scale=req.guidance_scale,
+                active_cells=active_frozen,
+            ))
+
+    return GenerateSelectedResponse(status="running", total_cells=len(active_cells))
+
+
 @router.post("/{job_id}/refine", response_model=RefineResponse)
 async def refine_grid(job_id: str, req: RefineRequest, request: Request):
     """Refine grid in-place. For multi-seed, refines all sub-jobs."""
@@ -283,6 +639,10 @@ async def refine_grid(job_id: str, req: RefineRequest, request: Request):
     if not master or master["phase"] != "complete":
         return RefineResponse(refine_job_id=job_id, parent_job_id=job_id,
                               total_cells=0, status="error")
+
+    # 3D refine: regenerate at higher resolution (no span system)
+    if master.get("dimensions", 2) == 3:
+        return await _refine_3d(job_id, req, request)
 
     sensitivity = master["sensitivity"]
     if sensitivity is None:
@@ -473,18 +833,15 @@ async def grid_status(job_id: str, request: Request):
             image_grid_url=f"/api/grid/{job_id}/images.png?v={v}" if job.get("image_grid_path") else None,
         )
 
-    # Single seed — same as before
-    flat_cells = []
-    for row in job["cells"]:
-        for cell in row:
-            if cell is not None:
-                flat_cells.append(CellStatus(**cell))
+    # Single seed
+    flat_cells = _flatten_cells(job)
 
     v = job.get("render_version", 0)
     return GridStatusResponse(
         job_id=job_id,
         status=job["status"],
         phase=job["phase"],
+        dimensions=job.get("dimensions", 2),
         grid_size=job["grid_size"],
         cells_generated=job["cells_generated"],
         cells_total=job["total_cells"],
@@ -493,11 +850,21 @@ async def grid_status(job_id: str, request: Request):
         prompt_a=job["prompt_a"],
         prompt_b=job["prompt_b"],
         prompt_c=job.get("prompt_c", ""),
+        prompt_d=job.get("prompt_d", ""),
         heatmap_url=f"/api/grid/{job_id}/heatmap.png?v={v}" if job.get("heatmap_path") else None,
         overlay_url=f"/api/grid/{job_id}/overlay.png?v={v}" if job.get("overlay_path") else None,
         cluster_url=f"/api/grid/{job_id}/clusters.png?v={v}" if job.get("cluster_path") else None,
         image_grid_url=f"/api/grid/{job_id}/images.png?v={v}" if job.get("image_grid_path") else None,
+        ridge_mesh_url=f"/api/grid/{job_id}/ridge_mesh.json?v={v}" if job.get("ridge_mesh_path") else None,
     )
+
+
+@router.get("/{job_id}/ridge_mesh.json")
+async def get_ridge_mesh(job_id: str, request: Request):
+    job = request.app.state.jobs.get(job_id)
+    if not job or not job.get("ridge_mesh_path"):
+        return {"error": "not ready"}
+    return FileResponse(job["ridge_mesh_path"], media_type="application/json")
 
 
 def _compute_averaged_sensitivity(master, jobs, sub_ids):
