@@ -55,6 +55,10 @@ class FastScanTask:
     height: int
     width: int
     guidance_scale: float = 1.0  # 1.0 = no CFG, single forward pass
+    # 3D mode
+    prompt_d: str = ""
+    gammas: np.ndarray | None = None
+    grid_size_z: int = 0  # 0 = 2D mode
 
 
 @dataclass
@@ -88,6 +92,7 @@ class LatentBatchResult:
     row: int
     cols: list[int]
     latent_vectors: np.ndarray  # (n_cols, latent_dim) normalized
+    depths: list[int] | None = None  # z-indices for 3D mode
 
 
 @dataclass
@@ -182,8 +187,8 @@ def _image_to_thumbnail(image, size=None):
 
 
 class _ScanContext:
-    """Shared state for batched 1-step latent evaluation."""
-    __slots__ = ('emb_a', 'emb_b', 'emb_c', 'noise_t', 'text_ids_t',
+    """Shared state for batched 1-step latent evaluation. Supports 2D and 3D."""
+    __slots__ = ('emb_a', 'emb_b', 'emb_c', 'emb_d', 'noise_t', 'text_ids_t',
                  'latent_ids_t', 'batch_t', 'transformer', 'img_tokens')
 
     def __init__(self, pipe, device, task):
@@ -193,8 +198,11 @@ class _ScanContext:
             self.emb_a, text_ids = pipe.encode_prompt(prompt=task.prompt_a)
             self.emb_b, _ = pipe.encode_prompt(prompt=task.prompt_b)
             self.emb_c = None
+            self.emb_d = None
             if task.prompt_c:
                 self.emb_c, _ = pipe.encode_prompt(prompt=task.prompt_c)
+            if getattr(task, 'prompt_d', '') and task.prompt_d:
+                self.emb_d, _ = pipe.encode_prompt(prompt=task.prompt_d)
 
         gen = torch.Generator(device=device).manual_seed(task.seed)
         in_ch = pipe.transformer.config.in_channels
@@ -217,17 +225,23 @@ class _ScanContext:
         self.batch_t = (t_val / 1000).to(t_dtype)
 
     def evaluate_points(self, points, batch_size=8):
-        """Evaluate a list of (alpha, beta) points. Returns (N, D) normalized latents."""
+        """Evaluate a list of (alpha, beta[, gamma]) points. Returns (N, D) normalized latents."""
         all_latents = []
         for b_start in range(0, len(points), batch_size):
             batch = points[b_start:b_start + batch_size]
             bs = len(batch)
 
             embeds = []
-            for alpha, beta in batch:
-                if self.emb_c is not None:
+            for pt in batch:
+                if len(pt) == 3 and self.emb_d is not None:
+                    alpha, beta, gamma = pt
+                    e = ((1 - alpha - beta - gamma) * self.emb_a +
+                         alpha * self.emb_b + beta * self.emb_c + gamma * self.emb_d)
+                elif self.emb_c is not None:
+                    alpha, beta = pt[0], pt[1]
                     e = (1 - alpha - beta) * self.emb_a + alpha * self.emb_b + beta * self.emb_c
                 else:
+                    alpha, beta = pt[0], pt[1]
                     e = (1 - alpha) * self.emb_a + alpha * self.emb_b
                 embeds.append(e)
             batch_embeds = torch.cat(embeds, dim=0).to(self.noise_t.dtype)
@@ -260,8 +274,7 @@ class _ScanContext:
 def _process_fast_scan(gpu_id, device, pipe, task, result_queue):
     """Batched fast scan: bypass pipeline overhead, call transformer directly.
 
-    Evaluates all grid points assigned to this worker using batched
-    direct transformer calls, eliminating per-point pipeline overhead.
+    Supports both 2D (3 prompts) and 3D (4 prompts) grids.
     """
     BATCH_SIZE = 8
 
@@ -269,19 +282,39 @@ def _process_fast_scan(gpu_id, device, pipe, task, result_queue):
     gs = task.grid_size
     alphas = task.alphas
     betas = task.betas
+    is_3d = task.grid_size_z > 0 and task.gammas is not None
 
-    print(f"[GPU {gpu_id}] Fast scan setup done: {ctx.img_tokens} img tokens, "
+    mode = "3D" if is_3d else "2D"
+    print(f"[GPU {gpu_id}] Fast scan setup done: {mode}, {ctx.img_tokens} img tokens, "
           f"batch={BATCH_SIZE}", flush=True)
 
-    for i in task.row_indices:
-        points = [(float(alphas[i]), float(betas[j])) for j in range(gs)]
-        latents = ctx.evaluate_points(points, BATCH_SIZE)
-        result_queue.put(LatentBatchResult(
-            job_id=task.job_id, gpu_id=gpu_id,
-            row=i, cols=list(range(gs)),
-            latent_vectors=latents,
-        ))
-        print(f"[GPU {gpu_id}] Fast scan {task.job_id} row {i+1}/{gs}", flush=True)
+    if is_3d:
+        gammas = task.gammas
+        gs_z = task.grid_size_z
+        for i in task.row_indices:
+            alpha_i = float(alphas[i])
+            for j in range(gs):
+                beta_j = float(betas[j])
+                # Evaluate all z-slices for this (i, j) column
+                points = [(alpha_i, beta_j, float(gammas[k])) for k in range(gs_z)]
+                latents = ctx.evaluate_points(points, BATCH_SIZE)
+                result_queue.put(LatentBatchResult(
+                    job_id=task.job_id, gpu_id=gpu_id,
+                    row=i, cols=[j] * gs_z,
+                    latent_vectors=latents,
+                    depths=list(range(gs_z)),
+                ))
+            print(f"[GPU {gpu_id}] Fast scan {task.job_id} row {i+1}/{gs}", flush=True)
+    else:
+        for i in task.row_indices:
+            points = [(float(alphas[i]), float(betas[j])) for j in range(gs)]
+            latents = ctx.evaluate_points(points, BATCH_SIZE)
+            result_queue.put(LatentBatchResult(
+                job_id=task.job_id, gpu_id=gpu_id,
+                row=i, cols=list(range(gs)),
+                latent_vectors=latents,
+            ))
+            print(f"[GPU {gpu_id}] Fast scan {task.job_id} row {i+1}/{gs}", flush=True)
 
 
 

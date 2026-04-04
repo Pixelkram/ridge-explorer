@@ -201,17 +201,19 @@ export const useRidgeStore = create<RidgeState>((set, get) => ({
   },
 
   fastScan: async () => {
-    const { promptA, promptB, promptC, gridSize, seed, stopPolling } = get();
+    const { promptA, promptB, promptC, promptD, dimensions, gridSize, seed, stopPolling } = get();
     stopPolling();
     set({
       phase: 'scanning', cellsGenerated: 0, cellsTotal: 0, cells: [],
       heatmapUrl: null, overlayUrl: null, clusterUrl: null, imageGridUrl: null,
-      jobId: null, currentGridSize: gridSize, activeView: 'images',
+      ridgeMeshUrl: null, jobId: null, currentGridSize: gridSize, activeView: 'images',
       shouldCenter: true, manualSelection: new Set<string>(),
     });
     try {
       const res = await startFastScan({
         prompt_a: promptA, prompt_b: promptB, prompt_c: promptC,
+        prompt_d: dimensions === 3 ? promptD : undefined,
+        dimensions,
         grid_size: gridSize, seed,
       });
       set({ jobId: res.job_id, cellsTotal: res.total_cells });

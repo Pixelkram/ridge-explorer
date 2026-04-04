@@ -104,6 +104,8 @@ class FastScanRequest(BaseModel):
     prompt_a: str
     prompt_b: str
     prompt_c: str = ""
+    prompt_d: str = ""  # 4th prompt for 3D mode
+    dimensions: int = 2  # 2 or 3
     grid_size: int = 50
     seed: int = 42
     height: int = 256

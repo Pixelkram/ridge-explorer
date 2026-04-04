@@ -30,14 +30,26 @@ async def result_collector(app: FastAPI):
                 continue
 
             if isinstance(r, LatentBatchResult):
-                # Fast scan batch result — entire row of latent vectors
+                # Fast scan batch result — row of latent vectors (2D or 3D)
+                is_3d_scan = job.get("dimensions", 2) == 3
                 if job["latents"] is None:
                     gs = job["grid_size"]
                     dim = r.latent_vectors.shape[1]
-                    job["latents"] = np.zeros((gs, gs, dim))
-                for idx, col in enumerate(r.cols):
-                    job["latents"][r.row, col] = r.latent_vectors[idx]
-                    job["cells"][r.row][col]["status"] = "scanned"
+                    if is_3d_scan:
+                        gs_z = job.get("grid_size_z", gs)
+                        job["latents"] = np.zeros((gs, gs, gs_z, dim))
+                    else:
+                        job["latents"] = np.zeros((gs, gs, dim))
+
+                if is_3d_scan and r.depths is not None:
+                    for idx in range(len(r.cols)):
+                        col, depth = r.cols[idx], r.depths[idx]
+                        job["latents"][r.row, col, depth] = r.latent_vectors[idx]
+                        job["cells"][r.row][col][depth]["status"] = "scanned"
+                else:
+                    for idx, col in enumerate(r.cols):
+                        job["latents"][r.row, col] = r.latent_vectors[idx]
+                        job["cells"][r.row][col]["status"] = "scanned"
                 job["cells_generated"] += len(r.cols)
 
                 if job["cells_generated"] >= job["total_cells"] and job["phase"] == "scanning":
@@ -230,34 +242,55 @@ def _analyze_and_render(job: dict, job_id: str):
 
 
 def _analyze_fast_scan(job: dict, job_id: str):
-    """Compute Jacobian spectral norm from 1-step latents."""
-    from backend.services.ridge_detector import compute_jacobian_sensitivity
+    """Compute Jacobian spectral norm from 1-step latents. Supports 2D and 3D."""
+    from backend.services.ridge_detector import compute_jacobian_sensitivity, compute_jacobian_sensitivity_3d
 
     gs = job["grid_size"]
+    is_3d = job.get("dimensions", 2) == 3
     latents = job["latents"]
 
-    spectral, anisotropy = compute_jacobian_sensitivity(latents)
+    if is_3d:
+        spectral, anisotropy = compute_jacobian_sensitivity_3d(latents)
+    else:
+        spectral, anisotropy = compute_jacobian_sensitivity(latents)
+
     job["sensitivity"] = spectral
     job["anisotropy"] = anisotropy
 
-    # Update cell sensitivities
-    for i in range(gs):
-        for j in range(gs):
-            if job["cells"][i][j] is not None:
-                job["cells"][i][j]["sensitivity"] = float(spectral[i, j])
-                job["cells"][i][j]["status"] = "scanned"
-
-    # Render heatmap
     results_dir = config.RESULTS_DIR / job_id
     results_dir.mkdir(parents=True, exist_ok=True)
 
-    heatmap_path = results_dir / "heatmap.png"
-    render_heatmap(spectral, job["alphas"], job["betas"], heatmap_path,
-                   prompt_a=job["prompt_a"], prompt_b=job["prompt_b"],
-                   prompt_c=job.get("prompt_c", ""))
-    job["heatmap_path"] = str(heatmap_path)
+    if is_3d:
+        gs_z = latents.shape[2]
+        for i in range(gs):
+            for j in range(gs):
+                for k in range(gs_z):
+                    if job["cells"][i][j][k] is not None:
+                        job["cells"][i][j][k]["sensitivity"] = float(spectral[i, j, k])
+                        job["cells"][i][j][k]["status"] = "scanned"
 
-    # Save sensitivity
+        # Extract ridge mesh for 3D visualization
+        from backend.services.ridge_detector import extract_ridge_mesh
+        import json
+        mesh = extract_ridge_mesh(spectral, tau=1.5)
+        if mesh:
+            mesh_path = results_dir / "ridge_mesh.json"
+            with open(mesh_path, 'w') as f:
+                json.dump(mesh, f)
+            job["ridge_mesh_path"] = str(mesh_path)
+    else:
+        for i in range(gs):
+            for j in range(gs):
+                if job["cells"][i][j] is not None:
+                    job["cells"][i][j]["sensitivity"] = float(spectral[i, j])
+                    job["cells"][i][j]["status"] = "scanned"
+
+        heatmap_path = results_dir / "heatmap.png"
+        render_heatmap(spectral, job["alphas"], job["betas"], heatmap_path,
+                       prompt_a=job["prompt_a"], prompt_b=job["prompt_b"],
+                       prompt_c=job.get("prompt_c", ""))
+        job["heatmap_path"] = str(heatmap_path)
+
     np.save(results_dir / "spectral_norm.npy", spectral)
     np.save(results_dir / "anisotropy.npy", anisotropy)
 

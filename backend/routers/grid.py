@@ -493,55 +493,70 @@ async def _refine_3d(job_id: str, req: RefineRequest, request: Request):
 async def fast_scan(req: FastScanRequest, request: Request):
     """Fast ridge detection: 1-step latents + Jacobian spectral norm.
 
-    ~33x cheaper than full DINOv2 (1 forward pass per point, no image decode).
-    Returns sensitivity map in ~1-2 minutes for a 50×50 grid on 6 GPUs.
+    Supports both 2D (3 prompts) and 3D (4 prompts) grids.
+    ~7x faster than full DINOv2 exploration.
     """
     job_id = str(uuid.uuid4())[:8]
     gs = req.grid_size
     alphas = np.linspace(config.ALPHA_RANGE[0], config.ALPHA_RANGE[1], gs)
     betas = np.linspace(config.BETA_RANGE[0], config.BETA_RANGE[1], gs)
 
+    is_3d = req.dimensions == 3 and req.prompt_d
+    gammas = np.linspace(config.ALPHA_RANGE[0], config.ALPHA_RANGE[1], gs) if is_3d else None
+
     jobs = request.app.state.jobs
     pool = request.app.state.gpu_pool
 
-    total = gs * gs
+    total = gs * gs * gs if is_3d else gs * gs
 
-    cells = [[{
-        "row": i, "col": j,
-        "alpha": float(alphas[i]), "beta": float(betas[j]),
-        "status": "scanning",
-        "sensitivity": None, "cluster": None,
-        "thumbnail_url": None, "hq_url": None, "span": 1,
-    } for j in range(gs)] for i in range(gs)]
+    if is_3d:
+        cells = [[[{
+            "row": i, "col": j, "depth": k,
+            "alpha": float(alphas[i]), "beta": float(betas[j]), "gamma": float(gammas[k]),
+            "status": "scanning",
+            "sensitivity": None, "cluster": None,
+            "thumbnail_url": None, "hq_url": None, "span": 1,
+        } for k in range(gs)] for j in range(gs)] for i in range(gs)]
+    else:
+        cells = [[{
+            "row": i, "col": j,
+            "alpha": float(alphas[i]), "beta": float(betas[j]),
+            "status": "scanning",
+            "sensitivity": None, "cluster": None,
+            "thumbnail_url": None, "hq_url": None, "span": 1,
+        } for j in range(gs)] for i in range(gs)]
 
     jobs[job_id] = {
         "type": "fast_scan",
         "phase": "scanning",
         "status": "running",
-        "dimensions": 2,
+        "dimensions": 3 if is_3d else 2,
         "grid_size": gs,
         "grid_size_b": gs,
+        "grid_size_z": gs if is_3d else 0,
         "total_cells": total,
         "cells_generated": 0,
         "prompt_a": req.prompt_a,
         "prompt_b": req.prompt_b,
         "prompt_c": req.prompt_c,
-        "prompt_d": "",
+        "prompt_d": req.prompt_d if is_3d else "",
         "seed": req.seed,
         "seeds": [req.seed],
         "sub_job_ids": [],
         "height": req.height, "width": req.width,
         "guidance_scale": req.guidance_scale,
         "alphas": alphas, "betas": betas,
-        "latents": None,  # initialized when first LatentResult arrives
+        "gammas": gammas,
+        "latents": None,
         "anisotropy": None,
         "sensitivity": None,
         "clusters": None,
-        "embeddings": np.zeros((gs, gs, 768)),
+        "embeddings": np.zeros((gs, gs, gs, 768)) if is_3d else np.zeros((gs, gs, 768)),
         "thumbnails": {}, "thumbnail_hashes": {},
         "cells": cells,
         "heatmap_path": None, "overlay_path": None,
         "cluster_path": None, "image_grid_path": None,
+        "ridge_mesh_path": None,
         "render_version": 0,
     }
 
@@ -556,6 +571,9 @@ async def fast_scan(req: FastScanRequest, request: Request):
                 grid_size=gs, seed=req.seed,
                 height=req.height, width=req.width,
                 guidance_scale=req.guidance_scale,
+                prompt_d=req.prompt_d if is_3d else "",
+                gammas=gammas,
+                grid_size_z=gs if is_3d else 0,
             ))
 
     return FastScanResponse(job_id=job_id, total_cells=total, status="running")

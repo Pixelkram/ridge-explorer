@@ -95,6 +95,8 @@ export interface FastScanRequest {
   prompt_a: string;
   prompt_b: string;
   prompt_c: string;
+  prompt_d?: string;
+  dimensions?: number;
   grid_size: number;
   seed: number;
   height?: number;

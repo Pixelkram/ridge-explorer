@@ -88,14 +88,12 @@ function PromptInput() {
           Cancel
         </button>
       )}
-      {dimensions === 2 && (
-        <button onClick={fastScan} disabled={busy}
-                style={{ padding: '5px 14px', background: busy ? '#555' : '#0f3460',
-                         color: '#fff', border: '1px solid #4ecca3', borderRadius: 4, fontWeight: 'bold',
-                         cursor: busy ? 'not-allowed' : 'pointer', fontSize: 12 }}>
-          {busy ? '...' : 'Fast Scan'}
-        </button>
-      )}
+      <button onClick={fastScan} disabled={busy}
+              style={{ padding: '5px 14px', background: busy ? '#555' : '#0f3460',
+                       color: '#fff', border: '1px solid #4ecca3', borderRadius: 4, fontWeight: 'bold',
+                       cursor: busy ? 'not-allowed' : 'pointer', fontSize: 12 }}>
+        {busy ? '...' : 'Fast Scan'}
+      </button>
     </div>
   );
 }

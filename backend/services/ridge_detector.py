@@ -147,6 +147,70 @@ def compute_jacobian_sensitivity(latents: np.ndarray) -> tuple[np.ndarray, np.nd
     return spectral, aniso
 
 
+def compute_jacobian_sensitivity_3d(latents: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Compute 3×3 Jacobian Gram matrix spectral norm for 3D grids.
+
+    Vectorized implementation using np.gradient (2nd-order accurate everywhere).
+
+    Args:
+        latents: (gs_a, gs_b, gs_c, D) array of L2-normalized latent vectors
+
+    Returns:
+        spectral_norm: (gs_a, gs_b, gs_c) — primary ridge indicator
+        anisotropy: (gs_a, gs_b, gs_c) — min/max eigenvalue ratio
+    """
+    gs_a, gs_b, gs_c, D = latents.shape
+    da = 1.0 / (gs_a - 1) if gs_a > 1 else 1.0
+    db = 1.0 / (gs_b - 1) if gs_b > 1 else 1.0
+    dc = 1.0 / (gs_c - 1) if gs_c > 1 else 1.0
+
+    # Vectorized gradients via np.gradient (2nd-order, handles boundaries)
+    # Each is (gs_a, gs_b, gs_c, D)
+    df_da = np.gradient(latents, da, axis=0)
+    df_db = np.gradient(latents, db, axis=1)
+    df_dc = np.gradient(latents, dc, axis=2)
+
+    # Gram matrix elements: dot products over the D dimension
+    # Each is (gs_a, gs_b, gs_c)
+    g00 = np.einsum('ijkd,ijkd->ijk', df_da, df_da)
+    g11 = np.einsum('ijkd,ijkd->ijk', df_db, df_db)
+    g22 = np.einsum('ijkd,ijkd->ijk', df_dc, df_dc)
+    g01 = np.einsum('ijkd,ijkd->ijk', df_da, df_db)
+    g02 = np.einsum('ijkd,ijkd->ijk', df_da, df_dc)
+    g12 = np.einsum('ijkd,ijkd->ijk', df_db, df_dc)
+
+    # Build 3×3 Gram matrices and compute eigenvalues
+    # Stack into (gs_a, gs_b, gs_c, 3, 3)
+    gram = np.zeros((gs_a, gs_b, gs_c, 3, 3))
+    gram[..., 0, 0] = g00
+    gram[..., 1, 1] = g11
+    gram[..., 2, 2] = g22
+    gram[..., 0, 1] = gram[..., 1, 0] = g01
+    gram[..., 0, 2] = gram[..., 2, 0] = g02
+    gram[..., 1, 2] = gram[..., 2, 1] = g12
+
+    # Batched eigenvalue computation
+    eigs = np.linalg.eigvalsh(gram)  # (gs_a, gs_b, gs_c, 3), sorted ascending
+    lambda_max = np.maximum(eigs[..., -1], 0)
+    lambda_min = np.maximum(eigs[..., 0], 0)
+
+    spectral = np.sqrt(lambda_max)
+    aniso = np.where(lambda_max > 1e-10, lambda_min / lambda_max, 0.0)
+
+    # Boundary clamping
+    if gs_a >= 4:
+        spectral[0, :, :] = spectral[1, :, :]
+        spectral[-1, :, :] = spectral[-2, :, :]
+    if gs_b >= 4:
+        spectral[:, 0, :] = spectral[:, 1, :]
+        spectral[:, -1, :] = spectral[:, -2, :]
+    if gs_c >= 4:
+        spectral[:, :, 0] = spectral[:, :, 1]
+        spectral[:, :, -1] = spectral[:, :, -2]
+
+    return spectral, aniso
+
+
 def compute_clusters(embeddings: np.ndarray, eps: float = 0.1) -> np.ndarray:
     """DBSCAN clustering (works for any spatial shape)."""
     spatial_shape = embeddings.shape[:-1]
