@@ -29,107 +29,107 @@ async def result_collector(app: FastAPI):
             if not job:
                 continue
 
-            if isinstance(r, LatentBatchResult):
-                # Fast scan batch result — row of latent vectors (2D or 3D)
-                is_3d_scan = job.get("dimensions", 2) == 3
-                if job["latents"] is None:
-                    gs = job["grid_size"]
-                    dim = r.latent_vectors.shape[1]
-                    if is_3d_scan:
-                        gs_z = job.get("grid_size_z", gs)
-                        job["latents"] = np.zeros((gs, gs, gs_z, dim))
+            try:
+                if isinstance(r, LatentBatchResult):
+                    # Fast scan batch result — row of latent vectors (2D or 3D)
+                    is_3d_scan = job.get("dimensions", 2) == 3
+                    if job["latents"] is None:
+                        gs = job["grid_size"]
+                        dim = r.latent_vectors.shape[1]
+                        if is_3d_scan:
+                            gs_z = job.get("grid_size_z", gs)
+                            job["latents"] = np.zeros((gs, gs, gs_z, dim))
+                        else:
+                            job["latents"] = np.zeros((gs, gs, dim))
+
+                    if is_3d_scan and r.depths is not None:
+                        for idx in range(len(r.cols)):
+                            col, depth = r.cols[idx], r.depths[idx]
+                            job["latents"][r.row, col, depth] = r.latent_vectors[idx]
+                            job["cells"][r.row][col][depth]["status"] = "scanned"
                     else:
-                        job["latents"] = np.zeros((gs, gs, dim))
+                        for idx, col in enumerate(r.cols):
+                            job["latents"][r.row, col] = r.latent_vectors[idx]
+                            job["cells"][r.row][col]["status"] = "scanned"
+                    job["cells_generated"] += len(r.cols)
 
-                if is_3d_scan and r.depths is not None:
-                    for idx in range(len(r.cols)):
-                        col, depth = r.cols[idx], r.depths[idx]
-                        job["latents"][r.row, col, depth] = r.latent_vectors[idx]
-                        job["cells"][r.row][col][depth]["status"] = "scanned"
-                else:
-                    for idx, col in enumerate(r.cols):
-                        job["latents"][r.row, col] = r.latent_vectors[idx]
-                        job["cells"][r.row][col]["status"] = "scanned"
-                job["cells_generated"] += len(r.cols)
-
-                if job["cells_generated"] >= job["total_cells"] and job["phase"] == "scanning":
-                    job["phase"] = "analyzing"
-                    asyncio.create_task(asyncio.to_thread(
-                        _analyze_fast_scan, job, r.job_id
-                    ))
-
-            elif isinstance(r, LatentResult):
-                # Fast scan single result (legacy path)
-                if job["latents"] is None:
-                    gs = job["grid_size"]
-                    dim = r.latent_vector.shape[0]
-                    job["latents"] = np.zeros((gs, gs, dim))
-                job["latents"][r.row, r.col] = r.latent_vector
-                job["cells"][r.row][r.col]["status"] = "scanned"
-                job["cells_generated"] += 1
-
-                if job["cells_generated"] >= job["total_cells"] and job["phase"] == "scanning":
-                    job["phase"] = "analyzing"
-                    asyncio.create_task(asyncio.to_thread(
-                        _analyze_fast_scan, job, r.job_id
-                    ))
-
-            elif isinstance(r, CellResult):
-                is_3d = job.get("dimensions", 2) == 3
-
-                # Find the cell entry
-                if is_3d:
-                    cell = None
-                    try:
-                        cell = job["cells"][r.row][r.col][r.depth]
-                    except (IndexError, TypeError):
-                        pass
-                else:
-                    cell = None
-                    try:
-                        cell = job["cells"][r.row][r.col]
-                    except (IndexError, TypeError):
-                        pass
-
-                if cell is None:
-                    continue
-
-                # Save thumbnail
-                key = (r.row, r.col, r.depth) if is_3d else (r.row, r.col)
-                cache.save(r.thumbnail_hash, r.thumbnail_bytes)
-                job["thumbnails"][key] = r.thumbnail_bytes
-                job["thumbnail_hashes"][key] = r.thumbnail_hash
-
-                # Store DINOv2 embedding
-                if is_3d:
-                    job["embeddings"][r.row, r.col, r.depth] = r.dino_embedding
-                else:
-                    job["embeddings"][r.row, r.col] = r.dino_embedding
-
-                # Update cell status
-                status = "hq" if r.is_hq else "generated"
-                cell["status"] = status
-                url_key = "hq_url" if r.is_hq else "thumbnail_url"
-                cell[url_key] = cache.url(r.thumbnail_hash)
-                job["cells_generated"] += 1
-
-                # When all cells are generated, compute ridges
-                if job["cells_generated"] >= job["total_cells"] and job["phase"] == "generating":
-                    if job.get("type") == "fast_scan" and not job.get("_run_analysis"):
-                        # Fast scan initial generate-selected: sensitivity already
-                        # computed from Jacobian, skip DINOv2 analysis
-                        job["phase"] = "complete"
-                        job["status"] = "complete"
-                        job["render_version"] = job.get("render_version", 0) + 1
-                        n_imgs = sum(1 for row in job["cells"] for c in row
-                                     if c is not None and c.get("thumbnail_url"))
-                        print(f"Job {r.job_id}: fast scan image generation complete "
-                              f"({n_imgs} images)", flush=True)
-                    else:
+                    if job["cells_generated"] >= job["total_cells"] and job["phase"] == "scanning":
                         job["phase"] = "analyzing"
                         asyncio.create_task(asyncio.to_thread(
-                            _analyze_and_render, job, r.job_id
+                            _analyze_fast_scan, job, r.job_id
                         ))
+
+                elif isinstance(r, LatentResult):
+                    # Fast scan single result (legacy path)
+                    if job["latents"] is None:
+                        gs = job["grid_size"]
+                        dim = r.latent_vector.shape[0]
+                        job["latents"] = np.zeros((gs, gs, dim))
+                    job["latents"][r.row, r.col] = r.latent_vector
+                    job["cells"][r.row][r.col]["status"] = "scanned"
+                    job["cells_generated"] += 1
+
+                    if job["cells_generated"] >= job["total_cells"] and job["phase"] == "scanning":
+                        job["phase"] = "analyzing"
+                        asyncio.create_task(asyncio.to_thread(
+                            _analyze_fast_scan, job, r.job_id
+                        ))
+
+                elif isinstance(r, CellResult):
+                    is_3d = job.get("dimensions", 2) == 3
+
+                    # Find the cell entry
+                    if is_3d:
+                        cell = None
+                        try:
+                            cell = job["cells"][r.row][r.col][r.depth]
+                        except (IndexError, TypeError):
+                            pass
+                    else:
+                        cell = None
+                        try:
+                            cell = job["cells"][r.row][r.col]
+                        except (IndexError, TypeError):
+                            pass
+
+                    if cell is None:
+                        continue
+
+                    # Save thumbnail
+                    key = (r.row, r.col, r.depth) if is_3d else (r.row, r.col)
+                    cache.save(r.thumbnail_hash, r.thumbnail_bytes)
+                    job["thumbnails"][key] = r.thumbnail_bytes
+                    job["thumbnail_hashes"][key] = r.thumbnail_hash
+
+                    # Store DINOv2 embedding
+                    if is_3d:
+                        job["embeddings"][r.row, r.col, r.depth] = r.dino_embedding
+                    else:
+                        job["embeddings"][r.row, r.col] = r.dino_embedding
+
+                    # Update cell status
+                    status = "hq" if r.is_hq else "generated"
+                    cell["status"] = status
+                    url_key = "hq_url" if r.is_hq else "thumbnail_url"
+                    cell[url_key] = cache.url(r.thumbnail_hash)
+                    job["cells_generated"] += 1
+
+                    # When all cells are generated, compute ridges
+                    if job["cells_generated"] >= job["total_cells"] and job["phase"] == "generating":
+                        if job.get("type") == "fast_scan" and not job.get("_run_analysis"):
+                            job["phase"] = "complete"
+                            job["status"] = "complete"
+                            job["render_version"] = job.get("render_version", 0) + 1
+                            print(f"Job {r.job_id}: fast scan image generation complete", flush=True)
+                        else:
+                            job["phase"] = "analyzing"
+                            asyncio.create_task(asyncio.to_thread(
+                                _analyze_and_render, job, r.job_id
+                            ))
+
+            except Exception as e:
+                print(f"[Collector] Error processing {type(r).__name__}: {e}", flush=True)
+                import traceback; traceback.print_exc()
 
         # Use shorter poll interval when results are flowing
         interval = 0.05 if results else config.RESULT_POLL_INTERVAL

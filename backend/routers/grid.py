@@ -581,7 +581,8 @@ async def fast_scan(req: FastScanRequest, request: Request):
 
 @router.post("/{job_id}/generate-selected", response_model=GenerateSelectedResponse)
 async def generate_selected(job_id: str, req: GenerateSelectedRequest, request: Request):
-    """Generate full images for cells above tau threshold after a fast scan."""
+    """Generate full images for cells above tau threshold after a fast scan.
+    Supports both 2D and 3D grids."""
     jobs = request.app.state.jobs
     job = jobs.get(job_id)
     if not job or job.get("type") != "fast_scan" or job["phase"] != "scan_complete":
@@ -590,6 +591,7 @@ async def generate_selected(job_id: str, req: GenerateSelectedRequest, request: 
     pool = request.app.state.gpu_pool
     gs = job["grid_size"]
     sensitivity = job["sensitivity"]
+    is_3d = job.get("dimensions", 2) == 3
 
     # Compute threshold
     real_sens = sensitivity[sensitivity > 0]
@@ -598,53 +600,108 @@ async def generate_selected(job_id: str, req: GenerateSelectedRequest, request: 
     median = float(np.median(real_sens))
     threshold = median * req.tau
 
-    # Find cells above threshold
-    active_cells = set()
-    for i in range(gs):
-        for j in range(gs):
-            if sensitivity[i, j] >= threshold:
-                active_cells.add((i, j))
+    if is_3d:
+        gs_z = job.get("grid_size_z", gs)
+        gammas = job.get("gammas")
 
-    if not active_cells:
-        return GenerateSelectedResponse(status="no_cells", total_cells=0)
+        # Find 3D cells above threshold
+        active_cells = set()
+        for i in range(gs):
+            for j in range(gs):
+                for k in range(gs_z):
+                    if sensitivity[i, j, k] >= threshold:
+                        active_cells.add((i, j, k))
 
-    # Transition job to generating phase
-    job["phase"] = "generating"
-    job["status"] = "running"
-    job["total_cells"] = len(active_cells)
-    job["cells_generated"] = 0
-    job["height"] = req.height
-    job["width"] = req.width
-    job["steps"] = req.steps
-    job["guidance_scale"] = req.guidance_scale
-    job["embeddings"] = np.zeros((gs, gs, 768))
-    job["render_version"] = job.get("render_version", 0) + 1
+        if not active_cells:
+            return GenerateSelectedResponse(status="no_cells", total_cells=0)
 
-    # Update cell statuses
-    for i in range(gs):
-        for j in range(gs):
-            if (i, j) in active_cells:
-                job["cells"][i][j]["status"] = "pending"
-            else:
-                job["cells"][i][j]["status"] = "skipped"
+        # Transition job
+        job["phase"] = "generating"
+        job["status"] = "running"
+        job["total_cells"] = len(active_cells)
+        job["cells_generated"] = 0
+        job["height"] = req.height
+        job["width"] = req.width
+        job["steps"] = req.steps
+        job["guidance_scale"] = req.guidance_scale
+        job["embeddings"] = np.zeros((gs, gs, gs_z, 768))
+        job["render_version"] = job.get("render_version", 0) + 1
 
-    # Submit GPU tasks
-    active_frozen = frozenset(active_cells)
-    rows_needing = sorted(set(i for i, j in active_cells))
-    chunks = [rows_needing[i::pool.n_gpus] for i in range(pool.n_gpus)]
+        for i in range(gs):
+            for j in range(gs):
+                for k in range(gs_z):
+                    if (i, j, k) in active_cells:
+                        job["cells"][i][j][k]["status"] = "pending"
+                    else:
+                        job["cells"][i][j][k]["status"] = "skipped"
 
-    for chunk in chunks:
-        if chunk:
-            pool.submit(GenerateTask(
-                job_id=job_id, row_indices=chunk,
-                alphas=job["alphas"], betas=job["betas"],
-                prompt_a=job["prompt_a"], prompt_b=job["prompt_b"],
-                prompt_c=job.get("prompt_c", ""),
-                grid_size=gs, seed=job["seed"],
-                height=req.height, width=req.width,
-                steps=req.steps, guidance_scale=req.guidance_scale,
-                active_cells=active_frozen,
-            ))
+        # Submit GPU tasks
+        active_frozen = frozenset(active_cells)
+        rows_needing = sorted(set(i for i, j, k in active_cells))
+        chunks = [rows_needing[i::pool.n_gpus] for i in range(pool.n_gpus)]
+
+        for chunk in chunks:
+            if chunk:
+                pool.submit(GenerateTask(
+                    job_id=job_id, row_indices=chunk,
+                    alphas=job["alphas"], betas=job["betas"],
+                    prompt_a=job["prompt_a"], prompt_b=job["prompt_b"],
+                    prompt_c=job.get("prompt_c", ""),
+                    grid_size=gs, seed=job["seed"],
+                    height=req.height, width=req.width,
+                    steps=req.steps, guidance_scale=req.guidance_scale,
+                    active_cells=active_frozen,
+                    prompt_d=job.get("prompt_d", ""),
+                    gammas=gammas,
+                    grid_size_z=gs_z,
+                    use_slerp=job.get("use_slerp", True),
+                ))
+
+    else:
+        # 2D path
+        active_cells = set()
+        for i in range(gs):
+            for j in range(gs):
+                if sensitivity[i, j] >= threshold:
+                    active_cells.add((i, j))
+
+        if not active_cells:
+            return GenerateSelectedResponse(status="no_cells", total_cells=0)
+
+        job["phase"] = "generating"
+        job["status"] = "running"
+        job["total_cells"] = len(active_cells)
+        job["cells_generated"] = 0
+        job["height"] = req.height
+        job["width"] = req.width
+        job["steps"] = req.steps
+        job["guidance_scale"] = req.guidance_scale
+        job["embeddings"] = np.zeros((gs, gs, 768))
+        job["render_version"] = job.get("render_version", 0) + 1
+
+        for i in range(gs):
+            for j in range(gs):
+                if (i, j) in active_cells:
+                    job["cells"][i][j]["status"] = "pending"
+                else:
+                    job["cells"][i][j]["status"] = "skipped"
+
+        active_frozen = frozenset(active_cells)
+        rows_needing = sorted(set(i for i, j in active_cells))
+        chunks = [rows_needing[i::pool.n_gpus] for i in range(pool.n_gpus)]
+
+        for chunk in chunks:
+            if chunk:
+                pool.submit(GenerateTask(
+                    job_id=job_id, row_indices=chunk,
+                    alphas=job["alphas"], betas=job["betas"],
+                    prompt_a=job["prompt_a"], prompt_b=job["prompt_b"],
+                    prompt_c=job.get("prompt_c", ""),
+                    grid_size=gs, seed=job["seed"],
+                    height=req.height, width=req.width,
+                    steps=req.steps, guidance_scale=req.guidance_scale,
+                    active_cells=active_frozen,
+                ))
 
     return GenerateSelectedResponse(status="running", total_cells=len(active_cells))
 

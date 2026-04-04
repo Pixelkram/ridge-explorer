@@ -367,14 +367,13 @@ function RidgeViewer3D() {
         <span style={{ fontSize: 11, color: '#666' }}>
           γ={gs > 0 ? (sliceIndex / Math.max(gs - 1, 1)).toFixed(2) : '0'} | {sliceCells.length} cells
         </span>
-        {meshData && (
-          <button onClick={() => setShowSurface(s => !s)}
-                  style={{ padding: '2px 10px', border: 'none', borderRadius: 3, fontSize: 10,
-                           background: showSurface ? '#e94560' : '#333',
-                           color: showSurface ? '#fff' : '#888', cursor: 'pointer' }}>
-            {showSurface ? 'surface ON' : 'surface OFF'}
-          </button>
-        )}
+        <button onClick={() => setShowSurface(s => !s)}
+                style={{ padding: '2px 10px', border: 'none', borderRadius: 3, fontSize: 10,
+                         background: showSurface ? '#e94560' : '#333',
+                         color: showSurface ? '#fff' : '#888', cursor: 'pointer',
+                         opacity: meshData ? 1 : 0.4 }}>
+          {showSurface ? 'surface ON' : 'surface OFF'}
+        </button>
         <span style={{ fontSize: 10, color: '#444' }}>
           click=image | H=recenter | scroll=zoom
         </span>
