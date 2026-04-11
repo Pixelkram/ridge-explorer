@@ -492,26 +492,24 @@ def _finalize_mf_scan(job: dict, job_id: str):
         detector_final.tau_mf = job.get("mf_tau", 1.3)
         detector_final.observe(real_indices, real_values)
 
-        # Get GP-predicted sensitivity map
-        mf_sensitivity = detector_final.predict_grid()
-
-        # Store as the job's sensitivity (replacing Jacobian)
-        job["mf_predicted_sensitivity"] = mf_sensitivity
-        # Also update cell-level sensitivity with MF predictions
+        # Get GP-predicted sensitivity — blend with Jacobian outside simplex
         pred_flat = detector_final.predict()
+        blended = job["sensitivity"].copy()  # start with full-grid Jacobian
         for k in range(detector_final.n_valid):
             i, j = int(valid_positions[k, 0]), int(valid_positions[k, 1])
+            blended[i, j] = pred_flat[k]  # overwrite simplex cells with GP prediction
             job["cells"][i][j]["sensitivity"] = float(pred_flat[k])
 
+        job["sensitivity"] = blended
+        job["mf_predicted_sensitivity"] = blended
         job["mf_n_observed"] = len(real_indices)
         job["mf_detector"] = detector_final
 
-        # Render heatmap of MF-predicted sensitivity
+        # Render heatmap — now has values everywhere (Jacobian outside, GP inside)
         results_dir = config.RESULTS_DIR / job_id
         results_dir.mkdir(parents=True, exist_ok=True)
 
-        # Use MF prediction for heatmap
-        render_heatmap(mf_sensitivity, job["alphas"], job["betas"],
+        render_heatmap(blended, job["alphas"], job["betas"],
                        results_dir / "heatmap.png",
                        prompt_a=job["prompt_a"], prompt_b=job["prompt_b"],
                        prompt_c=job.get("prompt_c", ""))
@@ -523,7 +521,7 @@ def _finalize_mf_scan(job: dict, job_id: str):
             assemble_image_grid(job["thumbnails"], gs, image_grid_path)
             job["image_grid_path"] = str(image_grid_path)
 
-        np.save(results_dir / "mf_sensitivity.npy", mf_sensitivity)
+        np.save(results_dir / "mf_sensitivity.npy", blended)
 
         print(f"MF-scan {job_id}: complete "
               f"(observed={len(real_indices)}, "
