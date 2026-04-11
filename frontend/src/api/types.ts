@@ -122,3 +122,24 @@ export interface GenerateSelectedResponse {
   status: string;
   total_cells: number;
 }
+
+export interface MFScanRequest {
+  prompt_a: string;
+  prompt_b: string;
+  prompt_c: string;
+  grid_size: number;
+  seed: number;
+  budget?: number;
+  tau_mf?: number;
+  height?: number;
+  width?: number;
+  steps?: number;
+  guidance_scale?: number;
+}
+
+export interface MFScanResponse {
+  job_id: string;
+  total_cells: number;
+  budget: number;
+  status: string;
+}

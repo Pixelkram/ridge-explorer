@@ -132,6 +132,27 @@ class GenerateSelectedResponse(BaseModel):
     total_cells: int = 0
 
 
+class MFScanRequest(BaseModel):
+    prompt_a: str
+    prompt_b: str
+    prompt_c: str = ""
+    grid_size: int = 50
+    seed: int = 42
+    budget: int = 80
+    tau_mf: float = 1.3
+    height: int = 256
+    width: int = 256
+    steps: int = 4
+    guidance_scale: float = 4.0
+
+
+class MFScanResponse(BaseModel):
+    job_id: str
+    total_cells: int
+    budget: int
+    status: str
+
+
 class HealthResponse(BaseModel):
     status: str
     n_gpus: int

@@ -59,6 +59,13 @@ async def result_collector(app: FastAPI):
                             _analyze_fast_scan, job, r.job_id
                         ))
 
+                    # MF-scan: after Jacobian sweep, run MF-GP pipeline
+                    if job["cells_generated"] >= job["total_cells"] and job["phase"] == "mf_scanning":
+                        job["phase"] = "mf_jacobian_done"
+                        asyncio.create_task(asyncio.to_thread(
+                            _run_mf_pipeline, job, r.job_id, app
+                        ))
+
                 elif isinstance(r, LatentResult):
                     # Fast scan single result (legacy path)
                     if job["latents"] is None:
@@ -73,6 +80,12 @@ async def result_collector(app: FastAPI):
                         job["phase"] = "analyzing"
                         asyncio.create_task(asyncio.to_thread(
                             _analyze_fast_scan, job, r.job_id
+                        ))
+
+                    if job["cells_generated"] >= job["total_cells"] and job["phase"] == "mf_scanning":
+                        job["phase"] = "mf_jacobian_done"
+                        asyncio.create_task(asyncio.to_thread(
+                            _run_mf_pipeline, job, r.job_id, app
                         ))
 
                 elif isinstance(r, CellResult):
@@ -116,7 +129,13 @@ async def result_collector(app: FastAPI):
 
                     # When all cells are generated, compute ridges
                     if job["cells_generated"] >= job["total_cells"] and job["phase"] == "generating":
-                        if job.get("type") == "fast_scan" and not job.get("_run_analysis"):
+                        if job.get("type") == "mf_scan":
+                            # MF-scan: finalize with GP-predicted sensitivity
+                            job["phase"] = "mf_finalizing"
+                            asyncio.create_task(asyncio.to_thread(
+                                _finalize_mf_scan, job, r.job_id
+                            ))
+                        elif job.get("type") == "fast_scan" and not job.get("_run_analysis"):
                             job["phase"] = "complete"
                             job["status"] = "complete"
                             job["render_version"] = job.get("render_version", 0) + 1
@@ -301,6 +320,203 @@ def _analyze_fast_scan(job: dict, job_id: str):
     print(f"Fast scan {job_id}: Jacobian spectral norm computed "
           f"(max={spectral.max():.4f}, median={np.median(spectral):.4f}, "
           f"grid={gs}x{gs})", flush=True)
+
+
+def _run_mf_pipeline(job: dict, job_id: str, app):
+    """After Jacobian sweep: compute spectral norm, build MF-GP, select points, submit generation."""
+    from backend.services.ridge_detector import compute_jacobian_sensitivity
+    from backend.services.mf_gp import build_mf_detector
+    from backend.services.gpu_pool import GenerateTask
+
+    gs = job["grid_size"]
+    latents = job["latents"]
+
+    # Step 1: Compute Jacobian spectral norm
+    spectral, anisotropy = compute_jacobian_sensitivity(latents)
+    job["sensitivity"] = spectral
+    job["anisotropy"] = anisotropy
+
+    results_dir = config.RESULTS_DIR / job_id
+    results_dir.mkdir(parents=True, exist_ok=True)
+    np.save(results_dir / "spectral_norm.npy", spectral)
+
+    print(f"MF-scan {job_id}: Jacobian done (max={spectral.max():.4f}, "
+          f"median={np.median(spectral):.4f})", flush=True)
+
+    # Step 2: Build MF detector
+    detector = build_mf_detector(job)
+    if detector is None:
+        print(f"MF-scan {job_id}: ERROR building detector", flush=True)
+        job["phase"] = "scan_complete"
+        job["status"] = "scan_complete"
+        return
+
+    budget = job.get("mf_budget", 80)
+    tau_mf = job.get("mf_tau", 1.3)
+    detector.tau_mf = tau_mf
+
+    # Step 3: Select seed points + straddle-acquired points (all upfront)
+    # We select ALL points now, then generate them in one batch for GPU efficiency
+    seed_indices = detector.select_seed_points(n=15)
+    # Use Jacobian values as pseudo-observations for initial GP
+    # (bootstrapping: use rank-preserved Jacobian values scaled to estimated DINOv2 range)
+    jac_vals = detector.jacobian
+    jac_min, jac_max = jac_vals.min(), jac_vals.max()
+    # Rough scaling: map Jacobian range to [0, 0.5] (typical DINOv2 sensitivity range)
+    pseudo_scale = 0.3 / (jac_max - jac_min + 1e-10)
+    pseudo_dino = (jac_vals - jac_min) * pseudo_scale + 0.01
+
+    # Initialize with seed points using pseudo values, then acquire the rest
+    all_selected = set(seed_indices)
+    detector.observe(seed_indices, [float(pseudo_dino[i]) for i in seed_indices])
+
+    remaining = budget - len(all_selected)
+    while remaining > 0:
+        batch = detector.acquire(batch_size=min(20, remaining))
+        if not batch:
+            break
+        all_selected.update(batch)
+        detector.observe(batch, [float(pseudo_dino[i]) for i in batch])
+        remaining = budget - len(all_selected)
+
+    job["mf_detector"] = detector
+    job["mf_selected_indices"] = sorted(all_selected)
+
+    # Step 4: Map selected indices back to (row, col) grid coordinates
+    valid_mask = detector.valid_mask
+    valid_positions = np.argwhere(valid_mask)  # (N_valid, 2) of (i, j)
+    active_cells = set()
+    for idx in all_selected:
+        i, j = int(valid_positions[idx, 0]), int(valid_positions[idx, 1])
+        active_cells.add((i, j))
+
+    print(f"MF-scan {job_id}: selected {len(active_cells)} cells for DINOv2 "
+          f"(budget={budget})", flush=True)
+
+    # Step 5: Submit generation tasks
+    job["phase"] = "generating"
+    job["total_cells"] = len(active_cells)
+    job["cells_generated"] = 0
+    job["render_version"] = job.get("render_version", 0) + 1
+
+    for i in range(gs):
+        for j in range(gs):
+            if (i, j) in active_cells:
+                job["cells"][i][j]["status"] = "pending"
+            else:
+                job["cells"][i][j]["status"] = "skipped"
+
+    pool = app.state.gpu_pool
+    active_frozen = frozenset(active_cells)
+    rows_needing = sorted(set(i for i, j in active_cells))
+    chunks = [rows_needing[i::pool.n_gpus] for i in range(pool.n_gpus)]
+
+    for chunk in chunks:
+        if chunk:
+            pool.submit(GenerateTask(
+                job_id=job_id, row_indices=chunk,
+                alphas=job["alphas"], betas=job["betas"],
+                prompt_a=job["prompt_a"], prompt_b=job["prompt_b"],
+                prompt_c=job.get("prompt_c", ""),
+                grid_size=gs, seed=job["seed"],
+                height=job["height"], width=job["width"],
+                steps=job["steps"], guidance_scale=job["guidance_scale"],
+                active_cells=active_frozen,
+            ))
+
+
+def _finalize_mf_scan(job: dict, job_id: str):
+    """After DINOv2 generation: re-fit GP with real values, compute final sensitivity map."""
+    from backend.services.mf_gp import build_mf_detector
+
+    gs = job["grid_size"]
+    embeddings = job["embeddings"]
+    detector = job.get("mf_detector")
+
+    if detector is None:
+        detector = build_mf_detector(job)
+        if detector is None:
+            job["phase"] = "complete"
+            job["status"] = "complete"
+            return
+
+    # Compute DINOv2 sensitivity at generated cells from their embeddings
+    valid_mask = detector.valid_mask
+    valid_positions = np.argwhere(valid_mask)
+    selected = job.get("mf_selected_indices", [])
+
+    # Re-observe with REAL DINOv2 sensitivity values
+    real_indices = []
+    real_values = []
+    for idx in selected:
+        i, j = int(valid_positions[idx, 0]), int(valid_positions[idx, 1])
+        emb = embeddings[i, j]
+        if np.linalg.norm(emb) < 0.01:
+            continue  # No embedding generated
+
+        # Compute local sensitivity: mean cosine distance to neighbors
+        neighbors = []
+        for di, dj in [(-1,0),(1,0),(0,-1),(0,1)]:
+            ni, nj = i+di, j+dj
+            if 0 <= ni < gs and 0 <= nj < gs:
+                n_emb = embeddings[ni, nj]
+                if np.linalg.norm(n_emb) > 0.01:
+                    cos_dist = 1 - np.dot(emb, n_emb) / (np.linalg.norm(emb) * np.linalg.norm(n_emb) + 1e-10)
+                    neighbors.append(cos_dist)
+
+        if neighbors:
+            sens = float(np.mean(neighbors))
+            real_indices.append(idx)
+            real_values.append(sens)
+
+    print(f"MF-scan {job_id}: {len(real_indices)}/{len(selected)} cells have DINOv2 sensitivity", flush=True)
+
+    if real_indices:
+        # Rebuild detector with real observations
+        detector_final = build_mf_detector(job)
+        detector_final.tau_mf = job.get("mf_tau", 1.3)
+        detector_final.observe(real_indices, real_values)
+
+        # Get GP-predicted sensitivity map
+        mf_sensitivity = detector_final.predict_grid()
+
+        # Store as the job's sensitivity (replacing Jacobian)
+        job["mf_predicted_sensitivity"] = mf_sensitivity
+        # Also update cell-level sensitivity with MF predictions
+        pred_flat = detector_final.predict()
+        for k in range(detector_final.n_valid):
+            i, j = int(valid_positions[k, 0]), int(valid_positions[k, 1])
+            job["cells"][i][j]["sensitivity"] = float(pred_flat[k])
+
+        job["mf_n_observed"] = len(real_indices)
+        job["mf_detector"] = detector_final
+
+        # Render heatmap of MF-predicted sensitivity
+        results_dir = config.RESULTS_DIR / job_id
+        results_dir.mkdir(parents=True, exist_ok=True)
+
+        # Use MF prediction for heatmap
+        render_heatmap(mf_sensitivity, job["alphas"], job["betas"],
+                       results_dir / "heatmap.png",
+                       prompt_a=job["prompt_a"], prompt_b=job["prompt_b"],
+                       prompt_c=job.get("prompt_c", ""))
+        job["heatmap_path"] = str(results_dir / "heatmap.png")
+
+        # Assemble image grid (only generated cells have thumbnails)
+        if job["thumbnails"]:
+            image_grid_path = results_dir / "images.png"
+            assemble_image_grid(job["thumbnails"], gs, image_grid_path)
+            job["image_grid_path"] = str(image_grid_path)
+
+        np.save(results_dir / "mf_sensitivity.npy", mf_sensitivity)
+
+        print(f"MF-scan {job_id}: complete "
+              f"(observed={len(real_indices)}, "
+              f"rho_jac={detector_final.correlation:.3f})", flush=True)
+
+    job["phase"] = "complete"
+    job["status"] = "complete"
+    job["render_version"] = job.get("render_version", 0) + 1
 
 
 @asynccontextmanager

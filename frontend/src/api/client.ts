@@ -1,4 +1,4 @@
-import type { GridStartRequest, GridStartResponse, GridStatusResponse, RefineRequest, RefineResponse, SeedProbeRequest, SeedProbeResponse, SeedProbeStatus, FastScanRequest, FastScanResponse, GenerateSelectedRequest, GenerateSelectedResponse } from './types';
+import type { GridStartRequest, GridStartResponse, GridStatusResponse, RefineRequest, RefineResponse, SeedProbeRequest, SeedProbeResponse, SeedProbeStatus, FastScanRequest, FastScanResponse, GenerateSelectedRequest, GenerateSelectedResponse, MFScanRequest, MFScanResponse } from './types';
 
 const BASE = '';
 
@@ -39,6 +39,10 @@ export async function getSeedProbeStatus(probeId: string): Promise<SeedProbeStat
   return res.json();
 }
 
+export async function cancelJob(): Promise<void> {
+  await fetch(`${BASE}/api/grid/cancel`, { method: 'POST' });
+}
+
 export async function startFastScan(req: FastScanRequest): Promise<FastScanResponse> {
   const res = await fetch(`${BASE}/api/grid/fast-scan`, {
     method: 'POST',
@@ -50,6 +54,15 @@ export async function startFastScan(req: FastScanRequest): Promise<FastScanRespo
 
 export async function generateSelected(jobId: string, req: GenerateSelectedRequest): Promise<GenerateSelectedResponse> {
   const res = await fetch(`${BASE}/api/grid/${jobId}/generate-selected`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  return res.json();
+}
+
+export async function startMFScan(req: MFScanRequest): Promise<MFScanResponse> {
+  const res = await fetch(`${BASE}/api/grid/mf-scan`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(req),
