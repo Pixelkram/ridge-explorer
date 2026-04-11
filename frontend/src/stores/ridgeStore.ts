@@ -1,9 +1,10 @@
 import { create } from 'zustand';
-import { startGrid, getGridStatus, refineGrid, startFastScan, generateSelected } from '../api/client';
+import { startGrid, getGridStatus, refineGrid, startFastScan, generateSelected, cancelJob, startMFScan } from '../api/client';
 import type { CellStatus } from '../api/types';
 
 type ViewMode = 'images' | 'heatmap' | 'overlay' | 'clusters';
-type Phase = 'idle' | 'scanning' | 'scan_complete' | 'generating' | 'analyzing' | 'complete';
+type Phase = 'idle' | 'scanning' | 'scan_complete' | 'generating' | 'analyzing' | 'complete'
+  | 'mf_scanning' | 'mf_jacobian_done' | 'mf_finalizing';
 
 interface RidgeState {
   promptA: string;
@@ -57,6 +58,7 @@ interface RidgeState {
   setSliceIndex: (v: number) => void;
   generate: () => Promise<void>;
   fastScan: () => Promise<void>;
+  mfScan: () => Promise<void>;
   generateSelectedImages: () => Promise<void>;
   submitRefine: () => Promise<void>;
   stopPolling: () => void;
@@ -70,6 +72,8 @@ function startPolling(set: any, get: any) {
     if (!jobId) return;
     try {
       const status = await getGridStatus(jobId);
+      // Check if cancelled while awaiting response
+      if (!get().jobId) return;
       console.log('[Ridge] Poll:', status.phase, status.cells_generated, '/', status.cells_total,
                   'cells:', status.cells.length, 'gs:', status.grid_size);
       const updates: any = {
@@ -87,6 +91,9 @@ function startPolling(set: any, get: any) {
         dimensions: status.dimensions || 2,
       };
       if (status.phase === 'scanning') updates.phase = 'scanning';
+      if (status.phase === 'mf_scanning') updates.phase = 'mf_scanning';
+      if (status.phase === 'mf_jacobian_done') updates.phase = 'mf_jacobian_done';
+      if (status.phase === 'mf_finalizing') updates.phase = 'mf_finalizing';
       if (status.phase === 'generating') updates.phase = 'generating';
       if (status.phase === 'analyzing') updates.phase = 'analyzing';
       if (status.phase === 'scan_complete') {
@@ -105,6 +112,8 @@ function startPolling(set: any, get: any) {
 
   // Poll immediately, then every 1.5s
   doPoll();
+  // Guard: if cancelled during the first doPoll, don't start interval
+  if (!get().jobId) return;
   const interval = setInterval(doPoll, 1500);
   set({ pollInterval: interval });
 }
@@ -174,11 +183,14 @@ export const useRidgeStore = create<RidgeState>((set, get) => ({
   cancel: () => {
     get().stopPolling();
     set({ phase: 'idle', jobId: null, cellsGenerated: 0, cellsTotal: 0 });
+    // Tell backend to drain pending GPU tasks so next job starts immediately
+    cancelJob().catch(() => {});
   },
 
   generate: async () => {
     const { promptA, promptB, promptC, promptD, dimensions, gridSize, seed, steps, resolution, seedCount, stopPolling } = get();
     stopPolling();
+    await cancelJob().catch(() => {});
     set({
       phase: 'generating', cellsGenerated: 0, cellsTotal: 0, cells: [],
       heatmapUrl: null, overlayUrl: null, clusterUrl: null, imageGridUrl: null,
@@ -203,6 +215,7 @@ export const useRidgeStore = create<RidgeState>((set, get) => ({
   fastScan: async () => {
     const { promptA, promptB, promptC, promptD, dimensions, gridSize, seed, stopPolling } = get();
     stopPolling();
+    await cancelJob().catch(() => {});
     set({
       phase: 'scanning', cellsGenerated: 0, cellsTotal: 0, cells: [],
       heatmapUrl: null, overlayUrl: null, clusterUrl: null, imageGridUrl: null,
@@ -220,6 +233,31 @@ export const useRidgeStore = create<RidgeState>((set, get) => ({
       startPolling(set, get);
     } catch (err) {
       console.error('[Ridge] Fast scan error:', err);
+      set({ phase: 'idle' });
+    }
+  },
+
+  mfScan: async () => {
+    const { promptA, promptB, promptC, gridSize, seed, steps, resolution, stopPolling } = get();
+    stopPolling();
+    await cancelJob().catch(() => {});
+    set({
+      phase: 'mf_scanning', cellsGenerated: 0, cellsTotal: 0, cells: [],
+      heatmapUrl: null, overlayUrl: null, clusterUrl: null, imageGridUrl: null,
+      ridgeMeshUrl: null, jobId: null, currentGridSize: gridSize, activeView: 'heatmap',
+      shouldCenter: true, manualSelection: new Set<string>(),
+    });
+    try {
+      const res = await startMFScan({
+        prompt_a: promptA, prompt_b: promptB, prompt_c: promptC,
+        grid_size: gridSize, seed, budget: 80, tau_mf: 1.3,
+        height: resolution, width: resolution, steps,
+        guidance_scale: 4.0,
+      });
+      set({ jobId: res.job_id, cellsTotal: res.total_cells });
+      startPolling(set, get);
+    } catch (err) {
+      console.error('[Ridge] MF scan error:', err);
       set({ phase: 'idle' });
     }
   },

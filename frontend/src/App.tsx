@@ -9,7 +9,7 @@ const STEPS_OPTIONS = [2, 4, 8, 12, 20, 50];
 
 function PromptInput() {
   const { promptA, promptB, promptC, promptD, dimensions, gridSize, seed, steps, resolution, seedCount, phase,
-          setPromptA, setPromptB, setPromptC, setPromptD, setDimensions, setGridSize, setSeed, setSteps, setResolution, setSeedCount, generate, fastScan, cancel } = useRidgeStore();
+          setPromptA, setPromptB, setPromptC, setPromptD, setDimensions, setGridSize, setSeed, setSteps, setResolution, setSeedCount, generate, fastScan, mfScan, cancel } = useRidgeStore();
   const busy = phase !== 'idle' && phase !== 'complete' && phase !== 'scan_complete';
 
   const inputStyle = { width: '100%', padding: 6, background: '#0f3460', border: '1px solid #333',
@@ -94,15 +94,26 @@ function PromptInput() {
                        cursor: busy ? 'not-allowed' : 'pointer', fontSize: 12 }}>
         {busy ? '...' : 'Fast Scan'}
       </button>
+      <button onClick={mfScan} disabled={busy}
+              style={{ padding: '5px 14px', background: busy ? '#555' : '#1a5276',
+                       color: '#fff', border: '1px solid #f39c12', borderRadius: 4, fontWeight: 'bold',
+                       cursor: busy ? 'not-allowed' : 'pointer', fontSize: 12 }}>
+        {busy ? '...' : 'MF Scan'}
+      </button>
     </div>
   );
 }
 
 function ProgressBar() {
-  const { phase, cellsGenerated, cellsTotal, currentGridSize } = useRidgeStore();
+  const { phase, cellsGenerated, cellsTotal, currentGridSize, cancel } = useRidgeStore();
   if (phase === 'idle') return null;
+  const busy = phase === 'scanning' || phase === 'generating' || phase === 'analyzing'
+    || phase === 'mf_scanning' || phase === 'mf_jacobian_done' || phase === 'mf_finalizing';
   const pct = cellsTotal > 0 ? (cellsGenerated / cellsTotal * 100) : 0;
   const label = phase === 'scanning' ? `Fast scan: ${cellsGenerated}/${cellsTotal} latents`
+    : phase === 'mf_scanning' ? `MF scan: ${cellsGenerated}/${cellsTotal} latents`
+    : phase === 'mf_jacobian_done' ? 'MF: selecting cells via GP...'
+    : phase === 'mf_finalizing' ? 'MF: computing GP sensitivity map...'
     : phase === 'generating' ? `Generating: ${cellsGenerated}/${cellsTotal}`
     : phase === 'analyzing' ? 'Computing ridges...'
     : phase === 'scan_complete' ? `Fast scan complete (${currentGridSize}×${currentGridSize})`
@@ -111,10 +122,18 @@ function ProgressBar() {
   return (
     <div style={{ padding: '4px 12px', background: '#1a1a2e', display: 'flex', alignItems: 'center', gap: 8 }}>
       <span style={{ fontSize: 11, color: '#888', minWidth: 160 }}>{label}</span>
-      {phase !== 'complete' && phase !== 'scan_complete' && (
+      {busy && (
         <div style={{ flex: 1, background: '#333', borderRadius: 3, height: 4 }}>
-          <div style={{ width: `${pct}%`, background: phase === 'scanning' ? '#4ecca3' : '#e94560', borderRadius: 3, height: '100%', transition: 'width 0.3s' }} />
+          <div style={{ width: `${pct}%`, background: phase === 'scanning' || phase === 'mf_scanning' ? '#4ecca3' : phase.startsWith('mf_') ? '#f39c12' : '#e94560', borderRadius: 3, height: '100%', transition: 'width 0.3s' }} />
         </div>
+      )}
+      {busy && (
+        <button onClick={cancel}
+                style={{ padding: '2px 10px', background: '#333', color: '#e94560',
+                         border: '1px solid #e94560', borderRadius: 3,
+                         cursor: 'pointer', fontSize: 10, flexShrink: 0 }}>
+          Cancel
+        </button>
       )}
     </div>
   );
@@ -434,9 +453,72 @@ function computeRealMedian(cells: { sensitivity: number | null; span: number }[]
 
 type LayerToggle = { images: boolean; heatmap: boolean; tau: boolean };
 
+const ExportOverlayContext = { show: (_msg: string) => {}, hide: () => {} };
+
+function ExportOverlay() {
+  const [msg, setMsg] = useState<string | null>(null);
+  ExportOverlayContext.show = (m: string) => setMsg(m);
+  ExportOverlayContext.hide = () => setMsg(null);
+  if (!msg) return null;
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 2000,
+    }}>
+      <div style={{ background: '#1a1a2e', padding: '24px 48px', borderRadius: 12,
+                    border: '1px solid #333', textAlign: 'center' }}>
+        <div style={{ fontSize: 14, color: '#e94560', marginBottom: 8 }}>{msg}</div>
+        <div style={{ width: 40, height: 40, margin: '0 auto',
+                      border: '3px solid #333', borderTop: '3px solid #e94560',
+                      borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      </div>
+    </div>
+  );
+}
+
+function ExportButton({ jobId, layer }: { jobId: string; layer: string }) {
+  const [state, setState] = useState<'idle' | 'loading' | 'done'>('idle');
+
+  const handleClick = async () => {
+    setState('loading');
+    ExportOverlayContext.show(`Exporting ${layer}...`);
+    try {
+      const resp = await fetch(`/api/grid/${jobId}/export/${layer}.jpg`);
+      if (!resp.ok) { setState('idle'); ExportOverlayContext.hide(); return; }
+      const blob = await resp.blob();
+      ExportOverlayContext.hide();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `ridge_${layer}_${jobId}.jpg`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setState('done');
+      setTimeout(() => setState('idle'), 2000);
+    } catch {
+      setState('idle');
+      ExportOverlayContext.hide();
+    }
+  };
+
+  return (
+    <button onClick={handleClick} disabled={state === 'loading'}
+            style={{ padding: '2px 8px', border: 'none', borderRadius: 3, fontSize: 10,
+                     background: state === 'loading' ? '#e94560' : state === 'done' ? '#4ecca3' : '#0f3460',
+                     color: state === 'loading' ? '#fff' : state === 'done' ? '#000' : '#aaa',
+                     cursor: state === 'loading' ? 'wait' : 'pointer',
+                     transition: 'background 0.3s' }}>
+      {state === 'loading' ? `${layer}...` : state === 'done' ? `${layer} ✓` : layer}
+    </button>
+  );
+}
+
 function UnifiedViewport() {
   const { phase, cells, currentGridSize, tau, seeds, seedCells, activeSeedIdx, setActiveSeedIdx,
-          manualSelection, toggleManualCell, clearManualSelection } = useRidgeStore();
+          manualSelection, toggleManualCell, clearManualSelection, jobId } = useRidgeStore();
 
   // Layer toggles
   const [layers, setLayers] = useState<LayerToggle>({ images: true, heatmap: false, tau: true });
@@ -668,6 +750,14 @@ function UnifiedViewport() {
                            background: '#e94560', color: '#fff', cursor: 'pointer', marginLeft: 4 }}>
             clear {manualSelection.size} selected
           </button>
+        )}
+        {jobId && (
+          <>
+            <span style={{ marginLeft: 'auto' }} />
+            {(['images', 'heatmap', 'overlay'] as const).map(layer => (
+              <ExportButton key={layer} jobId={jobId} layer={layer} />
+            ))}
+          </>
         )}
         <span style={{ fontSize: 10, color: '#555', marginLeft: 8 }}>
           scroll=zoom | drag=pan | dblclick=fullres | rightclick=select | H=recenter
@@ -987,6 +1077,7 @@ export default function App() {
       <ScanCompletePanel />
       <RefinePanel />
       <MainViewport />
+      <ExportOverlay />
     </div>
   );
 }
