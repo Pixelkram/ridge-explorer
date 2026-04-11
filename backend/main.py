@@ -336,9 +336,24 @@ def _run_mf_pipeline(job: dict, job_id: str, app):
     job["sensitivity"] = spectral
     job["anisotropy"] = anisotropy
 
+    # Update ALL cell-level sensitivities with Jacobian values
+    for i in range(gs):
+        for j in range(gs):
+            if job["cells"][i][j] is not None:
+                job["cells"][i][j]["sensitivity"] = float(spectral[i, j])
+                job["cells"][i][j]["status"] = "scanned"
+
     results_dir = config.RESULTS_DIR / job_id
     results_dir.mkdir(parents=True, exist_ok=True)
     np.save(results_dir / "spectral_norm.npy", spectral)
+
+    # Render initial Jacobian heatmap (visible while GP runs)
+    render_heatmap(spectral, job["alphas"], job["betas"],
+                   results_dir / "heatmap.png",
+                   prompt_a=job["prompt_a"], prompt_b=job["prompt_b"],
+                   prompt_c=job.get("prompt_c", ""))
+    job["heatmap_path"] = str(results_dir / "heatmap.png")
+    job["render_version"] = job.get("render_version", 0) + 1
 
     print(f"MF-scan {job_id}: Jacobian done (max={spectral.max():.4f}, "
           f"median={np.median(spectral):.4f})", flush=True)
