@@ -33,6 +33,7 @@ class SeedProbeRequest(BaseModel):
     gamma: float = 0.0
     seed_start: int = 0
     seed_end: int = 19
+    steps: int = 0  # 0 = inherit from parent job
 
 
 class SeedProbeResponse(BaseModel):

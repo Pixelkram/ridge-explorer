@@ -61,6 +61,7 @@ export interface SeedProbeRequest {
   beta: number;
   seed_start: number;
   seed_end: number;
+  steps?: number;
 }
 
 export interface SeedProbeResponse {

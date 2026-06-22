@@ -39,14 +39,23 @@ def _flatten_cells(job):
 
 @router.post("/cancel")
 async def cancel_job(request: Request):
-    """Cancel all pending GPU work. Drains the task queue."""
+    """Cancel all pending GPU work. Drains the task queue and clears old jobs."""
     pool = request.app.state.gpu_pool
     drained = pool.drain_pending()
-    return {"status": "ok", "drained": drained}
+    # Also drain any completed results sitting in the result queue
+    # so they don't get attributed to future jobs
+    stale_results = pool.collect_results()
+    # Clear all jobs so in-flight GPU results get discarded by the collector
+    jobs = request.app.state.jobs
+    n_cleared = len(jobs)
+    jobs.clear()
+    return {"status": "ok", "drained": drained, "stale_results": len(stale_results), "jobs_cleared": n_cleared}
 
 
 @router.post("/start", response_model=GridStartResponse)
 async def start_grid(req: GridStartRequest, request: Request):
+    pool = request.app.state.gpu_pool
+    pool.clear_cancel()  # Allow workers to process new tasks
     master_id = str(uuid.uuid4())[:8]
     gs = req.grid_size
     alphas = np.linspace(config.ALPHA_RANGE[0], config.ALPHA_RANGE[1], gs)
@@ -505,6 +514,7 @@ async def fast_scan(req: FastScanRequest, request: Request):
     Supports both 2D (3 prompts) and 3D (4 prompts) grids.
     ~7x faster than full DINOv2 exploration.
     """
+    request.app.state.gpu_pool.clear_cancel()  # Allow workers to process new tasks
     job_id = str(uuid.uuid4())[:8]
     gs = req.grid_size
     alphas = np.linspace(config.ALPHA_RANGE[0], config.ALPHA_RANGE[1], gs)
@@ -1130,7 +1140,17 @@ async def export_grid(job_id: str, layer: str, request: Request):
 
 @router.post("/{job_id}/seed-probe", response_model=SeedProbeResponse)
 async def seed_probe(job_id: str, req: SeedProbeRequest, request: Request):
-    """Generate a single (alpha, beta) point across many seeds."""
+    """Generate a single (alpha, beta) point across many seeds.
+
+    Drains pending generation tasks so the probe runs immediately.
+    """
+    pool = request.app.state.gpu_pool
+    # Preempt: drain pending tasks so probe runs next (after in-flight tasks finish)
+    drained = pool.drain_pending()
+    pool.clear_cancel()  # Allow workers to process the probe tasks
+    if drained:
+        print(f"Seed probe preempted {drained} queued generation tasks", flush=True)
+
     jobs = request.app.state.jobs
     master = jobs.get(job_id)
     if not master:
@@ -1142,6 +1162,9 @@ async def seed_probe(job_id: str, req: SeedProbeRequest, request: Request):
 
     alphas = np.array([req.alpha])
     betas = np.array([req.beta])
+
+    # Use requested steps, or fall back to parent job's steps
+    probe_steps = req.steps if req.steps > 0 else master.get("steps", 4)
 
     # Store probe job
     jobs[probe_id] = {
@@ -1171,7 +1194,7 @@ async def seed_probe(job_id: str, req: SeedProbeRequest, request: Request):
             "prompt_a": master["prompt_a"], "prompt_b": master["prompt_b"],
             "prompt_c": master.get("prompt_c", ""), "seed": seed,
             "height": master.get("height", 256), "width": master.get("width", 256),
-            "steps": master.get("steps", 4),
+            "steps": probe_steps,
             "guidance_scale": master.get("guidance_scale", 4.0),
             "alphas": alphas, "betas": betas,
             "embeddings": np.zeros((1, 1, 768)),
@@ -1194,7 +1217,7 @@ async def seed_probe(job_id: str, req: SeedProbeRequest, request: Request):
             prompt_c=master.get("prompt_c", ""),
             grid_size=1, seed=seed,
             height=master.get("height", 256), width=master.get("width", 256),
-            steps=master.get("steps", 4),
+            steps=probe_steps,
             guidance_scale=master.get("guidance_scale", 4.0),
         ))
 
@@ -1245,6 +1268,7 @@ async def mf_scan(req: MFScanRequest, request: Request):
 
     ~2.5x faster than full DINOv2 at 50x50 with F1≈0.85 ridge detection.
     """
+    request.app.state.gpu_pool.clear_cancel()
     # Step 1: Start a fast scan (reuse existing infrastructure)
     job_id = str(uuid.uuid4())[:8]
     gs = req.grid_size

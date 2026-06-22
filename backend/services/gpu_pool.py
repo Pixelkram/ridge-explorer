@@ -109,7 +109,7 @@ class CellResult:
     depth: int = 0  # z-index for 3D grids
 
 
-def worker_main(gpu_id: int, task_queue, result_queue):
+def worker_main(gpu_id: int, task_queue, result_queue, cancel_event=None):
     """Main loop for a GPU worker process."""
     device = torch.device(f"cuda:{gpu_id}")
 
@@ -136,9 +136,9 @@ def worker_main(gpu_id: int, task_queue, result_queue):
             break
 
         if isinstance(task, GenerateTask):
-            _process_generate(gpu_id, device, pipe, dino, dino_transform, task, result_queue)
+            _process_generate(gpu_id, device, pipe, dino, dino_transform, task, result_queue, cancel_event)
         elif isinstance(task, FastScanTask):
-            _process_fast_scan(gpu_id, device, pipe, task, result_queue)
+            _process_fast_scan(gpu_id, device, pipe, task, result_queue, cancel_event)
         elif isinstance(task, HQTask):
             _process_hq(gpu_id, device, pipe, dino, dino_transform, task, result_queue)
 
@@ -271,7 +271,7 @@ class _ScanContext:
         return np.stack(all_latents)
 
 
-def _process_fast_scan(gpu_id, device, pipe, task, result_queue):
+def _process_fast_scan(gpu_id, device, pipe, task, result_queue, cancel_event=None):
     """Batched fast scan: bypass pipeline overhead, call transformer directly.
 
     Supports both 2D (3 prompts) and 3D (4 prompts) grids.
@@ -292,6 +292,9 @@ def _process_fast_scan(gpu_id, device, pipe, task, result_queue):
         gammas = task.gammas
         gs_z = task.grid_size_z
         for i in task.row_indices:
+            if cancel_event is not None and cancel_event.is_set():
+                print(f"[GPU {gpu_id}] Cancelled mid-fastscan (row {i})", flush=True)
+                return
             alpha_i = float(alphas[i])
             for j in range(gs):
                 beta_j = float(betas[j])
@@ -307,6 +310,9 @@ def _process_fast_scan(gpu_id, device, pipe, task, result_queue):
             print(f"[GPU {gpu_id}] Fast scan {task.job_id} row {i+1}/{gs}", flush=True)
     else:
         for i in task.row_indices:
+            if cancel_event is not None and cancel_event.is_set():
+                print(f"[GPU {gpu_id}] Cancelled mid-fastscan (row {i})", flush=True)
+                return
             points = [(float(alphas[i]), float(betas[j])) for j in range(gs)]
             latents = ctx.evaluate_points(points, BATCH_SIZE)
             result_queue.put(LatentBatchResult(
@@ -318,7 +324,7 @@ def _process_fast_scan(gpu_id, device, pipe, task, result_queue):
 
 
 
-def _process_generate(gpu_id, device, pipe, dino, dino_transform, task, result_queue):
+def _process_generate(gpu_id, device, pipe, dino, dino_transform, task, result_queue, cancel_event=None):
     """Generate images for assigned rows and compute DINOv2 embeddings."""
     emb_a, emb_b, emb_c, emb_d = _encode_prompts(
         pipe, task.prompt_a, task.prompt_b, task.prompt_c, task.prompt_d)
@@ -326,6 +332,10 @@ def _process_generate(gpu_id, device, pipe, dino, dino_transform, task, result_q
     is_3d = task.grid_size_z > 0 and task.gammas is not None
 
     for i in task.row_indices:
+        # Check cancel between rows
+        if cancel_event is not None and cancel_event.is_set():
+            print(f"[GPU {gpu_id}] Cancelled mid-generate (row {i})", flush=True)
+            return
         alpha = task.alphas[i]
         z_range = range(task.grid_size_z) if is_3d else [0]
 
@@ -446,6 +456,7 @@ class GPUPool:
         self.ctx = mp.get_context('spawn')
         self.task_queue = self.ctx.Queue()
         self.result_queue = self.ctx.Queue()
+        self.cancel_event = self.ctx.Event()
         self.workers = []
         self.ready_count = 0
 
@@ -453,7 +464,7 @@ class GPUPool:
         for gpu_id in range(self.n_gpus):
             p = self.ctx.Process(
                 target=worker_main,
-                args=(gpu_id, self.task_queue, self.result_queue),
+                args=(gpu_id, self.task_queue, self.result_queue, self.cancel_event),
                 daemon=True,
             )
             p.start()
@@ -474,6 +485,24 @@ class GPUPool:
 
     def submit(self, task):
         self.task_queue.put(task)
+
+    def drain_pending(self):
+        """Drain all pending tasks from the queue and signal workers to abort current task."""
+        self.cancel_event.set()  # Signal workers to stop current task
+        drained = 0
+        while not self.task_queue.empty():
+            try:
+                self.task_queue.get_nowait()
+                drained += 1
+            except Exception:
+                break
+        if drained:
+            print(f"Drained {drained} pending tasks from queue", flush=True)
+        return drained
+
+    def clear_cancel(self):
+        """Clear the cancel signal so new tasks can run."""
+        self.cancel_event.clear()
 
     def collect_results(self) -> list:
         results = []

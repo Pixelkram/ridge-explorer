@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 node_modules/
 dist/
+.vite/
 cache_data/
 *.log
 .env

@@ -537,6 +537,7 @@ function UnifiedViewport() {
   const [overlayImg, setOverlayImg] = useState<{ url: string; alpha: number; beta: number } | null>(null);
   const [probeSeedStart, setProbeSeedStart] = useState(0);
   const [probeSeedEnd, setProbeSeedEnd] = useState(3);
+  const [probeSteps, setProbeSteps] = useState(10);
   const [probeImages, setProbeImages] = useState<{ seeds: number[]; images: (string | null)[] } | null>(null);
   const [probeLoading, setProbeLoading] = useState(false);
 
@@ -989,6 +990,11 @@ function UnifiedViewport() {
               <span style={{ fontSize: 11, color: '#666' }}>
                 ({probeSeedEnd - probeSeedStart + 1} seeds)
               </span>
+              <span style={{ fontSize: 12, color: '#888', marginLeft: 8 }}>Steps:</span>
+              <input type="number" value={probeSteps} min={1} max={50}
+                     onChange={e => setProbeSteps(Math.max(1, +e.target.value))}
+                     style={{ width: 40, padding: 4, background: '#0f3460', border: '1px solid #333',
+                              color: '#fff', borderRadius: 4, fontSize: 11 }} />
               <button disabled={probeLoading}
                       onClick={async () => {
                         const { jobId } = useRidgeStore.getState();
@@ -999,6 +1005,7 @@ function UnifiedViewport() {
                           const res = await startSeedProbe(jobId, {
                             alpha: overlayImg.alpha, beta: overlayImg.beta,
                             seed_start: probeSeedStart, seed_end: probeSeedEnd,
+                            steps: probeSteps,
                           });
                           if (res.status === 'running') {
                             // Poll for completion
