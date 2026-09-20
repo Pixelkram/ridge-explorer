@@ -1,11 +1,30 @@
+# --- Python bytecode -------------------------------------------------------
 __pycache__/
 *.pyc
+*.pyo
+
+# --- Node / Vite -----------------------------------------------------------
 node_modules/
 dist/
 .vite/
+frontend/.vite/
+
+# --- Tooling caches --------------------------------------------------------
+.pytest_cache/
+
+# --- Generated run artefacts ----------------------------------------------
 cache_data/
+logs/
 *.log
+
+# --- Secrets ---------------------------------------------------------------
 .env
+.env.*
+!.env.example
+
+# --- OS junk ---------------------------------------------------------------
 .DS_Store
+
+# --- Large binary payloads never belong in this repo -----------------------
 *.npy
 *.safetensors
