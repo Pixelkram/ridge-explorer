@@ -1,0 +1,654 @@
+/**
+ * CascadePanel -- the two-tier ridge cascade as an interactive run.
+ *
+ * Runs the validated recipe (E85/E86/E92) on user prompts: isolate crossings with
+ * well-spread chords, score them with coupled seeds against the run's own measured
+ * background, refine the strongest regions plus one exploration slot. The panel is
+ * built to make the process legible while it runs: a phase bar, a live ticker of the
+ * images just generated, the map filling in dot by dot, and findings that light up
+ * as they are certified.
+ */
+import { useEffect, useRef, useState } from 'react';
+import {
+  cascadeStart, cascadeStatus, cascadeCancel, cascadeImageUrl,
+  cascadeWalkStart, cascadeWalkStatus, cascadeWalkCancel, cascadePointInfo,
+} from './api/client';
+import type { CascadeStatus, CascadePatch, WalkStatus } from './api/types';
+import CascadeMap from './CascadeMap';
+
+const BOX: React.CSSProperties = {
+  background: '#16213e', border: '1px solid #333', borderRadius: 4,
+  padding: '8px 12px', margin: '0 12px 8px', fontSize: 12,
+};
+const NUM: React.CSSProperties = {
+  width: 66, background: '#0a0a1a', color: '#fff', border: '1px solid #444',
+  borderRadius: 3, padding: '2px 4px', fontSize: 12,
+};
+const ACCENT = '#4ecca3';
+const WARN = '#e94560';
+
+// Presets k=3..16 from the measured yield model: chords = max(12, ceil(12k/7)) keeps
+// ~3 crossings per patch slot at 4 patches; k>9 is beyond the calibrated range (the
+// significance background still self-calibrates per run, so verdicts stay honest).
+const PRESETS = Array.from({ length: 14 }, (_, i) => {
+  const k = i + 3;
+  const patches = 4;
+  const chords = Math.max(12, Math.ceil((12 * k) / 7));
+  const cross = Math.max(1, Math.round((chords * 7) / k));
+  const imgs = Math.round((chords * 110) / k + cross * 2 + (cross + 12) * 8
+                          + patches * 25);
+  const mins = Math.max(1, Math.round(imgs / 8 / 60));
+  return { k, chords, patches,
+           label: `k=${k} · ${chords} chords · ~${imgs} img · ~${mins} min`
+                  + (k > 9 ? ' · beyond calibrated range' : '') };
+});
+
+// The pipeline as the user should read it; keys match backend phase names.
+const PHASES: [string, string][] = [
+  ['chords', 'isolate'],
+  ['bisect', 'pin'],
+  ['score', 'certify'],
+  ['patches', 'refine'],
+];
+
+function PhaseBar({ status }: { status: CascadeStatus }) {
+  const idx = PHASES.findIndex(([p]) => p === status.phase);
+  const done = status.phase === 'done' || status.status === 'complete';
+  return (
+    <div style={{ display: 'flex', gap: 4, margin: '8px 0 2px' }}>
+      {PHASES.map(([key, label], i) => {
+        const active = !done && i === idx;
+        const past = done || i < idx;
+        const frac = active && status.phase_total > 0
+          ? Math.min(1, status.phase_done / status.phase_total) : past ? 1 : 0;
+        return (
+          <div key={key} style={{ flex: 1 }}>
+            <div style={{ height: 5, background: '#0a0a1a', borderRadius: 3,
+                          overflow: 'hidden', border: '1px solid #2a2a4a' }}>
+              <div style={{ width: `${frac * 100}%`, height: '100%',
+                            background: past ? ACCENT : '#7d84b5',
+                            transition: 'width 0.6s' }} />
+            </div>
+            <div style={{ fontSize: 10, marginTop: 2, textAlign: 'center',
+                          color: active ? '#fff' : past ? ACCENT : '#667' }}>
+              {label}{active && status.phase_total > 0 &&
+                ` ${status.phase_done}/${status.phase_total}`}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function CrossingCard({ c, runId, selected, onClick }: {
+  c: CascadeStatus['crossings'][number]; runId: string;
+  selected: boolean; onClick: () => void;
+}) {
+  const scored = c.b !== null;
+  return (
+    <div onClick={onClick}
+         style={{ cursor: 'pointer', width: 96,
+                  border: selected ? '2px solid #fff'
+                    : c.significant ? `2px solid ${ACCENT}` : '2px solid #2a2a4a',
+                  borderRadius: 4, background: '#0d0d20', overflow: 'hidden' }}>
+      {c.thumb >= 0 ? (
+        <img src={cascadeImageUrl(runId, c.thumb)} width={92} height={92}
+             loading="lazy" style={{ objectFit: 'cover', display: 'block' }} />
+      ) : (
+        <div style={{ width: 92, height: 92, display: 'flex', alignItems: 'center',
+                      justifyContent: 'center', color: '#555' }}>…</div>
+      )}
+      <div style={{ padding: '3px 5px 5px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between',
+                      fontSize: 10, color: c.significant ? ACCENT : '#8a93b8' }}>
+          <span>{scored ? `B ${c.b!.toFixed(2)}` : 'pinning…'}</span>
+          {c.ridge_group !== null && (
+            <span style={{ color: '#667' }}>r{c.ridge_group}</span>
+          )}
+        </div>
+        <div style={{ height: 3, background: '#1a1a2e', borderRadius: 2,
+                      marginTop: 2 }}>
+          {scored && (
+            <div style={{ width: `${Math.min(100, c.b! * 100)}%`, height: '100%',
+                          background: c.significant ? ACCENT : '#8a93b8',
+                          borderRadius: 2 }} />
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PatchGrid({ runId, patch, onCell, running }: {
+  runId: string; patch: CascadePatch; running?: boolean;
+  onCell?: (thumb: number, row: number, col: number) => void;
+}) {
+  const total = patch.grid.length * (patch.grid[0]?.length ?? 0);
+  const done = patch.grid.flat().filter((t) => t >= 0).length;
+  const filling = !!running && done < total;
+  return (
+    <div style={{ background: '#0d0d20', border: '1px solid #2a2a4a',
+                  borderRadius: 4, padding: 8,
+                  borderLeft: `3px solid ${patch.significant ? ACCENT : '#8a93b8'}` }}>
+      <div style={{ marginBottom: 4, fontSize: 11,
+                    color: patch.significant ? ACCENT : '#8a93b8' }}>
+        {patch.exploration ? 'exploration slot' : `region ${patch.region}`}
+        {' '}· B {patch.b.toFixed(2)}{patch.significant ? ' · certified' : ''}
+        {filling
+          ? <span style={{ color: WARN }}> · assembling {done}/{total}…</span>
+          : <> · crossing in {patch.cols_with_crossing}/5 rows</>}
+      </div>
+      <div style={{ fontSize: 10, color: '#556', marginBottom: 3 }}>
+        → stepping across the boundary
+      </div>
+      {patch.grid.map((row, i) => (
+        <div key={i} style={{ display: 'flex', gap: 2, marginBottom: 2 }}>
+          {row.map((t, j) => t >= 0 ? (
+            <img key={j} src={cascadeImageUrl(runId, t)} width={56} height={56}
+                 loading="lazy"
+                 onClick={() => onCell?.(t, i, j)}
+                 style={{ objectFit: 'cover', borderRadius: 2, cursor: 'pointer' }} />
+          ) : (
+            <div key={j} className={filling ? 'cs-shimmer' : undefined}
+                 style={{ width: 56, height: 56, background: '#0a0a1a',
+                          borderRadius: 2,
+                          animationDelay: `${((i * 5 + j) % 7) * 0.16}s` }} />
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export default function CascadePanel() {
+  const [open, setOpen] = useState(false);
+  const [k, setK] = useState(4);
+  const [nChords, setNChords] = useState(24);
+  const [nPatches, setNPatches] = useState(4);
+  const [seed, setSeed] = useState(42);
+  const [promptText, setPromptText] = useState('');
+  const [runId, setRunId] = useState<string | null>(null);
+  const [status, setStatus] = useState<CascadeStatus | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [selCid, setSelCid] = useState<number | null>(null);
+  const [walk, setWalk] = useState<WalkStatus | null>(null);
+  const timer = useRef<number | null>(null);
+  const walkTimer = useRef<number | null>(null);
+  // large-view modal: any clicked image, its recipe, and "explore from here"
+  const [detail, setDetail] = useState<{
+    thumb: number; title: string; weights: number[] | null;
+    rows: [string, string][]; loading: boolean;
+  } | null>(null);
+
+  const openDetail = async (thumb: number, title: string,
+                            rows: [string, string][],
+                            weights?: number[] | null) => {
+    if (thumb < 0 || !runId) return;
+    if (weights) {
+      setDetail({ thumb, title, rows, weights, loading: false });
+      return;
+    }
+    setDetail({ thumb, title, rows, weights: null, loading: true });
+    try {
+      const info = await cascadePointInfo(runId, thumb);
+      setDetail((d) => d && d.thumb === thumb
+        ? { ...d, weights: info.weights,
+            rows: info.div !== null
+              ? [...rows, ['local divergence', info.div.toFixed(2)]] : rows,
+            loading: false }
+        : d);
+    } catch {
+      setDetail((d) => d && d.thumb === thumb ? { ...d, loading: false } : d);
+    }
+  };
+
+  const exploreFrom = async (weights: number[]) => {
+    if (!status) return;
+    setDetail(null);
+    setErr(null);
+    setSelCid(null);
+    setWalk(null);
+    try {
+      const r = await cascadeStart({
+        k: status.prompts.length,
+        prompts: status.prompts,
+        n_chords: nChords,
+        n_patches: nPatches,
+        seed,
+        focus: weights,
+      });
+      if (r.error) { setErr(r.error); return; }
+      setStatus(null);
+      setRunId(r.run_id);
+    } catch (e: any) { setErr(String(e.message || e)); }
+  };
+
+  // One poll chain only (re-entering the effect must clear the previous timer or a
+  // re-render forks a second chain).
+  useEffect(() => {
+    if (!runId) return;
+    let live = true;
+    const tick = async () => {
+      try {
+        const s = await cascadeStatus(runId);
+        if (!live) return;
+        setStatus(s);
+        if (s.status === 'running') timer.current = window.setTimeout(tick, 1200);
+      } catch {
+        if (live) timer.current = window.setTimeout(tick, 4000);
+      }
+    };
+    tick();
+    return () => {
+      live = false;
+      if (timer.current) window.clearTimeout(timer.current);
+    };
+  }, [runId]);
+
+  // walk poll chain
+  useEffect(() => {
+    if (!runId || !walk || walk.status !== 'running') return;
+    let live = true;
+    const tick = async () => {
+      try {
+        const w = await cascadeWalkStatus(runId, walk.walk_id);
+        if (!live) return;
+        setWalk(w);
+        if (w.status === 'running') walkTimer.current = window.setTimeout(tick, 1000);
+      } catch {
+        if (live) walkTimer.current = window.setTimeout(tick, 3000);
+      }
+    };
+    walkTimer.current = window.setTimeout(tick, 1000);
+    return () => {
+      live = false;
+      if (walkTimer.current) window.clearTimeout(walkTimer.current);
+    };
+  }, [runId, walk?.walk_id, walk?.status]);
+
+  const start = async () => {
+    setErr(null);
+    setStatus(null);
+    setSelCid(null);
+    setWalk(null);
+    const lines = promptText.split('\n').map((s) => s.trim()).filter(Boolean);
+    if (lines.length > 0 && lines.length !== k) {
+      setErr(`enter exactly ${k} prompts (one per line) or none to draw from the pool`);
+      return;
+    }
+    try {
+      const r = await cascadeStart({
+        k,
+        prompts: lines.length ? lines : null,
+        n_chords: nChords,
+        n_patches: nPatches,
+        seed,
+      });
+      if (r.error) { setErr(r.error); return; }
+      setRunId(r.run_id);
+    } catch (e: any) {
+      setErr(String(e.message || e));
+    }
+  };
+
+  const select = (cid: number | null) => {
+    if (walk?.status === 'running' && runId) cascadeWalkCancel(runId, walk.walk_id);
+    setSelCid(cid);
+    setWalk(null);
+  };
+
+  const startWalk = async (direction: number) => {
+    if (!runId || selCid === null) return;
+    try {
+      const w = await cascadeWalkStart(runId, { cid: selCid, direction, n_steps: 5 });
+      if (w.error) { setErr(w.error); return; }
+      setWalk(w);
+    } catch (e: any) { setErr(String(e.message || e)); }
+  };
+
+  const running = status?.status === 'running';
+  const sigCount = status?.crossings.filter((c) => c.significant).length ?? 0;
+  const scored = status?.crossings.filter((c) => c.b !== null) ?? [];
+  const sorted = [...(status?.crossings ?? [])]
+    .sort((a, b) => (b.b ?? -1) - (a.b ?? -1));
+  const walkPath = walk && status
+    ? [status.crossings.find((c) => c.cid === walk.cid)?.weights ?? [],
+       ...walk.steps.map((s) => s.weights)].filter((w) => w.length > 0)
+    : null;
+
+  return (
+    <div style={BOX}>
+      <div style={{ cursor: 'pointer', userSelect: 'none' }}
+           onClick={() => setOpen(!open)}>
+        {open ? '▾' : '▸'} Cascade — find & refine boundaries
+      </div>
+      {open && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap',
+                        alignItems: 'center' }}>
+            <select value="" onChange={(e) => {
+                       const p = PRESETS[Number(e.target.value)];
+                       if (p) { setK(p.k); setNChords(p.chords); setNPatches(p.patches); }
+                     }}
+                     style={{ background: '#0a0a1a', color: '#8a9',
+                              border: '1px solid #444', borderRadius: 3,
+                              padding: '2px 4px', fontSize: 12 }}>
+              <option value="">presets…</option>
+              {PRESETS.map((p, i) => (
+                <option key={p.k} value={i}>{p.label}</option>
+              ))}
+            </select>
+            <label title="3-4 = crisp certified boundaries (exact map, quiet background); 6-9 = exotic blends, softer verdicts. No upper bound; k>9 is beyond the calibrated range">
+              k <input style={NUM} type="number" min={3} value={k}
+                       onChange={(e) => setK(Number(e.target.value))} />
+            </label>
+            <label title="yield ~7/k crossings per chord at ~110/k images each (measured); probing runs at 4 denoising steps (gated: 93% crossing recall, 94% certified recall, ~2x faster) with brackets re-rendered at full fidelity. Rule of thumb: chords = 3 x patches x k/7; raise toward 40+ at k>=6">
+              chords <input style={NUM} type="number" min={4} value={nChords}
+                            onChange={(e) => setNChords(Number(e.target.value))} />
+            </label>
+            <label title="how many boundary walks you want to see (25 images each); one slot is ALWAYS the exploration floor">
+              patches <input style={NUM} type="number" min={2} value={nPatches}
+                             onChange={(e) => setNPatches(Number(e.target.value))} />
+            </label>
+            <label title="a style lever, not a quality dial: same prompts + new seed = a genuinely different boundary map (measured). Fix it to compare settings; change it for another atlas">
+              seed <input style={NUM} type="number" value={seed}
+                          onChange={(e) => setSeed(Number(e.target.value))} />
+            </label>
+            <button onClick={start} disabled={running}
+                    style={{ background: running ? '#333' : '#0f3460',
+                             color: '#fff', border: `1px solid ${ACCENT}`,
+                             borderRadius: 3, padding: '3px 12px',
+                             cursor: running ? 'default' : 'pointer' }}>
+              {running ? 'running…' : 'Start'}
+            </button>
+            {running && runId && (
+              <button onClick={() => cascadeCancel(runId)}
+                      style={{ background: '#0a0a1a', color: WARN,
+                               border: `1px solid ${WARN}`, borderRadius: 3,
+                               padding: '3px 10px', cursor: 'pointer' }}>
+                Cancel
+              </button>
+            )}
+          </div>
+          {(() => {
+            const cross = Math.max(1, Math.round((nChords * 7) / k));
+            const probeImgs = (nChords * 110) / k;
+            const imgs = Math.round(probeImgs + cross * 4
+                                    + (cross + 12) * 8 + nPatches * 25);
+            // probes run at 4 denoising steps (gated: 93%/94% recall) ~ half price
+            const mins = Math.max(1, Math.round((imgs - probeImgs * 0.5) / 8 / 60));
+            return (
+              <div style={{ color: '#667', marginTop: 4, fontSize: 11 }}>
+                estimate: ~{imgs} images · ~{mins} min · ~{cross} crossings
+                {cross < 3 * nPatches &&
+                  ' — few crossings per patch; consider more chords'}
+                {k > 9 && ' — k>9: beyond calibrated range (verdicts still self-calibrated)'}
+              </div>
+            );
+          })()}
+          <textarea value={promptText}
+                    onChange={(e) => setPromptText(e.target.value)}
+                    placeholder={`optional: pin ${k} prompts, one per line (blank = draw from the pool)`}
+                    rows={2}
+                    style={{ width: '100%', marginTop: 6, background: '#0a0a1a',
+                             color: '#fff', border: '1px solid #444', borderRadius: 3,
+                             fontSize: 12, padding: 4, resize: 'vertical' }} />
+          {err && <div style={{ color: '#f66', marginTop: 4 }}>{err}</div>}
+
+          {status && (
+            <div style={{ marginTop: 6 }}>
+              <PhaseBar status={status} />
+              <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap',
+                            color: '#aaa', marginTop: 4 }}>
+                <span style={{ color: status.status === 'error' ? '#f66' : '#6a6' }}>
+                  {status.status}
+                </span>
+                <span>{status.generated} images</span>
+                {status.bg_p95 !== null && (
+                  <span title="background = the run's own measured drift at the same step size; certified means B beats its 95th percentile">
+                    background p95 {status.bg_p95.toFixed(2)}
+                  </span>
+                )}
+                {scored.length > 0 && (
+                  <span style={{ color: ACCENT }}>
+                    {sigCount}/{scored.length} certified
+                  </span>
+                )}
+                {status.unexplored_share !== null && status.distinct_ridges !== null && (
+                  <span title="Good-Turing certificate: the share of distinct ridges crossed exactly once estimates the boundary area this survey never crossed. Low = coverage saturated."
+                        style={{ color: status.unexplored_share <= 0.15
+                                   ? ACCENT : '#c9a227' }}>
+                    {status.distinct_ridges} ridges · ≈{Math.round(status.unexplored_share * 100)}% unexplored
+                  </span>
+                )}
+              </div>
+              {status.prompts.length > 0 && (
+                <div style={{ color: '#666', marginTop: 4, fontSize: 11 }}>
+                  {status.prompts.join('  •  ')}
+                </div>
+              )}
+
+              {running && status.recent_thumbs.length > 0 && runId && (
+                <div style={{ marginTop: 8 }}>
+                  <div style={{ fontSize: 10, color: '#667', marginBottom: 3,
+                                letterSpacing: '0.08em' }}>
+                    JUST GENERATED
+                  </div>
+                  <div style={{ display: 'flex', gap: 3, overflow: 'hidden' }}>
+                    {[...status.recent_thumbs].reverse().map((t) => (
+                      <img key={t} src={cascadeImageUrl(runId, t)} width={44}
+                           height={44}
+                           onClick={() => openDetail(t, `image #${t}`, [])}
+                           style={{ objectFit: 'cover', borderRadius: 3,
+                                    opacity: 0.9, cursor: 'pointer' }} />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {status.chords.length > 0 && runId && (
+                <div style={{ marginTop: 10 }}>
+                  <CascadeMap status={status} runId={runId}
+                              imageUrl={cascadeImageUrl} size={640}
+                              selectedCid={selCid}
+                              onSelect={select}
+                              onImage={openDetail}
+                              walkPath={walkPath}
+                              walkSegs={walk?.segs ?? null} />
+                </div>
+              )}
+
+              {selCid !== null && status.status === 'complete' && runId && (
+                <div style={{ marginTop: 8, padding: '8px 10px', background: '#0d0d20',
+                              border: '1px solid #333', borderRadius: 4 }}>
+                  <span style={{ color: '#aaa', marginRight: 10 }}>
+                    walk the boundary from crossing {selCid}
+                    <span title="Each step is a certified boundary point near the tangent direction (~6-9 images/step, median localisation under half a cell). Honest caveat from ground-truth evaluation: ridge IDENTITY is soft at this fidelity -- the walk may slide onto an adjacent boundary; it truncates with a note when it detects that."
+                          style={{ color: '#667', cursor: 'help' }}> ⓘ</span>
+                  </span>
+                  <button onClick={() => startWalk(-1)}
+                          disabled={walk?.status === 'running'}
+                          style={{ background: '#0f3460', color: '#fff',
+                                   border: `1px solid ${WARN}`, borderRadius: 3,
+                                   padding: '2px 10px', marginRight: 6,
+                                   cursor: 'pointer' }}>
+                    ← 5 steps
+                  </button>
+                  <button onClick={() => startWalk(1)}
+                          disabled={walk?.status === 'running'}
+                          style={{ background: '#0f3460', color: '#fff',
+                                   border: `1px solid ${WARN}`, borderRadius: 3,
+                                   padding: '2px 10px', cursor: 'pointer' }}>
+                    5 steps →
+                  </button>
+                  {walk && (
+                    <span style={{ color: '#888', marginLeft: 10 }}>
+                      {walk.status === 'running'
+                        ? `walking… ${walk.steps.length} steps`
+                        : `${walk.status} · ${walk.steps.length} steps`}
+                      {walk.notes.length > 0 && ` · ${walk.notes[walk.notes.length - 1]}`}
+                    </span>
+                  )}
+                  {walk && walk.steps.length > 0 && (
+                    <div style={{ display: 'flex', gap: 4, marginTop: 8,
+                                  overflowX: 'auto' }}>
+                      {walk.steps.map((s, i) => s.thumb >= 0 && (
+                        <div key={i} style={{ textAlign: 'center' }}>
+                          <img src={cascadeImageUrl(runId, s.thumb)} width={72}
+                               height={72}
+                               onClick={() => openDetail(s.thumb,
+                                 `walk step ${i + 1}`,
+                                 [['local contrast', s.contrast.toFixed(3)]],
+                                 s.weights)}
+                               style={{ objectFit: 'cover', borderRadius: 3,
+                                        border: `1px solid ${WARN}`,
+                                        cursor: 'pointer' }} />
+                          <div style={{ fontSize: 10, color: '#888' }}>
+                            {s.contrast.toFixed(2)}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {sorted.length > 0 && runId && (
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ fontSize: 10, color: '#667', marginBottom: 4,
+                                letterSpacing: '0.08em' }}>
+                    BOUNDARIES FOUND — strongest first · click to locate on the map
+                  </div>
+                  <div style={{ display: 'grid', gap: 6,
+                                gridTemplateColumns: 'repeat(auto-fill, minmax(96px, 1fr))',
+                                maxHeight: 240, overflowY: 'auto' }}>
+                    {sorted.map((c) => (
+                      <CrossingCard key={c.cid} c={c} runId={runId}
+                                    selected={selCid === c.cid}
+                                    onClick={() => {
+                                      select(c.cid);
+                                      openDetail(c.thumb, `crossing ${c.cid}`, [
+                                        ['boundary strength B',
+                                         c.b !== null ? c.b.toFixed(3) : 'unscored'],
+                                        ['certified',
+                                         c.significant ? 'yes — beats background p95' : 'no'],
+                                        ...(c.ridge_group !== null
+                                          ? [['ridge group', `r${c.ridge_group}`] as [string, string]]
+                                          : []),
+                                      ], c.weights);
+                                    }} />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {status.patches.length > 0 && runId && (
+                <div style={{ marginTop: 10 }}>
+                  <div style={{ fontSize: 10, color: '#667', marginBottom: 4,
+                                letterSpacing: '0.08em' }}>
+                    REFINED BOUNDARIES — 5×5 walks across each
+                  </div>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
+                    {status.patches.map((p) => (
+                      <PatchGrid key={p.region} runId={runId} patch={p}
+                                 running={status?.status === 'running'}
+                                 onCell={(t, ri, ci) => openDetail(t,
+                                   `patch ${p.exploration ? '(exploration)' : p.region} · row ${ri + 1}, step ${ci + 1}`,
+                                   [['patch B', p.b.toFixed(3)],
+                                    ['certified', p.significant ? 'yes' : 'no'],
+                                    ['position', `${ci + 1}/5 across the boundary, row ${ri + 1}/5 along it`]])} />
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {status.notes.length > 0 && (
+                <div style={{ color: '#666', marginTop: 8, fontSize: 11 }}>
+                  {status.notes[status.notes.length - 1]}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+      {detail && runId && status && (
+        <div onClick={() => setDetail(null)}
+             style={{ position: 'fixed', inset: 0, background: 'rgba(5,5,18,0.88)',
+                      zIndex: 60, display: 'flex', alignItems: 'center',
+                      justifyContent: 'center', padding: 20 }}>
+          <div onClick={(e) => e.stopPropagation()}
+               style={{ background: '#12122c', border: '1px solid #34346a',
+                        borderRadius: 8, padding: 16, display: 'flex', gap: 16,
+                        flexWrap: 'wrap', maxWidth: '90vw', maxHeight: '90vh',
+                        overflow: 'auto' }}>
+            <img src={cascadeImageUrl(runId, detail.thumb)}
+                 style={{ width: 'min(60vh, 512px)', height: 'min(60vh, 512px)',
+                          objectFit: 'cover', borderRadius: 6 }} />
+            <div style={{ minWidth: 240, maxWidth: 320, fontSize: 12,
+                          color: '#c9d1f0' }}>
+              <div style={{ fontSize: 14, marginBottom: 8, color: '#fff' }}>
+                {detail.title}
+              </div>
+              {detail.rows.map(([l, v]) => (
+                <div key={l} style={{ display: 'flex', justifyContent: 'space-between',
+                                      marginBottom: 3, gap: 12 }}>
+                  <span style={{ color: '#8a93b8' }}>{l}</span>
+                  <span>{v}</span>
+                </div>
+              ))}
+              <div style={{ margin: '10px 0 4px', color: '#8a93b8' }}>recipe</div>
+              {detail.loading && <div style={{ color: '#667' }}>looking up…</div>}
+              {!detail.loading && !detail.weights && (
+                <div style={{ color: '#667' }}>
+                  recipe unavailable for this image
+                </div>
+              )}
+              {detail.weights && status.prompts.map((pr, i) => (
+                <div key={i} style={{ marginBottom: 4 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between',
+                                gap: 10 }}>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis',
+                                   whiteSpace: 'nowrap', maxWidth: 230 }}>{pr}</span>
+                    <span style={{ color: '#8a93b8',
+                                   fontVariantNumeric: 'tabular-nums' }}>
+                      {((detail.weights![i] ?? 0) * 100).toFixed(1)}%
+                    </span>
+                  </div>
+                  <div style={{ height: 4, background: '#1a1a2e', borderRadius: 2 }}>
+                    <div style={{ width: `${Math.min(100, (detail.weights![i] ?? 0) * 100)}%`,
+                                  height: '100%', background: ACCENT,
+                                  borderRadius: 2 }} />
+                  </div>
+                </div>
+              ))}
+              <div style={{ display: 'flex', gap: 8, marginTop: 14 }}>
+                <button disabled={!detail.weights || running}
+                        onClick={() => detail.weights && exploreFrom(detail.weights)}
+                        title="starts a NEW focused run: same prompts, chords confined to a ball (radius 0.18) around this recipe -- a zoomed-in survey of this image's neighbourhood"
+                        style={{ background: '#0f3460', color: '#fff',
+                                 border: `1px solid ${ACCENT}`, borderRadius: 3,
+                                 padding: '4px 12px',
+                                 cursor: detail.weights && !running ? 'pointer' : 'default',
+                                 opacity: detail.weights && !running ? 1 : 0.5 }}>
+                  ⌖ explore from here
+                </button>
+                <button onClick={() => setDetail(null)}
+                        style={{ background: '#0a0a1a', color: '#8a9',
+                                 border: '1px solid #444', borderRadius: 3,
+                                 padding: '4px 12px', cursor: 'pointer' }}>
+                  close
+                </button>
+              </div>
+              {running && (
+                <div style={{ color: '#667', marginTop: 6 }}>
+                  wait for the current run to finish before exploring from here
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

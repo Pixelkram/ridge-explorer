@@ -1,6 +1,12 @@
 import { useMemo, useRef, useState, useCallback, useEffect, lazy, Suspense } from 'react';
 import { useRidgeStore } from './stores/ridgeStore';
 import { startSeedProbe, getSeedProbeStatus } from './api/client';
+import * as api from './api/client';
+import { loadResume, saveResume, onResumeVisible } from './resume';
+import DiscoverPanel from './DiscoverPanel';
+import CascadePanel from './CascadePanel';
+import SurpriseSlider from './components/SurpriseSlider';
+import { feature } from './featureFlags';
 
 const Plot = lazy(() => import('react-plotly.js'));
 
@@ -12,6 +18,13 @@ function PromptInput() {
           setPromptA, setPromptB, setPromptC, setPromptD, setDimensions, setGridSize, setSeed, setSteps, setResolution, setSeedCount, generate, fastScan, mfScan, cancel } = useRidgeStore();
   const busy = phase !== 'idle' && phase !== 'complete' && phase !== 'scan_complete';
 
+  // Hiding the mode selector must not strand the app in 3D: prompt D, the Plotly view
+  // and the refine path all key off `dimensions`, and with the selector gone there is
+  // no control left to get back out.
+  useEffect(() => {
+    if (!feature('threed') && dimensions !== 2) setDimensions(2);
+  }, [dimensions, setDimensions]);
+
   const inputStyle = { width: '100%', padding: 6, background: '#0f3460', border: '1px solid #333',
                        color: '#fff', borderRadius: 4, fontSize: 12 };
   const selectStyle = { padding: 4, background: '#0f3460', border: '1px solid #333',
@@ -20,13 +33,15 @@ function PromptInput() {
   return (
     <div style={{ display: 'flex', gap: 10, padding: 10, background: '#16213e',
                   alignItems: 'flex-end', flexWrap: 'wrap' }}>
-      <div>
-        <label style={{ fontSize: 10, color: '#888' }}>Mode</label>
-        <select value={dimensions} onChange={e => setDimensions(+e.target.value)} style={selectStyle}>
-          <option value={2}>2D</option>
-          <option value={3}>3D</option>
-        </select>
-      </div>
+      {feature('threed') && (
+        <div>
+          <label style={{ fontSize: 10, color: '#888' }}>Mode</label>
+          <select value={dimensions} onChange={e => setDimensions(+e.target.value)} style={selectStyle}>
+            <option value={2}>2D</option>
+            <option value={3}>3D</option>
+          </select>
+        </div>
+      )}
       <div style={{ flex: 1, minWidth: 130 }}>
         <label style={{ fontSize: 10, color: '#888' }}>Prompt A (origin)</label>
         <input value={promptA} onChange={e => setPromptA(e.target.value)} style={inputStyle} />
@@ -68,18 +83,22 @@ function PromptInput() {
                style={{ width: 55, padding: 4, background: '#0f3460', border: '1px solid #333',
                         color: '#fff', borderRadius: 4, fontSize: 11 }} />
       </div>
-      <div>
-        <label style={{ fontSize: 10, color: '#888' }}>Seeds {seedCount > 1 ? `(${seed}-${seed+seedCount-1})` : ''}</label>
-        <select value={seedCount} onChange={e => setSeedCount(+e.target.value)} style={selectStyle}>
-          {[1, 2, 3, 4, 5].map(n => <option key={n} value={n}>{n}{n > 1 ? ' seeds' : ' seed'}</option>)}
-        </select>
-      </div>
-      <button onClick={generate} disabled={busy}
-              style={{ padding: '5px 18px', background: busy ? '#555' : '#e94560',
-                       color: '#fff', border: 'none', borderRadius: 4, fontWeight: 'bold',
-                       cursor: busy ? 'not-allowed' : 'pointer', fontSize: 12 }}>
-        {busy ? 'Working...' : 'Explore'}
-      </button>
+      {feature('seeds') && (
+        <div>
+          <label style={{ fontSize: 10, color: '#888' }}>Seeds {seedCount > 1 ? `(${seed}-${seed+seedCount-1})` : ''}</label>
+          <select value={seedCount} onChange={e => setSeedCount(+e.target.value)} style={selectStyle}>
+            {[1, 2, 3, 4, 5].map(n => <option key={n} value={n}>{n}{n > 1 ? ' seeds' : ' seed'}</option>)}
+          </select>
+        </div>
+      )}
+      {feature('explore') && (
+        <button onClick={generate} disabled={busy}
+                style={{ padding: '5px 18px', background: busy ? '#555' : '#e94560',
+                         color: '#fff', border: 'none', borderRadius: 4, fontWeight: 'bold',
+                         cursor: busy ? 'not-allowed' : 'pointer', fontSize: 12 }}>
+          {busy ? 'Working...' : 'Explore'}
+        </button>
+      )}
       {busy && (
         <button onClick={cancel}
                 style={{ padding: '5px 14px', background: '#333', color: '#e94560',
@@ -88,24 +107,28 @@ function PromptInput() {
           Cancel
         </button>
       )}
-      <button onClick={fastScan} disabled={busy}
-              style={{ padding: '5px 14px', background: busy ? '#555' : '#0f3460',
-                       color: '#fff', border: '1px solid #4ecca3', borderRadius: 4, fontWeight: 'bold',
-                       cursor: busy ? 'not-allowed' : 'pointer', fontSize: 12 }}>
-        {busy ? '...' : 'Fast Scan'}
-      </button>
-      <button onClick={mfScan} disabled={busy}
-              style={{ padding: '5px 14px', background: busy ? '#555' : '#1a5276',
-                       color: '#fff', border: '1px solid #f39c12', borderRadius: 4, fontWeight: 'bold',
-                       cursor: busy ? 'not-allowed' : 'pointer', fontSize: 12 }}>
-        {busy ? '...' : 'MF Scan'}
-      </button>
+      {feature('fastscan') && (
+        <button onClick={fastScan} disabled={busy}
+                style={{ padding: '5px 14px', background: busy ? '#555' : '#0f3460',
+                         color: '#fff', border: '1px solid #4ecca3', borderRadius: 4, fontWeight: 'bold',
+                         cursor: busy ? 'not-allowed' : 'pointer', fontSize: 12 }}>
+          {busy ? '...' : 'Fast Scan'}
+        </button>
+      )}
+      {feature('mfscan') && (
+        <button onClick={mfScan} disabled={busy}
+                style={{ padding: '5px 14px', background: busy ? '#555' : '#1a5276',
+                         color: '#fff', border: '1px solid #f39c12', borderRadius: 4, fontWeight: 'bold',
+                         cursor: busy ? 'not-allowed' : 'pointer', fontSize: 12 }}>
+          {busy ? '...' : 'MF Scan'}
+        </button>
+      )}
     </div>
   );
 }
 
 function ProgressBar() {
-  const { phase, cellsGenerated, cellsTotal, currentGridSize, cancel } = useRidgeStore();
+  const { phase, cellsGenerated, cellsTotal, currentGridSize, cancel, error } = useRidgeStore();
   if (phase === 'idle') return null;
   const busy = phase === 'scanning' || phase === 'generating' || phase === 'analyzing'
     || phase === 'mf_scanning' || phase === 'mf_jacobian_done' || phase === 'mf_finalizing';
@@ -117,11 +140,17 @@ function ProgressBar() {
     : phase === 'generating' ? `Generating: ${cellsGenerated}/${cellsTotal}`
     : phase === 'analyzing' ? 'Computing ridges...'
     : phase === 'scan_complete' ? `Fast scan complete (${currentGridSize}×${currentGridSize})`
+    // phase 'error' used to fall through to the generic grid label, so a job the server
+    // had lost or failed looked identical to a finished one
+    : phase === 'error' ? 'Job failed'
     : `${currentGridSize}×${currentGridSize} grid`;
 
   return (
     <div style={{ padding: '4px 12px', background: '#1a1a2e', display: 'flex', alignItems: 'center', gap: 8 }}>
-      <span style={{ fontSize: 11, color: '#888', minWidth: 160 }}>{label}</span>
+      <span style={{ fontSize: 11, color: phase === 'error' ? '#e94560' : '#888', minWidth: 160 }}>{label}</span>
+      {phase === 'error' && error && (
+        <span style={{ fontSize: 11, color: '#ff8a9c', flex: 1 }}>{error}</span>
+      )}
       {busy && (
         <div style={{ flex: 1, background: '#333', borderRadius: 3, height: 4 }}>
           <div style={{ width: `${pct}%`, background: phase === 'scanning' || phase === 'mf_scanning' ? '#4ecca3' : phase.startsWith('mf_') ? '#f39c12' : '#e94560', borderRadius: 3, height: '100%', transition: 'width 0.3s' }} />
@@ -141,7 +170,7 @@ function ProgressBar() {
 
 function ScanCompletePanel() {
   const { phase, tau, setTau, cells, steps, resolution, setSteps, setResolution,
-          generateSelectedImages } = useRidgeStore();
+          generateSelectedImages, jobId, setManualSelection } = useRidgeStore();
   if (phase !== 'scan_complete') return null;
 
   const median = computeRealMedian(cells);
@@ -163,6 +192,10 @@ function ScanCompletePanel() {
       <span style={{ fontSize: 11, color: '#aaa' }}>
         <span style={{ color: '#4ecca3' }}>{aboveCount}</span>/{totalCells} cells above threshold
       </span>
+      {feature('surprise') && (
+        <SurpriseSlider jobId={jobId}
+          onSample={cells => setManualSelection(cells.map(([r, c]) => `${r},${c}`))} />
+      )}
       <div>
         <label style={{ fontSize: 10, color: '#888' }}>Resolution</label>
         <select value={resolution} onChange={e => setResolution(+e.target.value)} style={selectStyle}>
@@ -187,22 +220,30 @@ function ScanCompletePanel() {
 
 function RefinePanel() {
   const { phase, tau, multiplier, setTau, setMultiplier, submitRefine,
-          cells, currentGridSize, manualSelection } = useRidgeStore();
+          cells, currentGridSize, manualSelection, dimensions } = useRidgeStore();
   if (phase !== 'complete') return null;
 
-  const median = computeRealMedian(cells);
+  const is3d = dimensions === 3;
+  // _refine_3d thresholds on the median over measured cells; the 2D path additionally
+  // excludes retained coarse blocks (span > 1), which do not exist in a 3D refine.
+  // Mirroring computeRealMedian in 3D predicted a different cell set than the backend.
+  const median = is3d ? computeMeasuredMedian(cells) : computeRealMedian(cells);
   const threshold = median * tau;
   const tauSelected = new Set<string>();
   cells.forEach(c => {
     if (c.span === 1 && c.sensitivity !== null && c.sensitivity! >= threshold)
-      tauSelected.add(`${c.row},${c.col}`);
+      // in 3D the cell list is the flattened gs^3 grid; keying on row,col alone
+      // collapsed every z-column onto one key and undercounted by up to gs×.
+      tauSelected.add(is3d ? `${c.row},${c.col},${c.depth}` : `${c.row},${c.col}`);
   });
-  // Union of tau + manual
-  const combined = new Set([...tauSelected, ...manualSelection]);
+  // Union of tau + manual. 3D has no manual-selection path at all (right-click lives
+  // in UnifiedViewport, and _refine_3d ignores extra_positions), so it is tau-only.
+  const combined = is3d ? tauSelected : new Set([...tauSelected, ...manualSelection]);
   const aboveCount = combined.size;
-  const manualOnly = [...manualSelection].filter(k => !tauSelected.has(k)).length;
+  const manualOnly = is3d ? 0 : [...manualSelection].filter(k => !tauSelected.has(k)).length;
   const newGs = currentGridSize * multiplier;
-  const newCells = aboveCount * multiplier * multiplier;
+  // each selected cell is split along every axis: mult^2 sub-cells in 2D, mult^3 in 3D
+  const newCells = aboveCount * multiplier ** (is3d ? 3 : 2);
 
   return (
     <div style={{ display: 'flex', gap: 12, padding: '6px 12px', background: '#1a1a2e',
@@ -213,7 +254,9 @@ function RefinePanel() {
                onChange={e => setTau(+e.target.value)} style={{ display: 'block', width: 140 }} />
       </div>
       <div>
-        <label style={{ fontSize: 10, color: '#888' }}>{multiplier}x → {newGs}x{newGs}</label>
+        <label style={{ fontSize: 10, color: '#888' }}>
+          {multiplier}x → {newGs}x{newGs}{is3d ? `x${newGs}` : ''}
+        </label>
         <input type="range" min={2} max={8} step={1} value={multiplier}
                onChange={e => setMultiplier(+e.target.value)} style={{ display: 'block', width: 80 }} />
       </div>
@@ -439,12 +482,21 @@ function RidgeViewer3D() {
   );
 }
 
-/** Compute median from only real (span=1) cells to match backend. */
+/** Median over strictly positive sensitivities, matching _refine_3d's threshold rule. */
+function computeMeasuredMedian(cells: { sensitivity: number | null }[]): number {
+  // mirrors ridge_detector.measured_mask: 0 is the unmeasured sentinel, and a cell that
+  // came back at ~-1e-7 (near-identical neighbours, float error) is a real measurement
+  const s = cells.filter(c => c.sensitivity !== null && c.sensitivity !== 0).map(c => c.sensitivity!);
+  if (s.length === 0) return 0;
+  return [...s].sort((a, b) => a - b)[Math.floor(s.length / 2)];
+}
+
+/** Median over real (span=1), measured (non-zero) cells — matches refine_grid. */
 function computeRealMedian(cells: { sensitivity: number | null; span: number }[]): number {
-  const real = cells.filter(c => c.span === 1 && c.sensitivity !== null).map(c => c.sensitivity!);
+  const real = cells.filter(c => c.span === 1 && c.sensitivity).map(c => c.sensitivity!);
   if (real.length === 0) {
-    // Fallback to all cells
-    const all = cells.filter(c => c.sensitivity !== null).map(c => c.sensitivity!);
+    // Fallback to all measured cells
+    const all = cells.filter(c => c.sensitivity).map(c => c.sensitivity!);
     if (all.length === 0) return 0;
     return [...all].sort((a, b) => a - b)[Math.floor(all.length / 2)];
   }
@@ -478,14 +530,26 @@ function ExportOverlay() {
 }
 
 function ExportButton({ jobId, layer }: { jobId: string; layer: string }) {
-  const [state, setState] = useState<'idle' | 'loading' | 'done'>('idle');
+  const [state, setState] = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
+
+  const fail = () => {
+    ExportOverlayContext.hide();
+    setState('error');
+    setTimeout(() => setState('idle'), 2000);
+  };
 
   const handleClick = async () => {
     setState('loading');
     ExportOverlayContext.show(`Exporting ${layer}...`);
     try {
       const resp = await fetch(`/api/grid/${jobId}/export/${layer}.jpg`);
-      if (!resp.ok) { setState('idle'); ExportOverlayContext.hide(); return; }
+      // the endpoint answers HTTP 200 with a JSON {"error": ...} body for a job the
+      // backend no longer has, so resp.ok alone downloaded that JSON as a .jpg and
+      // showed the green success tick.
+      if (!resp.ok || !(resp.headers.get('content-type') || '').startsWith('image/')) {
+        fail();
+        return;
+      }
       const blob = await resp.blob();
       ExportOverlayContext.hide();
       const url = URL.createObjectURL(blob);
@@ -499,19 +563,22 @@ function ExportButton({ jobId, layer }: { jobId: string; layer: string }) {
       setState('done');
       setTimeout(() => setState('idle'), 2000);
     } catch {
-      setState('idle');
-      ExportOverlayContext.hide();
+      fail();
     }
   };
 
   return (
     <button onClick={handleClick} disabled={state === 'loading'}
+            title={state === 'error' ? 'export failed — the server has no data for this job' : layer}
             style={{ padding: '2px 8px', border: 'none', borderRadius: 3, fontSize: 10,
-                     background: state === 'loading' ? '#e94560' : state === 'done' ? '#4ecca3' : '#0f3460',
-                     color: state === 'loading' ? '#fff' : state === 'done' ? '#000' : '#aaa',
+                     background: state === 'loading' ? '#e94560' : state === 'done' ? '#4ecca3'
+                                 : state === 'error' ? '#5a1a2a' : '#0f3460',
+                     color: state === 'loading' ? '#fff' : state === 'done' ? '#000'
+                            : state === 'error' ? '#ff8a9c' : '#aaa',
                      cursor: state === 'loading' ? 'wait' : 'pointer',
                      transition: 'background 0.3s' }}>
-      {state === 'loading' ? `${layer}...` : state === 'done' ? `${layer} ✓` : layer}
+      {state === 'loading' ? `${layer}...` : state === 'done' ? `${layer} ✓`
+        : state === 'error' ? `${layer} ✗` : layer}
     </button>
   );
 }
@@ -540,6 +607,14 @@ function UnifiedViewport() {
   const [probeSteps, setProbeSteps] = useState(10);
   const [probeImages, setProbeImages] = useState<{ seeds: number[]; images: (string | null)[] } | null>(null);
   const [probeLoading, setProbeLoading] = useState(false);
+  const [probeError, setProbeError] = useState<string | null>(null);
+  // the poll handle used to live only in the launch closure, so nothing but a
+  // 'complete' status could ever stop it — not closing the overlay, not unmounting
+  const probePoll = useRef<ReturnType<typeof setInterval> | null>(null);
+  const stopProbePoll = useCallback(() => {
+    if (probePoll.current) { clearInterval(probePoll.current); probePoll.current = null; }
+  }, []);
+  useEffect(() => stopProbePoll, [stopProbePoll]);
 
   // Pan/zoom state
   const [zoom, setZoom] = useState(1);
@@ -603,19 +678,25 @@ function UnifiedViewport() {
     return s;
   }, [cells]);
 
-  // Recenter: fit the full grid in the viewport
+  // Recenter: fit the full grid in the viewport. Returns false if it could not run,
+  // so a pending centering is not consumed by a call that did nothing.
   const recenter = useCallback(() => {
     const el = containerRef.current;
-    if (!el) return;
+    if (!el) return false;
     const rect = el.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) return;
+    if (rect.width === 0 || rect.height === 0) return false;
     const gs = currentGridSize;
+    // gs is 0 whenever the backend reports a grid it no longer has; dividing by it
+    // made fitZoom Infinity and pan NaN, and the resulting transform is invalid CSS
+    // so the browser drops it and the viewport freezes.
+    if (gs <= 0) return false;
     const ts = Math.max(4, Math.min(64, Math.floor(800 / gs)));
     const gpx = gs * ts;
     // Fit: scale so the grid fills the viewport with some padding
     const fitZoom = Math.min(rect.width / gpx, rect.height / gpx) * 0.95;
     setZoom(fitZoom);
     setPan({ x: (rect.width - gpx * fitZoom) / 2, y: (rect.height - gpx * fitZoom) / 2 });
+    return true;
   }, [currentGridSize]);
 
   // "H" key to recenter
@@ -643,8 +724,7 @@ function UnifiedViewport() {
     if (!el) return;
     const doCenter = () => {
       if (!needsCenter.current) return;
-      recenter();
-      needsCenter.current = false;
+      if (recenter()) needsCenter.current = false;
     };
     doCenter();
     const observer = new ResizeObserver(() => doCenter());
@@ -959,7 +1039,8 @@ function UnifiedViewport() {
 
       {/* Full-res image overlay with seed probe */}
       {overlayImg && (
-        <div onClick={() => { setOverlayImg(null); setProbeImages(null); }}
+        <div onClick={() => { stopProbePoll(); setProbeLoading(false); setProbeError(null);
+                             setOverlayImg(null); setProbeImages(null); }}
              style={{
                position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.9)',
                display: 'flex', alignItems: 'flex-start', justifyContent: 'center',
@@ -999,27 +1080,54 @@ function UnifiedViewport() {
                       onClick={async () => {
                         const { jobId } = useRidgeStore.getState();
                         if (!jobId) return;
+                        stopProbePoll();
                         setProbeLoading(true);
                         setProbeImages(null);
+                        setProbeError(null);
                         try {
                           const res = await startSeedProbe(jobId, {
                             alpha: overlayImg.alpha, beta: overlayImg.beta,
                             seed_start: probeSeedStart, seed_end: probeSeedEnd,
                             steps: probeSteps,
                           });
-                          if (res.status === 'running') {
-                            // Poll for completion
-                            const poll = setInterval(async () => {
+                          // the endpoint answers HTTP 200 with status 'error' when the
+                          // backend no longer has the job (and 422 with no status at all
+                          // for a bad payload); with no else the button stayed disabled
+                          // and read 'Generating...' for the rest of the session.
+                          if (res.status !== 'running' || !res.probe_id) {
+                            setProbeError(res.status === 'error'
+                              ? 'probe failed — the server no longer has this job'
+                              : `probe failed (${res.status ?? 'bad response'})`);
+                            setProbeLoading(false);
+                            return;
+                          }
+                          // Poll for completion. Bounded: a probe whose GPU tasks were
+                          // drained never reports complete, and a seed that errors never
+                          // gets a thumbnail, so an unbounded poll runs forever.
+                          let attempts = 0;
+                          probePoll.current = setInterval(async () => {
+                            attempts++;
+                            try {
                               const st = await getSeedProbeStatus(res.probe_id);
                               setProbeImages({ seeds: st.seeds, images: st.images });
                               if (st.complete) {
-                                clearInterval(poll);
+                                stopProbePoll();
                                 setProbeLoading(false);
+                                return;
                               }
-                            }, 1000);
-                          }
+                            } catch (err) {
+                              // transient failure: keep polling, but the attempt counted
+                              console.error('[Ridge] Probe poll error:', err);
+                            }
+                            if (attempts >= 600) {
+                              stopProbePoll();
+                              setProbeLoading(false);
+                              setProbeError('probe stalled — stopped polling');
+                            }
+                          }, 1000);
                         } catch (err) {
                           console.error(err);
+                          setProbeError(String(err));
                           setProbeLoading(false);
                         }
                       }}
@@ -1028,6 +1136,9 @@ function UnifiedViewport() {
                                cursor: probeLoading ? 'not-allowed' : 'pointer' }}>
                 {probeLoading ? 'Generating...' : 'Generate'}
               </button>
+              {probeError && (
+                <span style={{ fontSize: 11, color: '#e94560' }}>{probeError}</span>
+              )}
             </div>
 
             {/* Seed probe gallery */}
@@ -1070,6 +1181,997 @@ function MainViewport() {
   return <UnifiedViewport />;
 }
 
+
+// ---------------------------------------------------------------- Itinerary
+// The ridge as a set of walkable arcs rather than a mask. Rebuilding the graph is
+// CPU-only (it reads the stored sensitivity field and DINOv2 embeddings), so the
+// K and persistence sliders are interactive — no regeneration.
+function ItineraryPanel() {
+  const jobId = useRidgeStore((s) => s.jobId);
+  const phase = useRidgeStore((s) => s.phase);
+  const [k, setK] = useState(8);
+  const [hFrac, setHFrac] = useState(0.10);
+  const [graph, setGraph] = useState<any>(null);
+  const [sel, setSel] = useState<number | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  // bumped on every successful build so the filmstrip <img> cannot show the previous
+  // build's cached render under the new arc's id
+  const [build_v, setBuildV] = useState(0);
+
+  // nothing reset these on a new grid, so a fresh job opened showing the previous
+  // job's arcs and its filmstrip
+  useEffect(() => { setGraph(null); setSel(null); setErr(null); }, [jobId]);
+
+  const build = useCallback(async () => {
+    if (!jobId) return;
+    setBusy(true); setErr(null);
+    try {
+      const r: any = await api.buildRidgeGraph(jobId, { k, h_frac: hFrac });
+      if (r?.params?.error) { setErr(String(r.params.error)); setGraph(null); setSel(null); }
+      else {
+        const g = await api.getRidgeGraph(jobId);
+        setGraph(g); setSel(g?.edges?.[0]?.id ?? null); setBuildV((v) => v + 1);
+        if (r?.params?.note) setErr(String(r.params.note));
+      }
+    } catch (e: any) { setErr(String(e)); }
+    setBusy(false);
+  }, [jobId, k, hFrac]);
+
+  if (!jobId || phase === 'idle') return null;
+  const arc = graph?.edges?.find((e: any) => e.id === sel);
+
+  return (
+    <div style={{ padding: '6px 12px', background: '#141c33', borderBottom: '1px solid #333',
+                  display: 'flex', flexDirection: 'column', gap: 6 }}>
+      <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+        <b style={{ fontSize: 12 }}>Ridge itinerary</b>
+        <label style={{ fontSize: 11 }}>basins K
+          <input type="range" min={3} max={16} value={k} onChange={(e) => setK(+e.target.value)}
+                 style={{ width: 90, marginLeft: 6, verticalAlign: 'middle' }} />
+          <span style={{ marginLeft: 4, color: '#4ecca3' }}>{k}</span>
+        </label>
+        <label style={{ fontSize: 11 }}>persistence h
+          <input type="range" min={2} max={40} value={Math.round(hFrac * 100)}
+                 onChange={(e) => setHFrac(+e.target.value / 100)}
+                 style={{ width: 90, marginLeft: 6, verticalAlign: 'middle' }} />
+          <span style={{ marginLeft: 4, color: '#4ecca3' }}>{hFrac.toFixed(2)}</span>
+        </label>
+        <button onClick={build} disabled={busy}
+                style={{ padding: '3px 10px', background: busy ? '#333' : '#e94560', color: '#fff',
+                         border: 'none', borderRadius: 4, fontSize: 11, cursor: 'pointer' }}>
+          {busy ? 'building…' : graph ? 'rebuild' : 'extract arcs'}
+        </button>
+        {graph && (
+          <span style={{ fontSize: 11, color: '#888' }}>
+            {graph.n_arcs} arcs · {graph.n_basins} basins · {graph.junctions.length} junctions
+          </span>
+        )}
+        {err && <span style={{ fontSize: 11, color: '#e94560' }}>{err}</span>}
+      </div>
+
+      {graph && graph.edges.length > 0 && (
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+          {graph.edges.map((e: any) => (
+            <button key={e.id} onClick={() => setSel(e.id)}
+              title={`arc ${e.id}: ${e.length} stations, ${e.s_percentile?.toFixed(0)}th pct of S`}
+              style={{ padding: '2px 8px', fontSize: 11, borderRadius: 4, cursor: 'pointer',
+                       border: sel === e.id ? '1px solid #4ecca3' : '1px solid #444',
+                       background: sel === e.id ? '#20304d' : '#1a1a2e', color: '#ddd' }}>
+              {e.itinerary.map((p: number[]) => `[${p[0]}|${p[1]}]`).join(' → ')}
+              <span style={{ color: '#777', marginLeft: 6 }}>{e.length}</span>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {arc && (
+        <div>
+          <div style={{ fontSize: 11, color: '#999', marginBottom: 3 }}>
+            arc {arc.id}: {arc.length} stations · flanking basins{' '}
+            {arc.itinerary.map((p: number[]) => `${p[0]} | ${p[1]}`).join('  →  ')} ·{' '}
+            {arc.s_percentile?.toFixed(0)}th percentile of sensitivity
+          </div>
+          <img key={`${jobId}-${arc.id}-${build_v}`}
+               src={`${api.itineraryUrl(jobId, arc.id)}${api.itineraryUrl(jobId, arc.id).includes('?') ? '&' : '?'}v=${build_v}`}
+               alt={`itinerary ${arc.id}`}
+               onError={(e) => { (e.target as HTMLImageElement).style.visibility = 'hidden'; }}
+               onLoad={(e) => { (e.target as HTMLImageElement).style.visibility = 'visible'; }}
+               style={{ maxWidth: '100%', borderRadius: 4, background: '#000' }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+
+// ------------------------------------------------------ animated hike journey
+//
+// A hiker is a CHAIN across triangles, not a row per hop. `chain` in the status is the
+// index within that hop's live population and is not stable between hops; `lineage` is
+// (root, then ">i,j" appended at each exit). Grouping by lineage reconstructs each
+// hiker's whole journey, so it plays as one continuous filmstrip and the hand-off
+// between triangles is visible: the last frame of a hop IS the exit, and that exit
+// becomes the first vertex of the next triangle.
+function parentLineage(l: string): string | null {
+  if (!l || l === 'root') return null;
+  const i = l.lastIndexOf('>');
+  return i <= 0 ? 'root' : l.slice(0, i);
+}
+
+export function journeys(rows: any[]): any[][] {
+  const walked = rows.filter((r) => (r.stations?.length ?? 0) > 0);
+  const byLin = new Map<string, any>();
+  for (const r of walked) if (!byLin.has(r.lineage ?? 'root')) byLin.set(r.lineage ?? 'root', r);
+  const isParent = new Set<string>();
+  for (const l of byLin.keys()) { const p = parentLineage(l); if (p) isParent.add(p); }
+  const out: any[][] = [];
+  for (const [l, r] of byLin) {
+    if (isParent.has(l)) continue;           // not a leaf: a longer journey covers it
+    const path = [r];
+    let cur = parentLineage(l);
+    while (cur && byLin.has(cur)) { path.unshift(byLin.get(cur)); cur = parentLineage(cur); }
+    out.push(path);
+  }
+  out.sort((a, b) => (b.length - a.length) || (b[b.length - 1].hop - a[a.length - 1].hop));
+  return out;
+}
+
+
+// Lineage strings are exit coordinates (">7,0>0,9>0,6") -- exact, and unreadable. Name
+// each hiker by its position in the branch tree instead: the first split gives A, B, C;
+// a split under A gives A1, A2; under A1 gives A1a, A1b. Siblings are ordered by their
+// exit coordinate so a name is stable across polls rather than jumping as rows arrive.
+const TIERS = ['ABCDEFGH', '12345678', 'abcdefgh'];
+// one hue per top-level branch, so siblings read as a family at a glance
+const BRANCH_HUES = ['#4ecca3', '#5aa9e6', '#e9a145', '#c77dff', '#f4737f', '#7fd1ae'];
+export function branchColour(name: string): string {
+  const i = name ? (name.charCodeAt(0) - 65) : 0;
+  return BRANCH_HUES[((i % BRANCH_HUES.length) + BRANCH_HUES.length) % BRANCH_HUES.length];
+}
+
+export function lineageNames(rows: any[]): Map<string, string> {
+  // Name from the SAME rows that get drawn. A hop that produced no arc has no stations,
+  // so it is not a node in LineageTree and not a journey — but while it was still counted
+  // here it took a sibling slot, and the names shifted: with one arcless sibling at hop 1
+  // the surviving hiker was "B" (blue) on its journey card and "A" (green) in the tree,
+  // for the same lineage. LineageTree already passes the walked subset, so filtering here
+  // is a no-op for it and makes every other caller agree with it by construction.
+  const walked = rows.filter((r) => (r.stations?.length ?? 0) > 0);
+  const lins = new Set<string>();
+  for (const r of walked) {
+    let l = r.lineage ?? 'root';
+    while (l && l !== 'root') { lins.add(l); l = parentLineage(l); }
+  }
+  // Same trap as in LineageTree: a null parent must NOT collapse onto 'root', or root
+  // becomes its own child and walk() below recurses forever.
+  const kids = new Map<string, string[]>();
+  for (const l of lins) {
+    const p = parentLineage(l);
+    if (p === null || p === l) continue;
+    if (!kids.has(p)) kids.set(p, []);
+    kids.get(p)!.push(l);
+  }
+  for (const v of kids.values()) v.sort();
+  const name = new Map<string, string>([['root', '']]);
+  const walk = (node: string, depth: number) => {
+    const cs = kids.get(node) ?? [];
+    cs.forEach((c, i) => {
+      const tier = TIERS[Math.min(depth, TIERS.length - 1)];
+      // a lone child continues its parent's name: it is the same hiker, not a branch
+      name.set(c, cs.length === 1 ? (name.get(node) || 'A')
+                                  : (name.get(node) ?? '') + tier[i % tier.length]);
+      walk(c, depth + 1);
+    });
+  };
+  walk('root', 0);
+  return name;
+}
+
+// Where did this branch split away from its neighbours, and is it still alive?
+export function branchInfo(paths: any[][], maxHop: number) {
+  return paths.map((p) => {
+    const leaf = p[p.length - 1];
+    return {
+      leaf,
+      alive: leaf.hop >= maxHop,
+      // index of the first triangle this journey does not share with the one before it
+      forkAt: (other: any[]) => {
+        let k = 0;
+        while (k < p.length && k < other.length &&
+               (p[k].lineage ?? 'root') === (other[k].lineage ?? 'root')) k++;
+        return k;
+      },
+    };
+  });
+}
+
+
+// A layered view of the branch topology. Every one of these trees is tiny -- nodes is
+// bounded by `budget` and width by `beam` (measured over 27 saved hikes: max 9 nodes,
+// max width 4, max depth 8) -- so depth IS the hop number and the layout is a fixed
+// grid, not a graph problem. Leaves take consecutive slots in DFS order and a parent
+// sits at the mean of its children, which is exact and deterministic for trees this size.
+//
+// It is a NAVIGATOR, not a replacement for the journeys: it answers "what is the
+// population doing" (e.g. all three survivors descending from one lineage means the beam
+// collapsed), while the journeys answer "what did it find". It hides itself when there
+// is no branching, because a beam-1 run is a line and a line shows nothing.
+export function LineageTree({ hikeId, rows, vertical, selected, onSelect, node = 38 }:
+    { hikeId: string; rows: any[]; vertical?: boolean; node?: number;
+      selected: string | null; onSelect: (lineage: string) => void }) {
+  const walked = rows.filter((r) => (r.stations?.length ?? 0) > 0);
+  if (walked.length < 2) return null;
+  const names = lineageNames(walked);
+  const byLin = new Map<string, any>();
+  for (const r of walked) if (!byLin.has(r.lineage ?? 'root')) byLin.set(r.lineage ?? 'root', r);
+
+  const kids = new Map<string, string[]>();
+  for (const l of byLin.keys()) {
+    const p = parentLineage(l);
+    // `?? 'root'` here made root its OWN child, because parentLineage('root') is null.
+    // place() then recursed into itself forever and took the whole UI down with a
+    // RangeError the moment hop 0 was on screen.
+    if (p === null || p === l) continue;
+    if (!kids.has(p)) kids.set(p, []);
+    kids.get(p)!.push(l);
+  }
+  for (const v of kids.values()) v.sort();
+  // The seed triangle is a node too. Rooting the layout at whichever lineages have no
+  // parent IN the data keeps it correct whether or not hop 0 was recorded.
+  const roots = byLin.has('root') ? ['root']
+    : [...byLin.keys()].filter((l) => !byLin.has(parentLineage(l) ?? ''));
+  const maxHop = Math.max(0, ...walked.map((r) => r.hop ?? 0));
+  // Count nodes per depth with a Map, not a sparse array: the array version left holes
+  // wherever a depth was empty, and spreading a hole into Math.max yields undefined ->
+  // NaN, so the "is there any branching" test silently stopped working.
+  const perDepth = new Map<number, number>();
+  for (const l of byLin.keys()) {
+    const d = byLin.get(l)?.hop ?? 0;
+    perDepth.set(d, (perDepth.get(d) ?? 0) + 1);
+  }
+  const width = Math.max(1, ...perDepth.values());
+  if (width < 2) return null;                       // a line: nothing to draw
+
+  // tidy layout: leaves get consecutive slots, parents centre on their children
+  const slot = new Map<string, number>();
+  let next = 0;
+  // `seen` is belt-and-braces: the parent map is now acyclic by construction, but a
+  // layout routine must never be able to hang the interface.
+  const seen = new Set<string>();
+  const place = (l: string): number => {
+    if (seen.has(l)) return slot.get(l) ?? 0;
+    seen.add(l);
+    const cs = (kids.get(l) ?? []).filter((c) => byLin.has(c) && c !== l);
+    if (!cs.length) { slot.set(l, next); return next++; }
+    const ys = cs.map((c) => place(c));
+    const y = (Math.min(...ys) + Math.max(...ys)) / 2;
+    slot.set(l, y);
+    return y;
+  };
+  roots.forEach((l) => place(l));
+
+  const NODE = node, GAP_D = Math.round(node * 0.8), GAP_S = Math.round(node * 0.32);
+  // depth is the hop number, straight from the row -- deriving it from the lineage
+  // string put 'root' at -1 and rendered the seed triangle off-canvas
+  const depthOf = (l: string) => byLin.get(l)?.hop ?? 0;
+  const minHop = Math.min(...[...byLin.keys()].map(depthOf));
+  const pos = (l: string) => {
+    const d = depthOf(l), sl = slot.get(l) ?? 0;
+    const along = (d - minHop) * (NODE + GAP_D), across = sl * (NODE + GAP_S);
+    return vertical ? { x: across, y: along } : { x: along, y: across };
+  };
+  const span = { along: (maxHop - minHop) * (NODE + GAP_D) + NODE,
+                 across: Math.max(1, next) * (NODE + GAP_S) };
+  const W = vertical ? span.across : span.along;
+  const H = vertical ? span.along : span.across;
+
+  const edges: JSX.Element[] = [];
+  for (const l of byLin.keys()) {
+    const p = parentLineage(l);
+    if (!p || !byLin.has(p)) continue;
+    const a = pos(p), b = pos(l);
+    edges.push(<line key={`e${l}`} x1={a.x + NODE / 2} y1={a.y + NODE / 2}
+                     x2={b.x + NODE / 2} y2={b.y + NODE / 2}
+                     stroke={branchColour(names.get(l) ?? '')} strokeWidth={2}
+                     strokeOpacity={0.55} />);
+  }
+
+  return (
+    <div style={{ position: 'relative', width: W, height: H, margin: '2px 0 10px' }}>
+      <svg width={W} height={H} style={{ position: 'absolute', inset: 0 }}>{edges}</svg>
+      {[...byLin.keys()].map((l) => {
+        const r = byLin.get(l), { x, y } = pos(l);
+        const nm = names.get(l) ?? '';
+        const isLeaf = !(kids.get(l) ?? []).some((c) => byLin.has(c));
+        const pruned = isLeaf && (r.hop ?? 0) < maxHop;
+        const on = selected === l;
+        return (
+          <div key={l} onClick={() => onSelect(l)}
+               title={`${nm || 'A'} · hop ${r.hop}${pruned ? ' · pruned' : ''}`}
+               style={{ position: 'absolute', left: x, top: y, width: NODE, height: NODE,
+                        borderRadius: 6, overflow: 'hidden', cursor: 'pointer',
+                        boxShadow: on ? `0 0 0 2px #fff` : 'none',
+                        border: `2px solid ${branchColour(nm)}`,
+                        opacity: pruned ? 0.5 : 1, background: '#000' }}>
+            <img src={api.hikeMapUrl(hikeId, r.chain, r.hop)} alt={nm}
+                 onError={(e) => { (e.target as HTMLImageElement).style.visibility = 'hidden'; }}
+                 style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+            {isLeaf && (
+              <span style={{ position: 'absolute', left: 0, bottom: 0, fontSize: 9,
+                             padding: '0 3px', background: 'rgba(0,0,0,.72)',
+                             color: branchColour(nm), fontWeight: 700 }}>
+                {nm || 'A'}{pruned ? '✕' : ''}
+              </span>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function HikeJourney({ hikeId, path, playing, speed, onBranch, branching }:
+                     { hikeId: string; path: any[]; playing: boolean; speed: number;
+                       onBranch: (row: any, station: number) => void; branching: boolean }) {
+  // one flat sequence of (row, stationIndex) across every triangle this hiker crossed
+  const seq: { r: any; s: [number, number]; k: number; last: boolean;
+               approach: boolean }[] = [];
+  for (const r of path) {
+    const st: [number, number][] = r.stations ?? [];
+    const ap = r.approach ?? 0;
+    st.forEach((p, k) => seq.push({ r, s: p, k, last: k === st.length - 1,
+                                    approach: k < ap }));
+  }
+  const [n, setN] = useState(0);
+  const [box, setBox] = useState({ w: 0, h: 0 });
+  // Which noise draw the filmstrip shows. A multi-seed hike walks the AVERAGED
+  // sensitivity field, so every seed's strip follows the identical route — switching is a
+  // controlled comparison of what the same itinerary looks like under a different draw,
+  // not a different hike. Index, not seed value; the row carries the values for the label.
+  const [seedIdx, setSeedIdx] = useState(0);
+  const nSeeds = Math.max(1, ...path.map((r: any) => r.n_seeds ?? 1));
+  const seedVals: number[] = path.find((r: any) => r.seeds?.length)?.seeds ?? [];
+  useEffect(() => { if (seedIdx >= nSeeds) setSeedIdx(0); }, [nSeeds, seedIdx]);
+  // Animate only a forward step of one. Looping from the last station back to 0, and a
+  // scrub jump, are POSITION CHANGES, not travel: transitioning them made the strip race
+  // backwards through every frame and the map marker fly across the simplex.
+  // a user scrub pauses this journey; auto-play only resumes when they release the pin
+  const [pinned, setPinned] = useState(false);
+  const [drag, setDrag] = useState(false);
+  const strip = useRef<HTMLDivElement | null>(null);
+  useEffect(() => { setN(0); }, [path.length, seq.length]);
+  useEffect(() => {
+    if (!playing || pinned || drag || seq.length < 2) return;
+    const t = window.setInterval(() => setN((p) => (p + 1) % seq.length), speed);
+    return () => window.clearInterval(t);
+  }, [playing, pinned, drag, speed, seq.length]);
+
+  // map a pointer x within the strip onto a frame index
+  const scrubTo = useCallback((clientX: number) => {
+    const el = strip.current; if (!el) return;
+    const r = el.getBoundingClientRect();
+    const f = Math.min(1, Math.max(0, (clientX - r.left) / Math.max(r.width, 1)));
+    setN(Math.min(seq.length - 1, Math.floor(f * seq.length)));
+  }, [seq.length]);
+  useEffect(() => {
+    if (!drag) return;
+    const mv = (e: PointerEvent) => scrubTo(e.clientX);
+    const up = () => { setDrag(false); setPinned(true); };
+    window.addEventListener('pointermove', mv);
+    window.addEventListener('pointerup', up);
+    return () => { window.removeEventListener('pointermove', mv);
+                   window.removeEventListener('pointerup', up); };
+  }, [drag, scrubTo]);
+  if (!seq.length) return null;
+
+  const cur = seq[Math.min(n, seq.length - 1)];
+  const r = cur.r;
+  const gs = r.grid ?? 20, m = r.margin ?? 0, dim = gs + 3 * m;
+  const [i, j] = cur.s;
+  const fx = ((i + 0.5) / dim) * box.w, fy = ((dim - 1 - j + 0.5) / dim) * box.h;
+  const hopIdx = path.indexOf(r);
+  // frames in THIS hop's strip; stations is authoritative, n_frames is the server's count
+  const BOX = 192;
+  // ONE CONTINUOUS TRACK across every triangle. Each hop is a separate strip jpg, so the
+  // hand-off used to swap the img src and reset the offset — there was nothing to scroll
+  // INTO, and it read as a cut however it was timed. Lay every hop's strip end to end in
+  // a track and translate by the GLOBAL tile index: crossing a triangle is then just the
+  // scroll continuing. Because the exit image of hop h is vertex A of hop h+1 (extend()
+  // makes it so exactly), the two adjacent tiles are the same picture, so the seam reads
+  // as a single held beat rather than a jump.
+  // All widths are percentages of the TRACK, which is TOT container-widths wide, so one
+  // tile is exactly one container width at any screen size — no pixel constants.
+  const frames = path.map((row: any) => Math.max(1, row.n_frames ?? (row.stations?.length ?? 1)));
+  const cumF: number[] = [];
+  { let acc = 0; for (const f of frames) { cumF.push(acc); acc += f; } }
+  const TOT = Math.max(1, cumF[cumF.length - 1] + frames[frames.length - 1]);
+  const gpos = (cumF[hopIdx] ?? 0) + Math.min(cur.k, (frames[hopIdx] ?? 1) - 1);
+  // Animate only a forward step of exactly one TILE. The loop wrap and a scrub are
+  // position changes, not travel; transitioning them made the strip race backwards
+  // through every frame. A triangle hand-off DOES advance gpos by one, so it animates.
+  const prevG = useRef(-1);
+  const jumped = gpos !== prevG.current + 1;
+  // The map is a different picture per triangle, so its marker must never glide across
+  // a hand-off even though the strip does.
+  const hopId = `${r?.hop}-${r?.chain}`;
+  const prevHop = useRef<string>('');
+  const hopJump = jumped || hopId !== prevHop.current;
+  useEffect(() => { prevG.current = gpos; prevHop.current = hopId; }, [gpos, hopId]);
+  const glide = (prop: string) => (jumped ? 'none' : `${prop} ${speed}ms linear`);
+
+
+  return (
+    <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+      <div style={{ position: 'relative', width: 175, flexShrink: 0 }}>
+        <img key={`${r.hop}-${r.chain}`} src={api.hikeMapUrl(hikeId, r.chain, r.hop)}
+             alt={`triangle ${hopIdx + 1}`}
+             onLoad={(e) => { const el = e.target as HTMLImageElement;
+                              setBox({ w: el.clientWidth, h: el.clientHeight }); }}
+             onError={(e) => { (e.target as HTMLImageElement).style.visibility = 'hidden'; }}
+             style={{ width: 175, borderRadius: 3, background: '#000', display: 'block',
+                      outline: cur.last ? '2px solid #e94560' : 'none' }} />
+        {box.w > 0 && (
+          <div style={{ position: 'absolute', left: fx - 6, top: fy - 6, width: 12, height: 12,
+                        borderRadius: 6, border: '2px solid #fff', pointerEvents: 'none',
+                        background: cur.last ? 'rgba(233,69,96,.9)'
+                                    : cur.approach ? 'rgba(150,200,255,.9)'
+                                    : 'rgba(80,255,180,.85)',
+                        transition: hopJump ? 'none'
+                                    : `left ${speed}ms linear, top ${speed}ms linear` }} />
+        )}
+        <div style={{ fontSize: 10, color: '#889', marginTop: 2 }}>
+          triangle {hopIdx + 1}/{path.length}
+          {cur.last && hopIdx < path.length - 1 &&
+            <span style={{ color: '#e94560' }}> · exiting →</span>}
+        </div>
+      </div>
+      <div>
+        {/* Slide by a FRACTION of the strip's own width, never a pixel count: tiles are
+            now rendered at the hike's generated resolution (128-512px), so any hard-coded
+            frame size would desync. width = n*100% makes one tile exactly one box width. */}
+        <div style={{ width: BOX, height: BOX, overflow: 'hidden',
+                      borderRadius: 3, background: '#000', position: 'relative' }}>
+          <div style={{ position: 'absolute', top: 0, left: 0, height: '100%',
+                        width: `${TOT * 100}%`,
+                        transform: `translateX(-${(gpos * 100) / TOT}%)`,
+                        transformOrigin: 'top left',
+                        transition: glide('transform') }}>
+            {path.map((row: any, i: number) => (
+              /* only the neighbouring hops carry a src: layout is exact from the frame
+                 counts alone, so distant strips cost nothing until they are approached */
+              <img key={`f-${row.hop}-${row.chain}`} alt={i === hopIdx ? `frame ${cur.k}` : ''}
+                   src={Math.abs(i - hopIdx) <= 1
+                        ? api.hikeFilmstripUrl(hikeId, row.chain, row.hop, undefined,
+                                               seedIdx) : undefined}
+                   /* a seed variant that 404s must not hide the tile permanently: the
+                      element is reused when the user switches back to a seed that has one */
+                   onLoad={(e) => { (e.target as HTMLImageElement).style.visibility = 'visible'; }}
+                   onError={(e) => { (e.target as HTMLImageElement).style.visibility = 'hidden'; }}
+                   style={{ position: 'absolute', top: 0, height: 'auto',
+                            left: `${(cumF[i] * 100) / TOT}%`,
+                            width: `${(frames[i] * 100) / TOT}%` }} />
+            ))}
+          </div>
+        </div>
+        {/* drag anywhere on the bar to scrub; each tick is one station */}
+        <div ref={strip}
+             onPointerDown={(e) => { e.preventDefault(); setDrag(true); setPinned(true);
+                                     scrubTo(e.clientX); }}
+             title="drag to scrub · click a frame to pin it"
+             style={{ display: 'flex', gap: 1, height: 14, marginTop: 4,
+                      cursor: drag ? 'grabbing' : 'grab', userSelect: 'none' }}>
+          {seq.map((q, idx) => (
+            <div key={idx} style={{ flex: 1, borderRadius: 1,
+                 background: idx === n ? '#fff'
+                             : q.approach ? 'rgba(150,200,255,.55)'
+                             : q.last ? 'rgba(233,69,96,.7)' : 'rgba(80,255,180,.45)' }} />
+          ))}
+        </div>
+        <div style={{ fontSize: 10, color: '#778', marginTop: 3 }}>
+          step {n + 1}/{seq.length} · cell [{i},{j}]
+          {cur.approach && <span style={{ color: '#96c8ff' }}> · walking in from the exit</span>}
+        </div>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 4 }}>
+          <button onClick={() => setPinned((p) => !p)}
+                  style={{ fontSize: 10, padding: '2px 8px', borderRadius: 3,
+                           cursor: 'pointer', border: '1px solid #444', color: '#ddd',
+                           background: pinned ? '#20304d' : '#1a1a2e' }}>
+            {pinned ? '▶ resume' : '❚❚ pin'}
+          </button>
+          <button onClick={() => onBranch(r, cur.k)} disabled={branching}
+                  title="start a new hike whose first triangle is this image plus two fresh prompts"
+                  style={{ fontSize: 10, padding: '2px 8px', borderRadius: 3,
+                           cursor: 'pointer', border: 'none', color: '#fff',
+                           background: branching ? '#333' : '#4ecca3' }}>
+            {branching ? 'starting…' : 'explore from here'}
+          </button>
+        </div>
+        {nSeeds > 1 && (
+          <div style={{ display: 'flex', gap: 4, alignItems: 'center', marginTop: 4,
+                        flexWrap: 'wrap' }}
+               title="the same walk under a different noise draw — the ridge was found on the field averaged over all of these">
+            <span style={{ fontSize: 10, color: '#889' }}>seed</span>
+            {Array.from({ length: nSeeds }, (_, k) => (
+              <button key={k} onClick={() => setSeedIdx(k)}
+                      style={{ fontSize: 10, padding: '1px 6px', borderRadius: 3,
+                               cursor: 'pointer', border: '1px solid #444',
+                               color: k === seedIdx ? '#fff' : '#99a',
+                               background: k === seedIdx ? '#20304d' : '#1a1a2e' }}>
+                {seedVals[k] ?? k}
+              </button>
+            ))}
+          </div>
+        )}
+        <div style={{ fontSize: 10, color: '#667', marginTop: 2, maxWidth: BOX }}>
+          {(r.labels ?? []).map((l: string) => l.slice(0, 30)).join('  |  ')}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ------------------------------------------------------------------ Hikers
+// A population of chains walks ridges, hops to a new simplex at each boundary, and
+// competes against one shared novelty archive. Long-running: start, then poll.
+function HikePanel() {
+  const promptA = useRidgeStore((s) => s.promptA);
+  const promptB = useRidgeStore((s) => s.promptB);
+  const promptC = useRidgeStore((s) => s.promptC);
+  const [open, setOpen] = useState(false);
+  const [beam, setBeam] = useState(4);
+  const [budget, setBudget] = useState(16);
+  const [gridSize, setGridSize] = useState(25);
+  const [refineRounds, setRefineRounds] = useState(0);
+  const [margin, setMargin] = useState(0);
+  const [steps, setSteps] = useState(8);
+  // Seed was fixed at the backend default of 42 and never exposed, so every hike any
+  // tester ran was ONE noise draw. E25 measured the ridge field's seed-to-seed Spearman
+  // at 0.69-0.79 -- seed moves the ridge more than steps or resolution do -- so which
+  // seed you got was the single largest uncontrolled factor in a hike.
+  const [seed, setSeed] = useState(42);
+  const [seedCount, setSeedCount] = useState(1);
+  const [cfg, setCfg] = useState(4.0);
+  const [res, setRes] = useState(512);
+  const [pool, setPool] = useState<string[] | null>(null);   // null = server default
+  const [poolName, setPoolName] = useState<string>('');
+  const [stopping, setStopping] = useState(false);
+  const [animate, setAnimate] = useState(true);
+  const [speed, setSpeed] = useState(450);
+  const [hikeId, setHikeId] = useState<string | null>(() => loadResume().hikeId ?? null);
+  const [status, setStatus] = useState<any>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const timer = useRef<number | null>(null);
+
+  // Exactly ONE poll chain, and it belongs to the hike currently on screen.
+  //
+  // `poll` reschedules itself, so every entry point that called it -- start, branch, and
+  // every tab foregrounding -- forked another self-perpetuating chain while `timer`
+  // remembered only the most recent one. Ten alt-tabs left ten chains: ten /status GETs
+  // every 3s, unmount cancelled one of the ten, and after a branch the parent hike's
+  // chain went on writing its own status into the panel, so hop/grids alternated between
+  // the two runs every few seconds. Worst of all, a chain still polling a dead id took
+  // the 'unknown' branch on every tick and cleared the resume id of the run that was
+  // actually going.
+  //
+  // Hence `watching`: the one id a chain is allowed to report on. A chain that no longer
+  // matches it drops out silently, and a reschedule cancels the pending tick first, so
+  // transient duplicates (a foreground event landing mid-request) collapse back to one.
+  //
+  // reschedule in `finally`: a single transient fetch/parse failure used to end the
+  // poll chain for good, freezing the panel at "running" with the button disabled
+  // for the rest of the session.
+  const watching = useRef<string | null>(null);
+  const poll = useCallback(async (id: string) => {
+    if (watching.current !== id) return;          // superseded before this tick ran
+    let again = true;
+    try {
+      const st = await api.getHikeStatus(id);
+      if (watching.current !== id) return;        // superseded while the request was in flight
+      if (st.status === 'unknown') {
+        again = false;                            // nothing left to poll: do not respawn
+        saveResume({ hikeId: null }); setHikeId(null); setStatus(null); setStopping(false);
+        setErr('that run is no longer on the server'); return;
+      }
+      setStatus(st);
+      setErr(null);
+      again = st.status === 'running';
+      if (!again) setStopping(false);
+    } catch (e: any) {
+      setErr(`${String(e)} — retrying`);
+    } finally {
+      if (again && watching.current === id) {
+        if (timer.current) window.clearTimeout(timer.current);
+        timer.current = window.setTimeout(() => poll(id), 3000);
+      }
+    }
+  }, []);
+
+  // Resume a run the browser forgot (tab evicted, laptop slept) and re-poll the instant
+  // the tab is foregrounded, since background timers are throttled. The cleanup also
+  // covers unmount, which is why there is no second unmount-only effect.
+  useEffect(() => {
+    watching.current = hikeId;
+    if (hikeId) poll(hikeId);
+    const off = onResumeVisible(() => { if (watching.current) poll(watching.current); });
+    return () => {
+      off();
+      watching.current = null;                    // an in-flight reply must not reschedule
+      if (timer.current) { window.clearTimeout(timer.current); timer.current = null; }
+    };
+  }, [hikeId, poll]);
+
+  // One prompt per line. If the file has commas we take the first column, so a
+  // one-column CSV and a plain text list both work. Quotes are stripped and a
+  // header-looking first row ("prompt") is dropped.
+  const loadCsv = useCallback(async (f: File) => {
+    try {
+      const text = await f.text();
+      let rows = text.split(/\r?\n/)
+        .map((l) => (l.includes(',') ? l.split(',')[0] : l).trim().replace(/^"|"$/g, ''))
+        .filter((l) => l.length > 0);
+      if (rows.length && /^(prompt|prompts|text)$/i.test(rows[0])) rows = rows.slice(1);
+      const uniq = Array.from(new Set(rows));
+      if (uniq.length < 3) { setErr(`${f.name}: need at least 3 prompts, found ${uniq.length}`); return; }
+      setPool(uniq); setPoolName(f.name); setErr(null);
+    } catch (e: any) { setErr(`could not read ${f.name}: ${String(e)}`); }
+  }, []);
+
+  const [branching, setBranching] = useState(false);
+  const [selected, setSelected] = useState<string | null>(null);
+
+  // Start a new hike seeded at the station the user pinned. The station is a barycentric
+  // point in that walk's simplex, so the backend rebuilds it as an embedding coordinate
+  // and pairs it with two freshly drawn prompts -- the same move an edge-hop makes, with
+  // the user choosing the point instead of the selector.
+  const branch = useCallback(async (row: any, station: number) => {
+    if (!hikeId) return;
+    setBranching(true); setErr(null);
+    try {
+      const r = await api.branchHike(hikeId, {
+        hop: row.hop, chain: row.chain, station,
+        beam, budget, grid_size: gridSize, refine_rounds: refineRounds, margin,
+        seed, seed_count: seedCount,
+        ...(pool ? { prompt_pool: pool } : {}),
+      });
+      // no poll() here: the hikeId effect owns starting the chain, and calling it
+      // directly would only fork a second one (or, now, no-op against `watching`).
+      if (r.hike_id) { saveResume({ hikeId: r.hike_id }); setStatus(null);
+                       setHikeId(r.hike_id); }
+    } catch (e: any) {
+      setErr(String(e));
+    } finally { setBranching(false); }
+  }, [hikeId, beam, budget, gridSize, refineRounds, margin, pool, seed, seedCount]);
+
+  const stop = useCallback(async () => {
+    if (!hikeId) return;
+    setStopping(true);
+    try { await api.cancelHike(hikeId); }
+    catch (e: any) { setErr(String(e)); setStopping(false); }
+    // leave `stopping` set: the poll clears it when the status leaves 'running'
+  }, [hikeId]);
+
+  const start = useCallback(async () => {
+    setErr(null); setStatus(null); setStopping(false);
+    if (!promptA || !promptB || !promptC) { setErr('needs three seed prompts'); return; }
+    try {
+      const r = await api.startHike({
+        prompt_a: promptA, prompt_b: promptB, prompt_c: promptC,
+        beam, budget, grid_size: gridSize,
+        refine_rounds: refineRounds, margin,
+        seed, seed_count: seedCount,
+        steps, guidance_scale: cfg, height: res, width: res,
+        ...(pool ? { prompt_pool: pool } : {}),
+      });
+      if (!r.hike_id) { setErr('start failed'); return; }
+      saveResume({ hikeId: r.hike_id }); setHikeId(r.hike_id);   // the effect starts polling
+    } catch (e: any) { setErr(String(e)); }
+  }, [promptA, promptB, promptC, beam, budget, gridSize, refineRounds, margin, pool]);
+
+  const pct = status ? Math.round((status.grids_done / Math.max(status.budget, 1)) * 100) : 0;
+  // newest first; group rows by hop for display
+  const rows: any[] = status?.chains ?? [];
+
+  return (
+    <div style={{ background: '#101a2e', borderBottom: '1px solid #333', padding: '6px 12px' }}>
+      <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+        <b style={{ fontSize: 12, cursor: 'pointer' }} onClick={() => setOpen(!open)}>
+          {open ? '▾' : '▸'} Hikers
+        </b>
+        <span style={{ fontSize: 11, color: '#888' }}>
+          population ridge-walk across chained simplices
+        </span>
+        {/* 'interrupted' (the server restarted under this hike) and 'cancelled' are not
+            successes; in green they read as one. Amber for every terminal state that is
+            neither a completed run nor a hard error. */}
+        {status && (
+          <span style={{ fontSize: 11, color: status.status === 'error' ? '#e94560'
+                           : (status.status === 'interrupted' || status.status === 'cancelled')
+                             ? '#e9a145' : '#4ecca3' }}>
+            {status.status} · hop {status.hop} · {status.grids_done}/{status.budget} grids
+            {status.refined_cells ? ` · +${status.refined_cells} refined` : ''}
+          </span>
+        )}
+      </div>
+
+      {open && (
+        <div style={{ marginTop: 6 }}>
+          <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
+            {/* Bounds match models.py exactly. They used to be 8/40/30 against server
+                ceilings of 32/1000/100, so the spinners stopped well short of what the
+                API accepts -- and models.py claims in a comment that the UI no longer
+                caps these. A value above the server bound is rejected by FastAPI with a
+                422 the panel cannot explain, so these must not exceed it either. */}
+            <label style={{ fontSize: 11 }}>hikers
+              <input type="number" min={1} max={32} value={beam}
+                     onChange={(e) => setBeam(+e.target.value)}
+                     style={{ width: 46, marginLeft: 5 }} />
+            </label>
+            <label style={{ fontSize: 11 }}>grid budget
+              <input type="number" min={1} max={1000} value={budget}
+                     onChange={(e) => setBudget(+e.target.value)}
+                     style={{ width: 52, marginLeft: 5 }} />
+            </label>
+            <label style={{ fontSize: 11 }}>grid size
+              <input type="number" min={2} max={100} value={gridSize}
+                     onChange={(e) => setGridSize(+e.target.value)}
+                     style={{ width: 52, marginLeft: 5 }} />
+            </label>
+            <label style={{ fontSize: 11 }} title="denoising steps per image; fewer is faster">
+              steps
+              <input type="number" min={1} max={50} value={steps}
+                     onChange={(e) => setSteps(Math.max(1, Math.min(50, +e.target.value)))}
+                     style={{ width: 42, marginLeft: 5 }} />
+            </label>
+            <label style={{ fontSize: 11 }}
+                   title="classifier-free guidance. 1.0 runs a single forward pass per step (about 2x faster); above 1.0 adds an unconditional branch">
+              cfg
+              <input type="number" min={0} max={20} step={0.5} value={cfg}
+                     onChange={(e) => setCfg(Math.max(0, Math.min(20, +e.target.value)))}
+                     style={{ width: 50, marginLeft: 5 }} />
+            </label>
+            <label style={{ fontSize: 11 }} title="pixels per generated image">
+              res
+              <select value={res} onChange={(e) => setRes(+e.target.value)}
+                      style={{ marginLeft: 5, fontSize: 11 }}>
+                {[128, 192, 256, 384, 512].map((r) => <option key={r} value={r}>{r}</option>)}
+              </select>
+            </label>
+            <label style={{ fontSize: 11 }}
+                   title="the noise draw. The ridge field is only 0.69-0.79 reproducible across seeds (E25), so this is the largest single lever on what a hike finds.">
+              seed
+              <input type="number" value={seed} min={0}
+                     onChange={(e) => setSeed(Math.max(0, +e.target.value || 0))}
+                     style={{ marginLeft: 5, width: 62, fontSize: 11 }} />
+            </label>
+            <label style={{ fontSize: 11 }}
+                   title="generate every cell at this many consecutive seeds and walk the AVERAGED sensitivity field, then switch the display between seeds. Cost is linear in this number.">
+              seeds averaged
+              <select value={seedCount} onChange={(e) => setSeedCount(+e.target.value)}
+                      style={{ marginLeft: 5, fontSize: 11 }}>
+                {[1, 2, 3, 4, 6, 8].map((r) => <option key={r} value={r}>{r}</option>)}
+              </select>
+            </label>
+            <label style={{ fontSize: 11 }}
+                   title="pad the simplex so hull cells have a full neighbourhood; the ring is measured, never walked to">
+              pad
+              <select value={margin} onChange={(e) => setMargin(+e.target.value)}
+                      style={{ marginLeft: 5, fontSize: 11 }}>
+                <option value={0}>off</option>
+                <option value={1}>1</option>
+                <option value={2}>2</option>
+                <option value={3}>3</option>
+              </select>
+            </label>
+            <label style={{ fontSize: 11 }} title="each round doubles the lattice and generates only near the ridge">
+              refine
+              <select value={refineRounds} onChange={(e) => setRefineRounds(+e.target.value)}
+                      style={{ marginLeft: 5, fontSize: 11 }}>
+                <option value={0}>off</option>
+                <option value={1}>1x</option>
+                <option value={2}>2x</option>
+              </select>
+            </label>
+            {/* seedCount multiplies EVERYTHING linearly -- base grid and refine rounds
+                alike, since every seed refines the same targets -- so leaving it out
+                understated a 3-seed hike threefold. */}
+            <span style={{ fontSize: 10, color: '#777' }}
+                  title={seedCount > 1 ? `${seedCount} seeds, so ${seedCount}x the images `
+                                         + `of a single-seed hike at these settings` : undefined}>
+              ≈ {(budget * (Math.round((gridSize * (gridSize + 1)) / 2)
+                 + margin * (3 * gridSize + 3 * margin))
+                 + budget * refineRounds * 200) * seedCount} images
+              {seedCount > 1 && ` (${seedCount} seeds)`}
+            </span>
+            <button onClick={start} disabled={status?.status === 'running'}
+              style={{ padding: '3px 12px', fontSize: 11, borderRadius: 4, border: 'none',
+                       cursor: 'pointer', color: '#fff',
+                       background: status?.status === 'running' ? '#333' : '#4ecca3' }}>
+              {status?.status === 'running' ? 'hiking…' : 'send hikers'}
+            </button>
+            {status?.status === 'running' && hikeId && (
+              <button onClick={stop} disabled={stopping}
+                title="stops this hike only; other jobs keep running"
+                style={{ padding: '3px 12px', fontSize: 11, borderRadius: 4, border: 'none',
+                         cursor: 'pointer', color: '#fff',
+                         background: stopping ? '#333' : '#e94560' }}>
+                {stopping ? 'stopping…' : 'stop'}
+              </button>
+            )}
+            {err && <span style={{ fontSize: 11, color: '#e94560' }}>{err}</span>}
+            {status?.error && <span style={{ fontSize: 11, color: '#e94560' }}>{status.error}</span>}
+          </div>
+
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 5 }}>
+            <label style={{ fontSize: 11, cursor: 'pointer', color: '#9ab' }}>
+              prompt pool
+              <input type="file" accept=".csv,.txt,text/csv,text/plain"
+                     onChange={(e) => { const f = e.target.files?.[0]; if (f) loadCsv(f); }}
+                     style={{ marginLeft: 6, fontSize: 10, width: 190 }} />
+            </label>
+            <span style={{ fontSize: 10, color: pool ? '#4ecca3' : '#777' }}>
+              {pool ? `${poolName}: ${pool.length} prompts` : 'using the built-in pool'}
+            </span>
+            <label style={{ fontSize: 11, color: '#9ab', marginLeft: 4 }}>
+              <input type="checkbox" checked={animate}
+                     onChange={(e) => setAnimate(e.target.checked)}
+                     style={{ verticalAlign: 'middle', marginRight: 3 }} />
+              follow hikers
+            </label>
+            {animate && (
+              <label style={{ fontSize: 10, color: '#778' }}>
+                {(1000 / speed).toFixed(1)}/s
+                <input type="range" min={120} max={1200} step={60} value={1320 - speed}
+                       onChange={(e) => setSpeed(1320 - +e.target.value)}
+                       style={{ width: 70, marginLeft: 4, verticalAlign: 'middle' }} />
+              </label>
+            )}
+            {pool && (
+              <button onClick={() => { setPool(null); setPoolName(''); }}
+                      style={{ fontSize: 10, padding: '1px 6px', cursor: 'pointer',
+                               background: '#1a1a2e', color: '#ddd', border: '1px solid #444',
+                               borderRadius: 3 }}>reset</button>
+            )}
+          </div>
+
+          {status && (
+            <div style={{ background: '#333', height: 4, borderRadius: 3, margin: '6px 0' }}>
+              <div style={{ width: `${pct}%`, background: '#4ecca3', height: '100%',
+                            borderRadius: 3, transition: 'width .3s' }} />
+            </div>
+          )}
+
+          {(status?.notes?.length ?? 0) > 0 && (
+            <div style={{ fontSize: 10, color: '#e9a145', margin: '4px 0' }}>
+              {status.notes.map((n: string, i: number) => <div key={i}>· {n}</div>)}
+            </div>
+          )}
+
+          {rows.length > 0 && animate && (
+            <div style={{ maxHeight: 400, overflowY: 'auto' }}>
+              {hikeId && (
+                <LineageTree hikeId={hikeId} rows={rows} selected={selected}
+                             onSelect={(l) => setSelected(l === selected ? null : l)} />
+              )}
+              {(() => {
+                const names = lineageNames(rows);
+                const maxHop = Math.max(0, ...rows.map((r: any) => r.hop ?? 0));
+                const nameOf = (r: any) => names.get(r.lineage ?? 'root') ?? '';
+                // the parent BRANCH is the nearest ancestor with a different name
+                const parentOf = (r: any) => {
+                  let l = parentLineage(r.lineage ?? 'root');
+                  const mine = nameOf(r);
+                  while (l && (names.get(l) ?? '') === mine) l = parentLineage(l);
+                  return l ? (names.get(l) ?? '') : '';
+                };
+                const forkOf = (r: any) => {
+                  // triangles shared with the parent branch = its depth
+                  let l = parentLineage(r.lineage ?? 'root');
+                  const mine = nameOf(r);
+                  let d = (r.lineage ?? 'root') === 'root' ? 0 : (r.lineage as string).split('>').length - 1;
+                  while (l && (names.get(l) ?? '') === mine) { d--; l = parentLineage(l); }
+                  return Math.max(0, d - 1);
+                };
+                return journeys(rows).map((path) => {
+                const leaf = path[path.length - 1];
+                const stations = path.reduce((n: number, r: any) => n + (r.stations?.length ?? 0), 0);
+                return (
+                  <div key={leaf.lineage ?? `${leaf.hop}-${leaf.chain}`}
+                       style={{ borderTop: '1px solid #222', padding: '5px 0' }}>
+                    <div style={{ fontSize: 11, color: '#9ab', display: 'flex',
+                                  alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                      {/* one dot per triangle: hollow where this hiker was still
+                          travelling with its parent, filled once it went its own way */}
+                      <span style={{ display: 'inline-flex', gap: 3, alignItems: 'center' }}>
+                        {path.map((_, k) => (
+                          <span key={k} style={{ width: 8, height: 8, borderRadius: 4,
+                            border: `1.5px solid ${branchColour(nameOf(leaf))}`,
+                            background: k >= forkOf(leaf) ? branchColour(nameOf(leaf)) : 'transparent',
+                            opacity: k >= forkOf(leaf) ? 1 : 0.45 }} />
+                        ))}
+                      </span>
+                      <b style={{ color: branchColour(nameOf(leaf)), fontSize: 12 }}>
+                        {nameOf(leaf) || 'A'}
+                      </b>
+                      {parentOf(leaf) && (
+                        <span style={{ color: '#667' }}>
+                          split from {parentOf(leaf)} at triangle {forkOf(leaf) + 1}
+                        </span>
+                      )}
+                      <span>{path.length} triangle{path.length > 1 ? 's' : ''} · {stations} steps</span>
+                      {leaf.hop < maxHop && (
+                        <span style={{ color: '#e9a145' }}>· pruned after hop {leaf.hop}</span>
+                      )}
+                      {Number.isFinite(leaf.cum_novel) && (
+                        <span style={{ color: leaf.cum_novel >= 0.5 ? '#4ecca3' : '#e9a145' }}>
+                          · {Math.round(leaf.cum_novel * 100)}% new
+                        </span>
+                      )}
+                    </div>
+                    <HikeJourney hikeId={hikeId!} path={path} playing={animate}
+                                 speed={speed} onBranch={branch} branching={branching} />
+                  </div>
+                );
+                });
+              })()}
+            </div>
+          )}
+
+          {rows.length > 0 && !animate && (
+            <div style={{ maxHeight: 330, overflowY: 'auto' }}>
+              {rows.map((r) => (
+                // key by hop+chain, not array index: rows are PREPENDED, so an
+                // index key reassigns every row's identity on each poll and React
+                // reused the DOM node -- including an <img> already hidden by a
+                // 404 from an earlier, still-generating hop.
+                <div key={`${r.hop}-${r.chain}`}
+                     style={{ borderTop: '1px solid #222', padding: '4px 0' }}>
+                  <div style={{ fontSize: 11, color: '#9ab' }}>
+                    hop {r.hop} · hiker {r.chain} · arc {r.arc_len} stations
+                    {r.grid ? ` @ ${r.grid}×${r.grid}` : ''} ·{' '}
+                    {r.n_arcs} arcs available ·{' '}
+                    <span style={{ color: r.cum_novel >= 0.5 ? '#4ecca3' : '#e9a145' }}>
+                      {Number.isFinite(r.cum_novel) ? `${Math.round(r.cum_novel * 100)}% new` : 'first hop'}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 10, color: '#667', marginBottom: 3 }}>
+                    {r.labels.map((l: string) => l.slice(0, 38)).join('  |  ')}
+                  </div>
+                  {r.note && (
+                    <div style={{ fontSize: 10, color: '#e9a145', marginBottom: 3 }}>{r.note}</div>
+                  )}
+                  {hikeId && r.arc_len > 0 && (
+                    // map beside filmstrip: WHERE the walk ran (and what it passed over)
+                    // next to WHAT it produced. Either alone is hard to judge.
+                    <div style={{ display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+                      <img key={`${r.hop}-${r.chain}-map`}
+                           src={api.hikeMapUrl(hikeId, r.chain, r.hop)}
+                           alt={`simplex map, hop ${r.hop} hiker ${r.chain}`}
+                           title="walked arc (green) · arcs not taken (grey) · junctions (amber) · exit (red)"
+                           onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+                           style={{ width: 150, height: 150, objectFit: 'contain',
+                                    borderRadius: 3, background: '#000', flexShrink: 0 }} />
+                      <img key={`${r.hop}-${r.chain}-img`}
+                           src={api.hikeFilmstripUrl(hikeId, r.chain, r.hop)}
+                           alt={`hop ${r.hop} hiker ${r.chain}`}
+                           onError={(e) => { (e.target as HTMLImageElement).style.visibility = 'hidden'; }}
+                           onLoad={(e) => { (e.target as HTMLImageElement).style.visibility = 'visible'; }}
+                           style={{ minWidth: 0, maxWidth: 'calc(100% - 156px)',
+                                    borderRadius: 3, background: '#000' }} />
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   return (
     <div style={{ background: '#0a0a1a', height: '100vh', color: '#fff', fontFamily: 'system-ui',
@@ -1082,7 +2184,11 @@ export default function App() {
       <PromptInput />
       <ProgressBar />
       <ScanCompletePanel />
-      <RefinePanel />
+      {feature('refine') && <RefinePanel />}
+      {feature('itinerary') && <ItineraryPanel />}
+      {feature('hikers') && <HikePanel />}
+      {feature('discovery') && <DiscoverPanel />}
+      {feature('cascade') && <CascadePanel />}
       <MainViewport />
       <ExportOverlay />
     </div>

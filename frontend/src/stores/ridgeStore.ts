@@ -4,7 +4,7 @@ import type { CellStatus } from '../api/types';
 
 type ViewMode = 'images' | 'heatmap' | 'overlay' | 'clusters';
 type Phase = 'idle' | 'scanning' | 'scan_complete' | 'generating' | 'analyzing' | 'complete'
-  | 'mf_scanning' | 'mf_jacobian_done' | 'mf_finalizing';
+  | 'mf_scanning' | 'mf_jacobian_done' | 'mf_finalizing' | 'error';
 
 interface RidgeState {
   promptA: string;
@@ -38,6 +38,7 @@ interface RidgeState {
   manualSelection: Set<string>;
   ridgeMeshUrl: string | null;
   sliceIndex: number;  // z-slice index for 3D image browsing
+  error: string | null;
 
   setPromptA: (v: string) => void;
   setPromptB: (v: string) => void;
@@ -52,6 +53,7 @@ interface RidgeState {
   setSeedCount: (v: number) => void;
   setActiveSeedIdx: (v: number) => void;
   toggleManualCell: (row: number, col: number) => void;
+  setManualSelection: (keys: string[]) => void;
   clearManualSelection: () => void;
   setPromptD: (v: string) => void;
   setDimensions: (v: number) => void;
@@ -65,6 +67,11 @@ interface RidgeState {
   cancel: () => void;
 }
 
+// Bumped by every job launch and by cancel(). A launch that finds the counter has
+// moved while it was awaiting POST /start has been superseded by a later click and
+// must not adopt its job id or start polling for it.
+let launchSeq = 0;
+
 function startPolling(set: any, get: any) {
   // Immediate first poll
   const doPoll = async () => {
@@ -72,8 +79,20 @@ function startPolling(set: any, get: any) {
     if (!jobId) return;
     try {
       const status = await getGridStatus(jobId);
-      // Check if cancelled while awaiting response
-      if (!get().jobId) return;
+      // Cancelled, or a different job was started, while awaiting the response:
+      // writing this status would overwrite the new job's cells with the old one's.
+      if (get().jobId !== jobId) return;
+      // A job the backend no longer knows returns HTTP 200 with phase 'unknown' /
+      // status 'not_found' and an empty cell list. Without this branch the store
+      // overwrote a finished grid with zeros and then polled that dead id every
+      // 1.5 s for the rest of the session. app.state.jobs is in-memory, so any
+      // restart or /cancel puts every open tab into exactly this state.
+      if (status.phase === 'unknown' || (status as any).status === 'not_found') {
+        console.warn('[Ridge] job', jobId, 'is unknown to the backend; stopping poll');
+        get().stopPolling();
+        set({ phase: 'error', error: 'This job is no longer on the server (restart or cancel). Generate again.' });
+        return;
+      }
       console.log('[Ridge] Poll:', status.phase, status.cells_generated, '/', status.cells_total,
                   'cells:', status.cells.length, 'gs:', status.grid_size);
       const updates: any = {
@@ -104,6 +123,14 @@ function startPolling(set: any, get: any) {
         updates.phase = 'complete';
         get().stopPolling();
       }
+      // A GPU worker failed this job's tasks. Its cells can never arrive, so
+      // cells_generated will never reach cells_total — without this the poller ran for
+      // the rest of the session against a job that was already dead.
+      if (status.phase === 'error') {
+        updates.phase = 'error';
+        updates.error = status.error || 'The GPU worker failed this job.';
+        get().stopPolling();
+      }
       set(updates);
     } catch (err) {
       console.error('[Ridge] Poll error:', err);
@@ -114,8 +141,33 @@ function startPolling(set: any, get: any) {
   doPoll();
   // Guard: if cancelled during the first doPoll, don't start interval
   if (!get().jobId) return;
+  // Only `pollInterval` is clearable, so an interval created while one is already
+  // running would leak and poll for the rest of the session.
+  get().stopPolling();
   const interval = setInterval(doPoll, 1500);
   set({ pollInterval: interval });
+}
+
+// submitRefine blanks the grid before it POSTs, so every way the refine can fail
+// has to put the server's copy back — otherwise the user is left with an empty
+// grid at the new size that still looks 'complete'. The backend job is untouched
+// by a failed refine, so a plain status re-fetch is a full recovery.
+async function restoreGridFromServer(set: any, jobId: string, error: string | null) {
+  try {
+    const status = await getGridStatus(jobId);
+    set({
+      phase: 'complete', cells: status.cells,
+      cellsGenerated: status.cells_generated, cellsTotal: status.cells_total,
+      currentGridSize: status.grid_size,
+      heatmapUrl: status.heatmap_url, overlayUrl: status.overlay_url,
+      clusterUrl: status.cluster_url, imageGridUrl: status.image_grid_url,
+      ridgeMeshUrl: (status as any).ridge_mesh_url || null,
+      error,
+    });
+  } catch (err) {
+    console.error('[Ridge] Refine recovery failed:', err);
+    set({ phase: 'error', error: (error ? error + ' ' : '') + 'Could not reload the grid from the server.' });
+  }
 }
 
 export const useRidgeStore = create<RidgeState>((set, get) => ({
@@ -150,6 +202,7 @@ export const useRidgeStore = create<RidgeState>((set, get) => ({
   manualSelection: new Set<string>(),
   ridgeMeshUrl: null,
   sliceIndex: 0,
+  error: null,
 
   setPromptA: (v) => set({ promptA: v }),
   setPromptB: (v) => set({ promptB: v }),
@@ -173,6 +226,8 @@ export const useRidgeStore = create<RidgeState>((set, get) => ({
     return { manualSelection: next };
   }),
   clearManualSelection: () => set({ manualSelection: new Set<string>() }),
+  // surprise slider: replace the manual selection with a sampled cell set
+  setManualSelection: (keys) => set({ manualSelection: new Set(keys) }),
 
   stopPolling: () => {
     const { pollInterval } = get();
@@ -181,21 +236,30 @@ export const useRidgeStore = create<RidgeState>((set, get) => ({
   },
 
   cancel: () => {
+    // Re-enables the buttons synchronously, so disown any launch still awaiting
+    // its POST /start — otherwise it would come back and start a second poller.
+    launchSeq++;
     get().stopPolling();
-    set({ phase: 'idle', jobId: null, cellsGenerated: 0, cellsTotal: 0 });
+    set({ phase: 'idle', jobId: null, cellsGenerated: 0, cellsTotal: 0, error: null });
     // Tell backend to drain pending GPU tasks so next job starts immediately
     cancelJob().catch(() => {});
   },
 
   generate: async () => {
-    const { promptA, promptB, promptC, promptD, dimensions, gridSize, seed, steps, resolution, seedCount, stopPolling } = get();
-    stopPolling();
-    await cancelJob().catch(() => {});
+    const { promptA, promptB, promptC, promptD, dimensions, gridSize, seed, steps, resolution, seedCount, stopPolling, phase } = get();
+    // The buttons are disabled off `phase`, but `phase` used to be set only after
+    // `await cancelJob()` returned, so a second click inside that window started a
+    // second job and a second poller. Claim the phase before any await.
+    if (phase !== 'idle' && phase !== 'complete' && phase !== 'scan_complete' && phase !== 'error') return;
+    const launch = ++launchSeq;
     set({
       phase: 'generating', cellsGenerated: 0, cellsTotal: 0, cells: [],
       heatmapUrl: null, overlayUrl: null, clusterUrl: null, imageGridUrl: null,
-      jobId: null, currentGridSize: gridSize, activeView: 'images', shouldCenter: true, manualSelection: new Set<string>(),
+      jobId: null, currentGridSize: gridSize, activeView: 'images', shouldCenter: true,
+      manualSelection: new Set<string>(), error: null,
     });
+    stopPolling();
+    await cancelJob().catch(() => {});
     try {
       const res = await startGrid({
         prompt_a: promptA, prompt_b: promptB, prompt_c: promptC,
@@ -204,24 +268,28 @@ export const useRidgeStore = create<RidgeState>((set, get) => ({
         grid_size: gridSize, seed, seed_count: seedCount,
         height: resolution, width: resolution, steps,
       });
+      if (launchSeq !== launch) return;  // superseded or cancelled while /start was in flight
       set({ jobId: res.job_id, cellsTotal: res.total_cells });
       startPolling(set, get);
     } catch (err) {
       console.error('[Ridge] Generate error:', err);
+      if (launchSeq !== launch) return;
       set({ phase: 'idle' });
     }
   },
 
   fastScan: async () => {
-    const { promptA, promptB, promptC, promptD, dimensions, gridSize, seed, stopPolling } = get();
-    stopPolling();
-    await cancelJob().catch(() => {});
+    const { promptA, promptB, promptC, promptD, dimensions, gridSize, seed, stopPolling, phase } = get();
+    if (phase !== 'idle' && phase !== 'complete' && phase !== 'scan_complete' && phase !== 'error') return;
+    const launch = ++launchSeq;
     set({
       phase: 'scanning', cellsGenerated: 0, cellsTotal: 0, cells: [],
       heatmapUrl: null, overlayUrl: null, clusterUrl: null, imageGridUrl: null,
       ridgeMeshUrl: null, jobId: null, currentGridSize: gridSize, activeView: 'images',
-      shouldCenter: true, manualSelection: new Set<string>(),
+      shouldCenter: true, manualSelection: new Set<string>(), error: null,
     });
+    stopPolling();
+    await cancelJob().catch(() => {});
     try {
       const res = await startFastScan({
         prompt_a: promptA, prompt_b: promptB, prompt_c: promptC,
@@ -229,24 +297,28 @@ export const useRidgeStore = create<RidgeState>((set, get) => ({
         dimensions,
         grid_size: gridSize, seed,
       });
+      if (launchSeq !== launch) return;
       set({ jobId: res.job_id, cellsTotal: res.total_cells });
       startPolling(set, get);
     } catch (err) {
       console.error('[Ridge] Fast scan error:', err);
+      if (launchSeq !== launch) return;
       set({ phase: 'idle' });
     }
   },
 
   mfScan: async () => {
-    const { promptA, promptB, promptC, gridSize, seed, steps, resolution, stopPolling } = get();
-    stopPolling();
-    await cancelJob().catch(() => {});
+    const { promptA, promptB, promptC, gridSize, seed, steps, resolution, stopPolling, phase } = get();
+    if (phase !== 'idle' && phase !== 'complete' && phase !== 'scan_complete' && phase !== 'error') return;
+    const launch = ++launchSeq;
     set({
       phase: 'mf_scanning', cellsGenerated: 0, cellsTotal: 0, cells: [],
       heatmapUrl: null, overlayUrl: null, clusterUrl: null, imageGridUrl: null,
       ridgeMeshUrl: null, jobId: null, currentGridSize: gridSize, activeView: 'heatmap',
-      shouldCenter: true, manualSelection: new Set<string>(),
+      shouldCenter: true, manualSelection: new Set<string>(), error: null,
     });
+    stopPolling();
+    await cancelJob().catch(() => {});
     try {
       const res = await startMFScan({
         prompt_a: promptA, prompt_b: promptB, prompt_c: promptC,
@@ -254,10 +326,12 @@ export const useRidgeStore = create<RidgeState>((set, get) => ({
         height: resolution, width: resolution, steps,
         guidance_scale: 4.0,
       });
+      if (launchSeq !== launch) return;
       set({ jobId: res.job_id, cellsTotal: res.total_cells });
       startPolling(set, get);
     } catch (err) {
       console.error('[Ridge] MF scan error:', err);
+      if (launchSeq !== launch) return;
       set({ phase: 'idle' });
     }
   },
@@ -300,7 +374,7 @@ export const useRidgeStore = create<RidgeState>((set, get) => ({
       phase: 'generating', activeView: 'images',
       heatmapUrl: null, overlayUrl: null, clusterUrl: null, imageGridUrl: null,
       cells: [], cellsGenerated: 0, currentGridSize: newGs, shouldCenter: false,
-      manualSelection: new Set<string>(),
+      manualSelection: new Set<string>(), error: null,
     });
 
     try {
@@ -308,20 +382,16 @@ export const useRidgeStore = create<RidgeState>((set, get) => ({
       const res = await refineGrid(jobId, { tau, multiplier, extra_positions: extraPositions });
       console.log('[Ridge] Refine response:', res);
       if (res.status === 'error' || res.status === 'no_cells') {
-        // Reload current state
-        const status = await getGridStatus(jobId);
-        set({
-          phase: 'complete', cells: status.cells,
-          currentGridSize: status.grid_size,
-          heatmapUrl: status.heatmap_url, overlayUrl: status.overlay_url,
-          clusterUrl: status.cluster_url,
-        });
+        await restoreGridFromServer(set, jobId,
+          res.status === 'no_cells' ? 'No cells above tau to refine.' : 'Refine failed on the server.');
         return;
       }
       startPolling(set, get);
     } catch (err) {
       console.error('[Ridge] Refine error:', err);
-      set({ phase: 'complete' });
+      // Transport/parse failure: the request never took effect, so restore rather
+      // than leaving the blanked grid sitting at 'complete' with no way back.
+      await restoreGridFromServer(set, jobId, 'Refine request failed: ' + String(err));
     }
   },
 }));
