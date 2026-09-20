@@ -153,6 +153,23 @@ class MFRidgeDetector:
                 for k in range(self.n_valid) if ridge[k]}
 
     @property
+    def is_calibrated(self) -> bool:
+        """True once _fit_gp has run (>= 3 observations); until then predict() is the
+        raw Jacobian and `calibrate` is the identity."""
+        return self._mu is not None
+
+    def calibrate(self, jacobian: np.ndarray) -> np.ndarray:
+        """Map cheap Jacobian values into the DINOv2 units this GP predicts in.
+
+        The linear part of the Kennedy-O'Hagan model, exposed so callers that need a
+        value where the GP has no simplex coordinate (off-simplex cells) can put it on
+        the same scale as the prediction instead of pasting raw Jacobian into the map.
+        """
+        if self._mu is None:
+            return np.asarray(jacobian).copy()
+        return self._rho * jacobian + self._intercept
+
+    @property
     def n_observed(self) -> int:
         return len(self.observed_indices)
 
