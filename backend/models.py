@@ -1,19 +1,39 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
+from backend import config
+
+
+def _check_simplex_prompts(req):
+    """A 3-D grid mixes four prompt embeddings, so all four must exist.
+
+    `dimensions=3` with an empty prompt_c reached `float * None` deep inside
+    _process_generate: the task raised in the worker, emitted zero cells, and the job
+    sat at 0/N in phase 'generating' forever. Reject it at the request boundary.
+    """
+    if req.dimensions == 3:
+        missing = [n for n in ("prompt_c", "prompt_d") if not getattr(req, n, "").strip()]
+        if missing:
+            raise ValueError(f"dimensions=3 needs {' and '.join(missing)}")
+    return req
 
 
 class GridStartRequest(BaseModel):
+    # Bounded because every one of these multiplies GPU cost: cells are grid_size**2
+    # (grid_size**3 in 3-D) renders of height*width pixels, and all four were
+    # unconstrained ints — grid_size=4096 or height=4096 was an OOM the server took.
     prompt_a: str
     prompt_b: str
     prompt_c: str = ""
     prompt_d: str = ""  # 4th prompt for 3D mode
-    dimensions: int = 2  # 2 or 3
-    grid_size: int = 15
+    dimensions: int = Field(2, ge=2, le=3)
+    grid_size: int = Field(15, ge=2, le=256)
     seed: int = 42
-    seed_count: int = 1
-    height: int = 256
-    width: int = 256
-    steps: int = 4
-    guidance_scale: float = 4.0
+    seed_count: int = Field(1, ge=1, le=16)
+    height: int = Field(config.DEFAULT_HEIGHT, ge=64, le=1024)
+    width: int = Field(config.DEFAULT_WIDTH, ge=64, le=1024)
+    steps: int = Field(config.DEFAULT_NUM_INFERENCE_STEPS, ge=1, le=50)
+    guidance_scale: float = Field(4.0, ge=0.0, le=20.0)
+
+    _prompts = model_validator(mode="after")(_check_simplex_prompts)
 
 
 class GridStartResponse(BaseModel):
@@ -99,6 +119,10 @@ class GridStatusResponse(BaseModel):
     cluster_url: str | None = None
     image_grid_url: str | None = None
     ridge_mesh_url: str | None = None  # 3D: marching cubes mesh as JSON
+    # Set when a GPU worker failed the job's tasks. Without a field here the poller had
+    # no way to tell "still generating" from "the work died", and the job sat at
+    # phase 'generating' for the rest of the session.
+    error: str | None = None
 
 
 class FastScanRequest(BaseModel):
@@ -106,12 +130,14 @@ class FastScanRequest(BaseModel):
     prompt_b: str
     prompt_c: str = ""
     prompt_d: str = ""  # 4th prompt for 3D mode
-    dimensions: int = 2  # 2 or 3
-    grid_size: int = 50
+    dimensions: int = Field(2, ge=2, le=3)
+    grid_size: int = Field(50, ge=2, le=256)
     seed: int = 42
-    height: int = 256
-    width: int = 256
-    guidance_scale: float = 1.0  # 1.0 = single forward pass (no CFG), fastest
+    height: int = Field(config.DEFAULT_HEIGHT, ge=64, le=1024)
+    width: int = Field(config.DEFAULT_WIDTH, ge=64, le=1024)
+    guidance_scale: float = Field(1.0, ge=0.0, le=20.0)  # 1.0 = single forward pass (no CFG), fastest
+
+    _prompts = model_validator(mode="after")(_check_simplex_prompts)
 
 
 class FastScanResponse(BaseModel):
@@ -122,9 +148,9 @@ class FastScanResponse(BaseModel):
 
 class GenerateSelectedRequest(BaseModel):
     tau: float = 1.5
-    height: int = 256
-    width: int = 256
-    steps: int = 4
+    height: int = config.DEFAULT_HEIGHT
+    width: int = config.DEFAULT_WIDTH
+    steps: int = config.DEFAULT_NUM_INFERENCE_STEPS
     guidance_scale: float = 4.0
 
 
@@ -137,14 +163,14 @@ class MFScanRequest(BaseModel):
     prompt_a: str
     prompt_b: str
     prompt_c: str = ""
-    grid_size: int = 50
+    grid_size: int = Field(50, ge=2, le=256)
     seed: int = 42
-    budget: int = 80
-    tau_mf: float = 1.3
-    height: int = 256
-    width: int = 256
-    steps: int = 4
-    guidance_scale: float = 4.0
+    budget: int = Field(80, ge=1, le=5000)
+    tau_mf: float = Field(1.3, gt=0.0, le=10.0)
+    height: int = Field(config.DEFAULT_HEIGHT, ge=64, le=1024)
+    width: int = Field(config.DEFAULT_WIDTH, ge=64, le=1024)
+    steps: int = Field(config.DEFAULT_NUM_INFERENCE_STEPS, ge=1, le=50)
+    guidance_scale: float = Field(4.0, ge=0.0, le=20.0)
 
 
 class MFScanResponse(BaseModel):
@@ -155,7 +181,369 @@ class MFScanResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    status: str
+    status: str          # ok | degraded | down, from live worker processes
     n_gpus: int
     workers_ready: int
     model: str
+    recent_errors: list[str] = []
+
+
+class RidgeGraphRequest(BaseModel):
+    """Rebuild the ridge graph for a finished job. CPU only — no generation."""
+    # bounded so a stray value cannot reach scipy: k < 2 has no boundary to trace and a
+    # huge k is a long CPU stall on the event loop's threadpool
+    k: int = Field(8, ge=2, le=64)        # number of semantic basins to cluster into
+    h_frac: float = Field(0.10, gt=0.0, le=1.0)   # persistence depth, fraction of range
+    min_arc: int = Field(3, ge=2, le=1000)        # discard arcs shorter than this
+
+
+class RidgeGraphResponse(BaseModel):
+    job_id: str
+    n_arcs: int
+    n_basins: int
+    n_junctions: int
+    params: dict
+
+
+class HikeStartRequest(BaseModel):
+    """Launch a population of hikers from a seed prompt triplet."""
+    # bounded like RidgeGraphRequest, but here the cost is GPU time, not CPU: the job is
+    # budget grids of grid_size*(grid_size+1)/2 images each, so an unbounded grid_size or
+    # budget queues millions of generations. grid_size >= 2 because hiker.bary divides by
+    # (gs - 1); beam >= 1 because beam <= 0 silently collapsed the population to width 1.
+    prompt_a: str
+    prompt_b: str
+    prompt_c: str
+    # Ceilings raised 2026-08-15 at the user's request; the UI no longer caps these.
+    # They remain FINITE only so a typo cannot queue months of generation — a hike is
+    # budget grids of grid_size*(grid_size+1)/2 images each, so grid_size=100 budget=1000
+    # is already ~5M renders. Anything running can be stopped with POST /hike/{id}/cancel.
+    beam: int = Field(4, ge=1, le=32)       # population width
+    budget: int = Field(16, ge=1, le=1000)   # total grids to generate (this is the GPU cost)
+    grid_size: int = Field(25, ge=2, le=100)
+    # Ridge refinement, the hiker analogue of /refine. Each round doubles the lattice
+    # (gs -> 2gs-1) and generates ONLY near the ridge, so cost is refine_cap per round
+    # per chain rather than the full finer simplex. Bounded because it is GPU time.
+    # Padding ring around the simplex. Hull cells otherwise keep 2.6 of 4 neighbours and
+    # their sensitivity carries ~16% error on the alpha=0/beta=0 edges and ~30% on the
+    # hypotenuse -- precisely where exits are chosen. The ring is measured, never walked to.
+    # Seeds. seed_count > 1 generates every cell at seed, seed+1, ... and walks the
+    # AVERAGED sensitivity field; the per-seed images are all kept so the UI can switch
+    # between them at a fixed ridge. Cost is linear in seed_count.
+    seed_count: int = Field(1, ge=1, le=8)
+    margin: int = Field(0, ge=0, le=8)
+    refine_rounds: int = Field(0, ge=0, le=2)
+    refine_cap: int = Field(200, ge=10, le=20000)
+    seed: int = 42
+    height: int = Field(config.DEFAULT_HEIGHT, ge=64, le=1024)
+    width: int = Field(config.DEFAULT_WIDTH, ge=64, le=1024)
+    steps: int = Field(config.DEFAULT_NUM_INFERENCE_STEPS, ge=1, le=50)
+    guidance_scale: float = Field(4.0, ge=0.0, le=20.0)
+    k_basins: int = Field(6, ge=2, le=32)
+    h_frac: float = Field(0.10, gt=0.0, le=1.0)
+    prompt_pool: list[str] | None = None   # overrides config.HIKE_PROMPT_POOL
+
+
+class HikeStartResponse(BaseModel):
+    hike_id: str
+    budget: int
+    beam: int
+    status: str
+
+
+class HikeBranchRequest(HikeStartRequest):
+    """Seed a new hike at one station of an existing walk.
+
+    Inherits every sampler/budget field from HikeStartRequest; prompt_a/b/c are ignored
+    because the seed triangle comes from the chosen station plus two freshly drawn
+    prompts. They keep defaults so the client need not invent them.
+    """
+    prompt_a: str = ""
+    prompt_b: str = ""
+    prompt_c: str = ""
+    hop: int = Field(..., ge=0)
+    chain: int = Field(..., ge=0)
+    station: int = Field(..., ge=0)
+
+
+class HikeStatus(BaseModel):
+    hike_id: str
+    status: str
+    hop: int
+    grids_done: int
+    # grids that were generated and charged but whose cells never arrived; they are
+    # part of grids_done, so without this the spent budget looks like completed work
+    grids_dropped: int = 0
+    budget: int
+    # extra cells generated by ridge refinement; not grids, so kept out of grids_done
+    refined_cells: int = 0
+    chains: list
+    notes: list[str] = []
+    error: str | None = None
+
+
+# --- Discovery: the procedure the ablations support (services/discover.py) -----
+
+
+class DiscoverStartRequest(BaseModel):
+    """Bounds are the measured usable ranges, not arbitrary guards -- see
+    services/discover.DEFAULTS_PROVENANCE for the experiment behind each."""
+    # k: 3-4 is the default band. Higher k buys DIVERSITY at matched commitment
+    # (partial rho +0.898) at a small coherence cost (-0.205) [E29]. Capped at 8
+    # because that is the largest k we have measured the commitment optimum at.
+    k: int = Field(3, ge=2, le=8)
+    # commitment = E[max weight]. Coherence saturates ~0.60, diversity peaks ~0.50,
+    # and the optimum is stable across k=3,4,5,8 [E28, E29]. The hard floor is 1/k
+    # and is checked at request time, since it depends on k.
+    commitment: float = Field(0.55, gt=0.0, lt=1.0)
+    # Mean pairwise CLIP-text similarity of the drawn prompts. Novelty falls with
+    # similarity (rho -0.817), coherence rises (+0.634), product peaks at 0.56 [E10].
+    target_sim: float = Field(0.56, ge=0.2, le=0.95)
+    # Images per simplex before restarting. A simplex exhausts: -0.040 diversity over
+    # 960 images in one, none at 240 [E32, E34]. This is the loop's whole mechanism.
+    batch: int = Field(300, ge=20, le=2000)
+    total: int = Field(1200, ge=1, le=100000)
+    seed: int = 42
+    steps: int = Field(config.DEFAULT_NUM_INFERENCE_STEPS, ge=1, le=50)
+    height: int = Field(config.DEFAULT_HEIGHT, ge=64, le=1024)
+    width: int = Field(config.DEFAULT_WIDTH, ge=64, le=1024)
+    guidance_scale: float = Field(config.DEFAULT_GUIDANCE_SCALE, ge=0.0, le=20.0)
+    prompt_pool: list[str] | None = None
+    # Reject vertex-dominated draws. E[max weight] is a MEAN: at 0.55 with k=3, 61% of
+    # plain Dirichlet draws still have one prompt above 0.5 and only 21% are genuine
+    # three-way mixtures, which in practice returned the source prompts rendered
+    # separately. Banding max weight and flooring min weight makes a mixture the typical
+    # sample. None = the old unbanded behaviour.
+    commit_band: tuple[float, float] | None = None
+    min_weight: float = Field(0.0, ge=0.0, le=0.5)
+    # Pin the prompts instead of drawing them. Exists so a sampling change can be A/B'd
+    # against the identical triple rather than confounded by a fresh draw.
+    prompts: list[str] | None = None
+    # Ridge targeting. scout_gs > 0 spends a triangular lattice of that size measuring the
+    # sensitivity field, then aims the rest of the leg at its steepest cells. 0 = the
+    # unguided sampler. Selectivity is the active ingredient: top-decile cells of a survey
+    # beat balanced random sampling on 10/10 prompt triplets (redundancy 0.766 vs 0.912),
+    # but a run that KEEPS the whole survey shows no benefit (E30/E32) -- which is why the
+    # aimed range is reported separately.
+    scout_gs: int = Field(0, ge=0, le=40)
+    top_frac: float = Field(0.10, gt=0.0, le=1.0)
+    # Jitter around an aimed cell, in cell widths. 0 generates at the measured coordinate.
+    aim_jitter: float = Field(0.5, ge=0.0, le=2.0)
+    # How far below zero a mixing weight may go. 0 keeps every point inside the prompt
+    # hull, which caps quality: the sensitivity ridge sits OUTSIDE it (26/36 of the top
+    # cells of a 400-cell grid), and a non-negative sampler cannot reach that at all.
+    extrapolate: float = Field(0.0, ge=0.0, le=1.0)
+
+
+class DiscoverStartResponse(BaseModel):
+    run_id: str
+    status: str
+    total: int
+    error: str | None = None
+
+
+class DiscoverSimplex(BaseModel):
+    index: int
+    prompts: list[str]
+    mean_sim: float
+    alpha: float
+    n_points: int
+    done: int
+    diversity: float | None = None
+    # Fraction of this leg's draws that are genuine mixtures (max weight < 0.5) rather
+    # than one prompt with a tint. Nothing measured this before, which is how a run of
+    # source-prompt renders passed every check.
+    blend_frac: float | None = None
+    # Survey cost, and the index range of the AIMED images. The survey is a uniform
+    # lattice -- keeping it mixed into the harvest is what wiped out the benefit of
+    # aiming in E30/E32, so the UI needs to be able to show the aimed subset alone.
+    scout_n: int = 0
+    aim_lo: int = -1
+    aim_hi: int = -1
+    # Selectivity actually achieved. draws_per_cell near 1 and a high survey_ratio are
+    # what distinguish an interesting harvest from a padded one.
+    draws_per_cell: float | None = None
+    survey_ratio: float | None = None
+
+
+class DiscoverStatus(BaseModel):
+    run_id: str
+    status: str
+    generated: int
+    total: int
+    k: int = 0
+    commitment: float = 0.0
+    # Mean pairwise DINOv2 distance over the harvest. Reference-free -- it depends only
+    # on the generated images -- which is why it is the live number: the novelty metrics
+    # depend on a prompt reference whose choice was worth 26 of 36 pp in E34b.
+    diversity: float | None = None
+    # Mean cosine to the nearest OTHER image. LOWER is better. Reported alongside
+    # diversity because diversity alone cannot distinguish "three source prompts rendered
+    # separately" (~0.74) from "many varied hybrids" (~0.75) -- a run of wheat fields and
+    # red hearts scored 0.740 and passed every check until the images were looked at.
+    redundancy: float | None = None
+    simplices: list[DiscoverSimplex] = []
+    notes: list[str] = []
+    error: str | None = None
+
+
+class DiscoverDefaults(BaseModel):
+    k: int
+    commitment: float
+    target_sim: float
+    batch: int
+    steps: int
+    provenance: dict
+    alpha_table: dict
+
+
+class SurpriseSampleRequest(BaseModel):
+    # -1 = calm (argmin S), 0 = uniform, +1 = surprise (argmax S). See services/surprise.py.
+    surprise: float = 1.0
+    n: int = 12
+    seed: int | None = None
+
+
+class SurpriseSampleResponse(BaseModel):
+    job_id: str
+    surprise: float
+    # (row, col) of the sampled cells, most surprising draw first by sampling order
+    cells: list[tuple[int, int]]
+    # sampling probability per eligible cell, keyed "row,col" — for heatmap overlays
+    probabilities: dict[str, float]
+
+
+# --- Cascade: fast isolation + dense refinement (services/cascade.py) ----------
+
+
+class CascadeStartRequest(BaseModel):
+    """Bounds follow the calibrated cascade of record (search_problem E85/E86/E92).
+    Costs: roughly n_chords*20 images for isolation, (crossings+12)*8 for scoring,
+    n_patches*25 for refinement -- ~1k images at the defaults."""
+    # Number of prompts spanning the simplex. 3-9 measured; the cascade itself is
+    # k-invariant in cost per chord (extents shrink but stride is fixed).
+    # No upper bound: calibrations run to k=9; beyond that the machinery works but
+    # verdicts are extrapolation (backgrounds self-calibrate per run either way).
+    k: int = Field(4, ge=3)
+    # Pin the prompt set; if omitted, k prompts are drawn from the pool at target_sim
+    # (same band logic as Discover -- E10).
+    prompts: list[str] | None = None
+    target_sim: float = Field(0.56, ge=0.2, le=0.95)
+    # Isolation budget. 24 chords ~ 500 images and ~15-25 crossings at k=4 [E92].
+    n_chords: int = Field(24, ge=4)
+    # Refined regions; one slot is ALWAYS the exploration floor (E77: ranking must
+    # not decide what is never inspected).
+    n_patches: int = Field(4, ge=2)
+    # focused exploration: confine the survey to a ball around this recipe
+    # (requires pinned prompts so the weights refer to a known basis)
+    focus: list[float] | None = None
+    focus_radius: float = Field(0.18, gt=0.02, le=1.0)
+    # tier-1 detection steps (gated: 93%/94% recall at 4 vs 8; ~2x faster probes).
+    # null = probe at full fidelity.
+    probe_steps: int | None = Field(4, ge=1, le=50)
+    seed: int = 42
+    steps: int = Field(config.DEFAULT_NUM_INFERENCE_STEPS, ge=1, le=50)
+    height: int = Field(config.DEFAULT_HEIGHT, ge=64, le=1024)
+    width: int = Field(config.DEFAULT_WIDTH, ge=64, le=1024)
+    guidance_scale: float = Field(config.DEFAULT_GUIDANCE_SCALE, ge=0.0, le=20.0)
+
+
+class CascadePointInfo(BaseModel):
+    # the recipe behind any generated thumbnail; null if the index is unknown
+    weights: list[float] | None = None
+    div: float | None = None
+
+
+class CascadeStartResponse(BaseModel):
+    run_id: str
+    status: str
+    error: str | None = None
+
+
+class CascadeChord(BaseModel):
+    # chord endpoints in weight space, for the map view
+    a: list[float]
+    b: list[float]
+
+
+class CascadeCrossing(BaseModel):
+    cid: int
+    weights: list[float]
+    # Coupled-seed paired boundary strength B = mean_s(1-cos) at eps=0.047, m=4
+    # [E84b: AUROC 1.000 on the exact k=4 field]. None until the score phase.
+    b: float | None = None
+    # True iff b > the run's own measured background p95 [E89: interior-referenced
+    # thresholds, never a no-step null].
+    significant: bool = False
+    thumb: int = -1
+    # crossings sharing a ridge_group portray the SAME ridge (side-signature match)
+    ridge_group: int | None = None
+    # current bisection bracket width (barycentric); ~0.012 = pinned. Drives the
+    # lock-on reticle in the map during the pinning phase.
+    bracket_w: float | None = None
+
+
+class CascadePatch(BaseModel):
+    region: int
+    cid: int
+    b: float
+    significant: bool
+    exploration: bool
+    # 5x5 thumb indices; rows = tangent direction, cols = crossing the boundary at
+    # 1-cell steps; -1 where the point fell outside the simplex.
+    grid: list[list[int]]
+    cols_with_crossing: int
+
+
+class WalkStartRequest(BaseModel):
+    cid: int
+    # +1 / -1: the two ways along the ridge from the crossing
+    direction: int = Field(1, ge=-1, le=1)
+    n_steps: int = Field(5, ge=1)
+
+
+class WalkStep(BaseModel):
+    weights: list[float]
+    # single-seed local contrast across the boundary at this step (NOT the certified B)
+    contrast: float
+    thumb: int
+
+
+class WalkStatus(BaseModel):
+    walk_id: str
+    status: str
+    cid: int = -1
+    steps: list[WalkStep] = []
+    # transversal probe lines (pairs of weight vectors) -- the walk's line bundle
+    segs: list[list[list[float]]] = []
+    notes: list[str] = []
+    error: str | None = None
+
+
+class CascadeStatus(BaseModel):
+    run_id: str
+    status: str
+    phase: str = ""
+    generated: int = 0
+    phase_done: int = 0
+    phase_total: int = 0
+    prompts: list[str] = []
+    # most recent generated image indices -- the live 'just generated' ticker
+    recent_thumbs: list[int] = []
+    # completed-generation positions (weight space), capped -- the live map cloud
+    points: list[list[float]] = []
+    # local divergence per cloud point (aligned with points; null until measured)
+    point_divs: list[float | None] = []
+    chords: list[CascadeChord] = []
+    crossings: list[CascadeCrossing] = []
+    bg_mean: float | None = None
+    bg_p95: float | None = None
+    # Coverage certificate (Good-Turing over ridge identities): distinct ridges found,
+    # how many were crossed exactly once, and the estimated share of boundary area the
+    # survey has never crossed. Unbiased chords make this estimable at all.
+    distinct_ridges: int | None = None
+    singleton_ridges: int | None = None
+    unexplored_share: float | None = None
+    patches: list[CascadePatch] = []
+    notes: list[str] = []
+    error: str | None = None

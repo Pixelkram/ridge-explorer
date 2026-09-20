@@ -15,16 +15,33 @@ from PIL import Image
 from pathlib import Path
 
 from backend import config
+from backend.services.ridge_detector import measured_mask
+
+
+def _measured_values(sensitivity: np.ndarray) -> np.ndarray:
+    """The cells that carry a measurement, flattened.
+
+    Both scales below used to be taken over the whole array. Two things live in there
+    that are not measurements: the unmeasured sentinel 0 (most of a refined grid, since
+    a retained coarse block is measured only at its anchor) and NaN outside the simplex
+    on an MF map. The first dragged the median toward 0 — which silently switched off
+    every contour, because they are all multiples of it — and the second made vmin/vmax
+    and the title read `nan`.
+    """
+    return sensitivity[measured_mask(sensitivity)]
 
 
 def render_heatmap(sensitivity: np.ndarray, alphas: np.ndarray,
                    betas: np.ndarray, output_path: Path,
                    prompt_a: str = "", prompt_b: str = "", prompt_c: str = ""):
     extent = [alphas[0], alphas[-1], betas[0], betas[-1]]
+    meas = _measured_values(sensitivity)
     fig, ax = plt.subplots(figsize=(8, 7))
     im = ax.imshow(sensitivity.T, origin='lower', extent=extent,
-                   cmap='hot', aspect='auto')
-    ratio = sensitivity.max() / (np.median(sensitivity) + 1e-10)
+                   cmap='hot', aspect='auto',
+                   vmin=meas.min() if meas.size else None,
+                   vmax=meas.max() if meas.size else None)
+    ratio = meas.max() / (np.median(meas) + 1e-10) if meas.size else float('nan')
     xlabel = f'→ {prompt_b[:20]}' if prompt_b else 'alpha'
     ylabel = f'→ {prompt_c[:20]}' if prompt_c else 'beta'
     ax.set_xlabel(xlabel, fontsize=11)
@@ -37,8 +54,19 @@ def render_heatmap(sensitivity: np.ndarray, alphas: np.ndarray,
     plt.close()
 
 
-def assemble_image_grid(thumbnail_grid: dict[tuple[int, int], bytes],
-                        grid_size: int, output_path: Path):
+def _paint_thumbnails(thumbnail_grid: dict[tuple[int, int], bytes],
+                      grid_size: int,
+                      spans: dict[tuple[int, int], int] | None = None) -> np.ndarray:
+    """Montage canvas; a coarse cell of span S fills its whole SxS block.
+
+    A refine keeps a retained coarse cell's single thumbnail under its top-left key and
+    gives it span=S, so painting one tile per key left S*S-1 black tiles per retained
+    block (71% of a twice-refined 84x84 montage). The cells the block covers are not
+    measured -- only its anchor is -- but the image is still the right one to show for
+    all of them. The thumbnail is repeated once per cell rather than upscaled over
+    the block, so that a single-cell crop of the montage (ridge_graph.render_itinerary)
+    still yields a whole image; export_grid, which is viewed as one picture, upscales.
+    """
     ts = config.THUMBNAIL_SIZE
     canvas = np.zeros((grid_size * ts, grid_size * ts, 3), dtype=np.uint8)
 
@@ -48,10 +76,22 @@ def assemble_image_grid(thumbnail_grid: dict[tuple[int, int], bytes],
         if arr.shape[:2] != (ts, ts):
             img = img.resize((ts, ts), Image.LANCZOS)
             arr = np.array(img.convert('RGB'))
-        row = grid_size - 1 - beta_idx
-        col = alpha_idx
-        canvas[row * ts:(row + 1) * ts, col * ts:(col + 1) * ts] = arr
+        span = (spans or {}).get((alpha_idx, beta_idx), 1)
+        for di in range(span):
+            for dj in range(span):
+                col, beta = alpha_idx + di, beta_idx + dj
+                if not (0 <= col < grid_size and 0 <= beta < grid_size):
+                    continue
+                row = grid_size - 1 - beta
+                canvas[row * ts:(row + 1) * ts, col * ts:(col + 1) * ts] = arr
 
+    return canvas
+
+
+def assemble_image_grid(thumbnail_grid: dict[tuple[int, int], bytes],
+                        grid_size: int, output_path: Path,
+                        spans: dict[tuple[int, int], int] | None = None):
+    canvas = _paint_thumbnails(thumbnail_grid, grid_size, spans)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(canvas).save(output_path)
     return canvas
@@ -59,30 +99,27 @@ def assemble_image_grid(thumbnail_grid: dict[tuple[int, int], bytes],
 
 def render_overlay(sensitivity: np.ndarray, thumbnail_grid: dict,
                    grid_size: int, alphas: np.ndarray, betas: np.ndarray,
-                   tau: float, output_path: Path):
+                   tau: float, output_path: Path,
+                   spans: dict[tuple[int, int], int] | None = None):
     extent = [alphas[0], alphas[-1], betas[0], betas[-1]]
 
     # Build canvas from thumbnails
-    ts = config.THUMBNAIL_SIZE
-    canvas = np.zeros((grid_size * ts, grid_size * ts, 3), dtype=np.uint8)
-    for (ai, bi), thumb_bytes in thumbnail_grid.items():
-        img = Image.open(io.BytesIO(thumb_bytes))
-        arr = np.array(img.convert('RGB'))
-        if arr.shape[:2] != (ts, ts):
-            img = img.resize((ts, ts), Image.LANCZOS)
-            arr = np.array(img.convert('RGB'))
-        row = grid_size - 1 - bi
-        canvas[row * ts:(row + 1) * ts, ai * ts:(ai + 1) * ts] = arr
+    canvas = _paint_thumbnails(thumbnail_grid, grid_size, spans)
 
     fig, ax = plt.subplots(figsize=(10, 9))
     ax.imshow(canvas, extent=extent, origin='upper', aspect='auto')
 
-    sens_norm = (sensitivity - sensitivity.min()) / (sensitivity.max() - sensitivity.min() + 1e-10)
+    meas = _measured_values(sensitivity)
+    lo = meas.min() if meas.size else 0.0
+    hi = meas.max() if meas.size else 0.0
+    sens_norm = np.clip((sensitivity - lo) / (hi - lo + 1e-10), 0.0, 1.0)
+    # unmeasured cells must not paint the image they cover; NaN would also poison hot()
+    sens_norm = np.where(measured_mask(sensitivity), sens_norm, 0.0)
     overlay = plt.cm.hot(sens_norm.T)
     overlay[:, :, 3] = sens_norm.T * 0.6
     ax.imshow(overlay, extent=extent, origin='lower', aspect='auto')
 
-    median_s = np.median(sensitivity)
+    median_s = np.median(meas) if meas.size else 0.0
     if median_s > 0:
         # Three tau levels for context
         tau_levels = [
@@ -92,7 +129,7 @@ def render_overlay(sensitivity: np.ndarray, thumbnail_grid: dict,
         ]
         for t_val, color, lw, ls in tau_levels:
             level = median_s * t_val
-            if level < sensitivity.max():
+            if level < hi:
                 try:
                     ax.contour(alphas, betas, sensitivity.T,
                                levels=[level], colors=color, linewidths=lw, linestyles=ls)
@@ -110,20 +147,12 @@ def render_overlay(sensitivity: np.ndarray, thumbnail_grid: dict,
 
 def render_clusters(clusters: np.ndarray, thumbnail_grid: dict,
                     grid_size: int, alphas: np.ndarray, betas: np.ndarray,
-                    output_path: Path):
+                    output_path: Path,
+                    spans: dict[tuple[int, int], int] | None = None):
     """Render cluster label map overlaid on image grid."""
     extent = [alphas[0], alphas[-1], betas[0], betas[-1]]
 
-    ts = config.THUMBNAIL_SIZE
-    canvas = np.zeros((grid_size * ts, grid_size * ts, 3), dtype=np.uint8)
-    for (ai, bi), thumb_bytes in thumbnail_grid.items():
-        img = Image.open(io.BytesIO(thumb_bytes))
-        arr = np.array(img.convert('RGB'))
-        if arr.shape[:2] != (ts, ts):
-            img = img.resize((ts, ts), Image.LANCZOS)
-            arr = np.array(img.convert('RGB'))
-        row = grid_size - 1 - bi
-        canvas[row * ts:(row + 1) * ts, ai * ts:(ai + 1) * ts] = arr
+    canvas = _paint_thumbnails(thumbnail_grid, grid_size, spans)
 
     fig, ax = plt.subplots(figsize=(10, 9))
     ax.imshow(canvas, extent=extent, origin='upper', aspect='auto')
