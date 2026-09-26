@@ -345,12 +345,128 @@ export interface CascadeStatus {
   error?: string | null;
 }
 
+// ---- JVP probe: the local crossing direction at one point of the simplex ----
+// `normal_theta` is a unit direction in (alpha, beta[, gamma]) — the direction across
+// prompt space along which the image changes fastest here. It is SIGN-FREE: a line,
+// not an arrow, so the UI draws it as a segment through the point in both directions.
+
+export interface JvpProbeRequest {
+  alpha: number;
+  beta: number;
+  gamma?: number;
+  seed?: number;
+}
+
+export interface JvpProbeStartResponse {
+  probe_id: string;
+  status: 'running' | 'error';
+  error?: string | null;
+}
+
+/**
+ * What every JVP probe reports, whichever surface launched it. The grid probe adds the
+ * (alpha, beta, gamma) it was taken at; the cascade probe adds the k-vector of prompt
+ * weights instead, because a cascade crossing has no grid coordinates.
+ */
+export interface JvpProbeCore {
+  // the direction in barycentric prompt weights (length k, sums to 0) — the one readout
+  // that means the same thing on both surfaces, and the only one a k-simplex map can draw
+  normal_bary: number[];
+  // unit vector in (alpha, beta[, gamma]); sign-free
+  normal_theta: number[];
+  normal_reading: string;
+  sigma_whitened: number[];
+  // comparable only between probes of the SAME job/run — never a ridge/not-ridge verdict
+  sigma1_raw: number;
+  // ~1 = a single front; participation_ratio ~1 = front, ~2 = corner
+  rank1_share: number;
+  participation_ratio: number;
+  k: number;
+  seed: number;
+  steps: number;
+  wall_s: number;
+}
+
+export interface JvpProbeResult extends JvpProbeCore {
+  alpha: number;
+  beta: number;
+  gamma: number;
+}
+
+export interface JvpProbeStatus {
+  probe_id: string;
+  status: 'running' | 'done' | 'error';
+  kind: 'jvp';
+  error?: string | null;
+  result: JvpProbeResult | null;
+}
+
+// ---- The same probe on a cascade run (k >= 3 prompts, no grid) ----
+// Either name a crossing by `cid` or give an arbitrary point as barycentric `weights`.
+// The status is read back through the SAME route as the grid probe (getJvpProbe), so the
+// result differs only in how it says where it was taken.
+
+export interface CascadeJvpProbeRequest {
+  cid?: number;
+  weights?: number[];
+  seed?: number;
+}
+
+export interface CascadeJvpProbeResult extends JvpProbeCore {
+  weights?: number[];
+}
+
+// ---- Token probe: which words the generation leans on at this point ----
+
+export type TokenProbeWhich = 'a' | 'b' | 'c' | 'd';
+
+export interface TokenProbeRequest {
+  which: TokenProbeWhich;
+  seed?: number;
+}
+
+export interface TokenProbeStartResponse {
+  probe_id: string;
+  status: 'running' | 'error';
+  error?: string | null;
+}
+
+export interface TokenProbeRow {
+  pos: number;
+  cls: 'content' | 'template' | 'pad';
+  text: string;
+  // sensitivity of the generation to this token's embedding; bigger = more load-bearing
+  sigma: number;
+}
+
+export interface TokenProbeResult {
+  prompt: string;
+  rows: TokenProbeRow[];          // sorted by position
+  ranking: string[];              // content tokens, descending sigma
+  seed: number;
+  steps: number;
+  n_jvp: number;
+  wall_s: number;
+}
+
+export interface TokenProbeStatus {
+  probe_id: string;
+  status: 'running' | 'done' | 'error';
+  kind: 'token';
+  error?: string | null;
+  result: TokenProbeResult | null;
+}
+
 // ---- Ridge walk: human-in-the-loop traversal along one ridge ----
 
 export interface WalkStartRequest {
   cid: number;
   direction: number;   // +1 / -1
   n_steps?: number;
+  use_jvp?: boolean;
+  sig_mode?: 'relative' | 'absolute';
+  // fan = stations on one straight line (old); continuation = predictor-corrector along the secant (new)
+  mode?: 'fan' | 'continuation';
 }
 
 export interface WalkStep {
@@ -358,6 +474,7 @@ export interface WalkStep {
   // single-seed local contrast across the boundary at this step (not the certified B)
   contrast: number;
   thumb: number;
+  center?: number[] | null;   // best crossing estimate (centre of the final bisection bracket)
 }
 
 export interface WalkStatus {
@@ -369,4 +486,8 @@ export interface WalkStatus {
   segs: number[][][];
   notes: string[];
   error?: string | null;
+  mode?: string;
+  images?: number;            // images the walk rendered
+  cert?: { status: string; b?: (number | null)[]; significant?: boolean[]; threshold?: number | null } | null;
+  jvp?: { rank1_share: number; participation_ratio: number; cos_with_bracket?: number; wall_s: number } | null;
 }

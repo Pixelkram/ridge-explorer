@@ -1,3 +1,4 @@
+import time
 """Cascade endpoints: start / status / cancel / images.
 
 Mirrors the Discover run pattern (routers/discover.py): a plain sync worker on a
@@ -15,7 +16,9 @@ from fastapi import APIRouter, Request
 from fastapi.responses import Response
 
 from backend import config
-from backend.models import (CascadeStartRequest, CascadeStartResponse, CascadeStatus,
+from backend.services.gpu_pool import ProbeTask
+from backend.models import (
+    ProbeStartResponse, CascadeProbeRequest,CascadeStartRequest, CascadeStartResponse, CascadeStatus,
                             CascadeCrossing, CascadePatch, CascadeChord,
                             WalkStartRequest, WalkStep, WalkStatus,
                             CascadePointInfo)
@@ -127,7 +130,7 @@ async def walk_start(run_id: str, req: WalkStartRequest, request: Request):
                           error="crossing not found (or run still bisecting)")
     wid = uuid.uuid4().hex[:8]
     walk = cs.Walk(wid=wid, cid=req.cid, direction=1 if req.direction >= 0 else -1,
-                   n_steps=req.n_steps)
+                   n_steps=req.n_steps, use_jvp=bool(req.use_jvp), sig_mode=req.sig_mode, mode=req.mode)
     run.walks = getattr(run, "walks", {})
     run.walks[wid] = walk
 
@@ -139,7 +142,16 @@ async def walk_start(run_id: str, req: WalkStartRequest, request: Request):
             walk.error = f"{type(exc).__name__}: {exc}"
 
     asyncio.create_task(asyncio.to_thread(_go))
-    return WalkStatus(walk_id=wid, status="running", cid=req.cid)
+    return WalkStatus(walk_id=wid, status="running", cid=req.cid, mode=req.mode)
+
+
+def _walk_status(walk):
+    return WalkStatus(
+        walk_id=walk.wid, status=walk.status, cid=walk.cid, mode=walk.mode, images=walk.images,
+        plane=walk.plane, cert=walk.cert, trace=list(walk.trace), jvp=getattr(walk, "jvp", None),
+        steps=[WalkStep(**s) for s in walk.steps],
+        segs=list(walk.segs),
+        notes=list(walk.notes), error=walk.error)
 
 
 @router.get("/{run_id}/walk/{walk_id}", response_model=WalkStatus)
@@ -148,11 +160,29 @@ async def walk_status(run_id: str, walk_id: str, request: Request):
     walk = getattr(run, "walks", {}).get(walk_id) if run is not None else None
     if walk is None:
         return WalkStatus(walk_id=walk_id, status="unknown", error="no such walk")
-    return WalkStatus(
-        walk_id=walk.wid, status=walk.status, cid=walk.cid,
-        steps=[WalkStep(**s) for s in walk.steps],
-        segs=list(walk.segs),
-        notes=list(walk.notes), error=walk.error)
+    return _walk_status(walk)
+
+
+@router.post("/{run_id}/walk/{walk_id}/certify", response_model=WalkStatus)
+async def walk_certify(run_id: str, walk_id: str, request: Request):
+    """Re-measure a finished walk's stations on held-out seeds (cs.certify_walk); poll the walk for `cert`."""
+    app = request.app
+    run = _runs(app).get(run_id)
+    walk = getattr(run, "walks", {}).get(walk_id) if run is not None else None
+    if walk is None:
+        return WalkStatus(walk_id=walk_id, status="unknown", error="no such walk")
+    if walk.status == "running":
+        return WalkStatus(walk_id=walk_id, status="running", error="walk still running")
+    walk.cert = {"status": "running"}
+
+    def _go():
+        try:
+            cs.certify_walk(app, run, app.state.gpu_pool, walk)
+        except Exception as exc:                 # noqa: BLE001
+            walk.cert = {"status": "error", "error": f"{type(exc).__name__}: {exc}"}
+
+    asyncio.create_task(asyncio.to_thread(_go))
+    return _walk_status(walk)
 
 
 @router.post("/{run_id}/walk/{walk_id}/cancel")
@@ -195,3 +225,38 @@ async def image(run_id: str, index: int, request: Request):
     if b is None:
         return Response(status_code=404)
     return Response(content=b, media_type="image/jpeg")
+
+
+@router.post("/{run_id}/jvp-probe", response_model=ProbeStartResponse)
+async def cascade_jvp_probe(run_id: str, req: CascadeProbeRequest, request: Request):
+    """Exact-JVP ridge normal at a crossing (`cid`) or at arbitrary `weights` of this run's k-prompt basis.
+    Returns the whitened k-vector normal, rank-1 share (front) and participation ratio (corner). Mixing is
+    linear, as in the cascade's own evaluate(); steps/guidance/size follow the run. Poll
+    GET /api/grid/jvp-probe/{probe_id}. Evidence: search_problem/outputs/h08_vector_uses/RESULTS.md (h08-1)."""
+    run = _runs(request.app).get(run_id)
+    if run is None or not run.prompts:
+        return ProbeStartResponse(probe_id="", status="error")
+    k = len(run.prompts)
+    weights, cid = None, None
+    if req.cid is not None:
+        x = next((c for c in run.crossings if c.cid == req.cid), None)
+        if x is None:
+            return ProbeStartResponse(probe_id="", status="error")
+        w = x.mid if x.mid is not None else (x.wa + x.wb) / 2
+        weights, cid = [float(v) for v in w], req.cid
+    elif req.weights is not None and len(req.weights) == k:
+        weights = [float(v) for v in req.weights]
+    if weights is None:
+        return ProbeStartResponse(probe_id="", status="error")
+    tot = sum(weights)
+    if abs(tot - 1.0) > 1e-3 and tot > 0:
+        weights = [v / tot for v in weights]
+    probe_id = f"jvp_{uuid.uuid4().hex[:8]}"
+    request.app.state.jobs[probe_id] = {"type": "jvp_probe", "status": "running", "kind": "jvp", "job_id": run_id,
+                                        "weights": weights, "cid": cid, "k": k, "names": [f"P{i + 1}" for i in range(k)],
+                                        "result": None, "error": "", "started_at": time.time()}
+    request.app.state.gpu_pool.submit(ProbeTask(
+        probe_id=probe_id, job_id=run_id, prompts=list(run.prompts), weights=weights,
+        seed=req.seed if req.seed is not None else int(run.seed), height=run.height, width=run.width,
+        steps=run.steps, guidance_scale=run.guidance_scale, use_slerp=False))
+    return ProbeStartResponse(probe_id=probe_id, status="running")

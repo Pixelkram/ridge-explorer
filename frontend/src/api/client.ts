@@ -1,4 +1,4 @@
-import type { GridStartRequest, GridStartResponse, GridStatusResponse, RefineRequest, RefineResponse, SeedProbeRequest, SeedProbeResponse, SeedProbeStatus, FastScanRequest, FastScanResponse, GenerateSelectedRequest, GenerateSelectedResponse, MFScanRequest, MFScanResponse, RidgeGraph, RidgeGraphRequest, RidgeGraphResponse, HikeStartRequest, HikeStartResponse, HikeStatus } from './types';
+import type { GridStartRequest, GridStartResponse, GridStatusResponse, RefineRequest, RefineResponse, SeedProbeRequest, SeedProbeResponse, SeedProbeStatus, FastScanRequest, FastScanResponse, GenerateSelectedRequest, GenerateSelectedResponse, MFScanRequest, MFScanResponse, RidgeGraph, RidgeGraphRequest, RidgeGraphResponse, HikeStartRequest, HikeStartResponse, HikeStatus, JvpProbeRequest, JvpProbeStartResponse, JvpProbeStatus, TokenProbeRequest, TokenProbeStartResponse, TokenProbeStatus } from './types';
 
 const BASE = '';
 
@@ -70,6 +70,54 @@ export async function startSeedProbe(jobId: string, req: SeedProbeRequest): Prom
 export async function getSeedProbeStatus(probeId: string): Promise<SeedProbeStatus> {
   const res = await fetchRetry(`${BASE}/api/grid/probe/${probeId}/status`);
   return jsonOrThrow<SeedProbeStatus>(res, 'getSeedProbeStatus');
+}
+
+// ---- JVP / token probes ----------------------------------------------------
+// Both start a GPU task and answer with an id to poll (a JVP probe is ~25 s, a token
+// probe ~3 min). The two GETs use a bare fetch on purpose, as the other pollers do:
+// a poll that retries with backoff just delays the next one, and the store's poller
+// already treats a failed read as transient and keeps going.
+
+export async function startJvpProbe(jobId: string, req: JvpProbeRequest): Promise<JvpProbeStartResponse> {
+  const res = await fetchRetry(`${BASE}/api/grid/${jobId}/jvp-probe`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  return jsonOrThrow<JvpProbeStartResponse>(res, 'startJvpProbe');
+}
+
+export async function getJvpProbe(probeId: string): Promise<JvpProbeStatus> {
+  const res = await fetch(`${BASE}/api/grid/jvp-probe/${probeId}`);
+  return jsonOrThrow<JvpProbeStatus>(res, 'getJvpProbe');
+}
+
+// The cascade's own launch route. Only the START differs — a cascade point is named by
+// crossing id or by barycentric weights, not by (alpha, beta) — so the poll goes back
+// through getJvpProbe above, which is the shared status route for both surfaces.
+export async function startCascadeJvpProbe(
+  runId: string, req: import('./types').CascadeJvpProbeRequest,
+): Promise<JvpProbeStartResponse> {
+  const res = await fetchRetry(`${BASE}/api/cascade/${runId}/jvp-probe`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  return jsonOrThrow<JvpProbeStartResponse>(res, 'startCascadeJvpProbe');
+}
+
+export async function startTokenProbe(jobId: string, req: TokenProbeRequest): Promise<TokenProbeStartResponse> {
+  const res = await fetchRetry(`${BASE}/api/grid/${jobId}/token-probe`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  return jsonOrThrow<TokenProbeStartResponse>(res, 'startTokenProbe');
+}
+
+export async function getTokenProbe(probeId: string): Promise<TokenProbeStatus> {
+  const res = await fetch(`${BASE}/api/grid/token-probe/${probeId}`);
+  return jsonOrThrow<TokenProbeStatus>(res, 'getTokenProbe');
 }
 
 export async function cancelJob(): Promise<void> {

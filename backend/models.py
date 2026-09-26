@@ -497,6 +497,16 @@ class CascadePatch(BaseModel):
 
 class WalkStartRequest(BaseModel):
     cid: int
+    # Use the exact-JVP normal at the origin crossing for the transversal probe direction and the tangent
+    # plane (one JVP, ~30 s) instead of the bracket chord that happened to cross (services/jvp_probe.py).
+    use_jvp: bool = False
+    # "absolute": both new sides within COS_T of the origin's sides (the coverage criterion);
+    # "relative": each new side closer to its matching origin side than to the opposite one.
+    sig_mode: str = Field("relative", pattern="^(absolute|relative)$")   # relative won its A/B 24/24 (tests/walk_ab_*_relative.json)
+    # "fan": stations on one straight line, all rendered at once; "continuation": sequential predictor-corrector
+    # along the secant of the last two captured points (RESEARCH_ridge_following_k4.md, fix 1). Continuation won
+    # its pre-registered A/B (tests/PREREG_walk_continuation.md, tests/walk_pc_results.json) and is the default.
+    mode: str = Field("continuation", pattern="^(fan|continuation)$")
     # +1 / -1: the two ways along the ridge from the crossing
     direction: int = Field(1, ge=-1, le=1)
     n_steps: int = Field(5, ge=1)
@@ -507,12 +517,20 @@ class WalkStep(BaseModel):
     # single-seed local contrast across the boundary at this step (NOT the certified B)
     contrast: float
     thumb: int
+    # best estimate of the crossing: centre of the final bisection bracket (the thumb sits within a bracket of it)
+    center: list[float] | None = None
 
 
 class WalkStatus(BaseModel):
     walk_id: str
     status: str
     cid: int = -1
+    mode: str = "fan"
+    images: int = 0              # images the walk rendered
+    plane: dict | None = None    # {x0, t, n}: the walk plane span(t, n) through the origin crossing
+    cert: dict | None = None     # held-out-seed certification per station (POST .../certify)
+    trace: list = []             # continuation: per corrector attempt {j, h, offs, adj 1-cos, ends, chosen}
+    jvp: dict | None = None      # {rank1_share, participation_ratio, cos_with_bracket, wall_s} when use_jvp
     steps: list[WalkStep] = []
     # transversal probe lines (pairs of weight vectors) -- the walk's line bundle
     segs: list[list[list[float]]] = []
@@ -547,3 +565,46 @@ class CascadeStatus(BaseModel):
     patches: list[CascadePatch] = []
     notes: list[str] = []
     error: str | None = None
+
+
+# ---- exact-JVP probes (services/jvp_probe.py) ----
+class JvpProbeRequest(BaseModel):
+    alpha: float = Field(..., ge=0.0, le=1.0)
+    beta: float = Field(0.0, ge=0.0, le=1.0)
+    gamma: float = Field(0.0, ge=0.0, le=1.0)
+    seed: int | None = None
+
+
+class ProbeStartResponse(BaseModel):
+    probe_id: str
+    status: str
+
+
+class ProbeStatusResponse(BaseModel):
+    probe_id: str
+    status: str            # running | done | error
+    kind: str
+    error: str = ""
+    result: dict | None = None
+
+
+class TokenProbeRequest(BaseModel):
+    which: str = Field("a", pattern="^[abcd]$")
+    seed: int | None = None
+
+
+class CascadeProbeRequest(BaseModel):
+    cid: int | None = None
+    weights: list[float] | None = None
+    seed: int | None = None
+
+
+class GenericProbeRequest(BaseModel):
+    prompts: list[str] = Field(..., min_length=2, max_length=12)
+    weights: list[float]
+    seed: int = 42
+    steps: int = Field(config.DEFAULT_NUM_INFERENCE_STEPS, ge=1, le=50)
+    guidance_scale: float = Field(config.DEFAULT_GUIDANCE_SCALE, ge=0.0, le=20.0)
+    height: int = Field(config.DEFAULT_HEIGHT, ge=64, le=1024)
+    width: int = Field(config.DEFAULT_WIDTH, ge=64, le=1024)
+    use_slerp: bool = False

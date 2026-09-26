@@ -1,0 +1,28 @@
+Independent verification of PREREG_walk_continuation.md (scipy 1.15.3)
+runs: C1=d0dc601d (k4_T0, seed 7, 14 crossings, 9 sig, 28 units), C2=b443d5ba (k4_T2, seed 42, 10 crossings, 7 sig, 20 units), C3=71163d7e (k4_T3, seed 42, 12 crossings, 7 sig, 24 units)
+units: 72 total, 0 excluded
+PRIMARY: n=46  differing=27  cont longer=21  fan longer=6  win frac=0.7777777777777778
+  mean A fan=0.1559 cont=0.1973  mean D=0.0413  median D=0.0001
+  Wilcoxon D: W=153.0 p=0.007968038174457988 (asymptotic (zeros/ties present, no continuity correction), n_zero=11)
+  mean A_cert fan=0.1118 cont=0.1500  guard (cont >= fan - 0.01): True
+  Wilcoxon D_cert: p=0.01044243284850472
+  criteria: i_cont_longer_ge_65pct_of_differing=True, ii_wilcoxon_p_lt_0.05=True, iii_mean_D_gt_0=True, iv_majority_of_runs=True, v_guard_Acert_cont_ge_Acert_fan_minus_0.01=True, n_differing_ge_8=True, refuted_condition=False
+  (iv) detail: {'eligible_runs': ['C1', 'C2', 'C3'], 'cont_mean_higher': {'C1': True, 'C2': False, 'C3': True}}
+  VERDICT: SUPPORTED  ((i)-(v) all hold)
+ALL UNITS (descriptive): n=72  differing=44  cont longer=34  fan longer=10  win frac=0.7727272727272727
+  mean A fan=0.1313 cont=0.1772  mean D=0.0459  median D=0.0001
+  Wilcoxon D: W=323.0 p=0.0005113732353925996 (asymptotic (n > 50), n_zero=19)
+  mean A_cert fan=0.0816 cont=0.1238  guard (cont >= fan - 0.01): True
+  Wilcoxon D_cert: p=0.0005672203766004877
+  criteria: i_cont_longer_ge_65pct_of_differing=True, ii_wilcoxon_p_lt_0.05=True, iii_mean_D_gt_0=True, iv_majority_of_runs=True, v_guard_Acert_cont_ge_Acert_fan_minus_0.01=True, n_differing_ge_8=True, refuted_condition=False
+  (iv) detail: {'eligible_runs': ['C1', 'C2', 'C3'], 'cont_mean_higher': {'C1': True, 'C2': True, 'C3': True}}
+  VERDICT: SUPPORTED  ((i)-(v) all hold)
+per-run (primary):
+  C1: n=18 diff=8 +8/-0 A fan=0.1381 cont=0.1844 meanD=+0.0463 Acert fan=0.0850 cont=0.1410
+  C2: n=14 diff=10 +5/-5 A fan=0.1542 cont=0.1531 meanD=-0.0011 Acert fan=0.1257 cont=0.1351
+  C3: n=14 diff=9 +8/-1 A fan=0.1806 cont=0.2581 meanD=+0.0774 Acert fan=0.1325 cont=0.1764
+per-run (all units):
+  C1: n=28 diff=15 +13/-2 A fan=0.1143 cont=0.1649 meanD=+0.0507 Acert fan=0.0680 cont=0.1203
+  C2: n=20 diff=13 +7/-6 A fan=0.1469 cont=0.1627 meanD=+0.0158 Acert fan=0.0945 cont=0.1179
+  C3: n=24 diff=16 +14/-2 A fan=0.1382 cont=0.2035 meanD=+0.0654 Acert fan=0.0868 cont=0.1329
+stopping rule (pooled units from significant crossings, as run_all counts them): C1:18->18, C2:14->32, C3:14->46

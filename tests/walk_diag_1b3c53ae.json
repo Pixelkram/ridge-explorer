@@ -1,0 +1,460 @@
+{
+ "run": "1b3c53ae",
+ "steps": 4,
+ "summary": {
+  "classes_all": {
+   "other": 2,
+   "edge/face": 3,
+   "changed_identity": 28,
+   "ended_no_straddle": 3
+  },
+  "classes_significant": {
+   "other": 2,
+   "edge/face": 2,
+   "changed_identity": 17,
+   "ended_no_straddle": 3
+  },
+  "classes_nonsignificant": {
+   "changed_identity": 11,
+   "edge/face": 1
+  },
+  "mean_captured_significant": 0.20833333333333334,
+  "mean_captured_nonsignificant": 0.16666666666666666
+ },
+ "rows": [
+  {
+   "cid": 0,
+   "dir": 1,
+   "significant": true,
+   "b": 0.4507293966771397,
+   "bracket_w": 0.006249999999999973,
+   "captured": 0,
+   "kind": "other",
+   "notes": []
+  },
+  {
+   "cid": 0,
+   "dir": -1,
+   "significant": true,
+   "b": 0.4507293966771397,
+   "bracket_w": 0.006249999999999973,
+   "captured": 0,
+   "kind": "other",
+   "notes": []
+  },
+  {
+   "cid": 1,
+   "dir": 1,
+   "significant": true,
+   "b": 0.9786180109584366,
+   "bracket_w": 0.006250000000000017,
+   "captured": 0,
+   "kind": "edge/face",
+   "notes": [
+    "edge of the space at station 1"
+   ]
+  },
+  {
+   "cid": 1,
+   "dir": -1,
+   "significant": true,
+   "b": 0.9786180109584366,
+   "bracket_w": 0.006250000000000017,
+   "captured": 0,
+   "kind": "changed_identity",
+   "notes": [
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 2,
+   "dir": 1,
+   "significant": true,
+   "b": 0.7134698613170412,
+   "bracket_w": 0.006250000000000016,
+   "captured": 0,
+   "kind": "ended_no_straddle",
+   "notes": [
+    "edge of the space at station 2",
+    "ridge ended before station 1"
+   ]
+  },
+  {
+   "cid": 2,
+   "dir": -1,
+   "significant": true,
+   "b": 0.7134698613170412,
+   "bracket_w": 0.006250000000000016,
+   "captured": 0,
+   "kind": "changed_identity",
+   "notes": [
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 3,
+   "dir": 1,
+   "significant": true,
+   "b": 0.948563914860491,
+   "bracket_w": 0.006249999999999989,
+   "captured": 0,
+   "kind": "changed_identity",
+   "notes": [
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 3,
+   "dir": -1,
+   "significant": true,
+   "b": 0.948563914860491,
+   "bracket_w": 0.006249999999999989,
+   "captured": 1,
+   "kind": "changed_identity",
+   "notes": [
+    "ridge changed identity at station 2 (junction?)"
+   ]
+  },
+  {
+   "cid": 4,
+   "dir": 1,
+   "significant": false,
+   "b": 0.3531101960978426,
+   "bracket_w": 0.006249999999999997,
+   "captured": 0,
+   "kind": "changed_identity",
+   "notes": [
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 4,
+   "dir": -1,
+   "significant": false,
+   "b": 0.3531101960978426,
+   "bracket_w": 0.006249999999999997,
+   "captured": 0,
+   "kind": "changed_identity",
+   "notes": [
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 5,
+   "dir": 1,
+   "significant": false,
+   "b": 0.05394520678783904,
+   "bracket_w": 0.006249999999999985,
+   "captured": 0,
+   "kind": "changed_identity",
+   "notes": [
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 5,
+   "dir": -1,
+   "significant": false,
+   "b": 0.05394520678783904,
+   "bracket_w": 0.006249999999999985,
+   "captured": 0,
+   "kind": "changed_identity",
+   "notes": [
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 6,
+   "dir": 1,
+   "significant": true,
+   "b": 0.8198629991240827,
+   "bracket_w": 0.006250000000000015,
+   "captured": 0,
+   "kind": "changed_identity",
+   "notes": [
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 6,
+   "dir": -1,
+   "significant": true,
+   "b": 0.8198629991240827,
+   "bracket_w": 0.006250000000000015,
+   "captured": 0,
+   "kind": "ended_no_straddle",
+   "notes": [
+    "too close to a face at station 2",
+    "ridge ended before station 1"
+   ]
+  },
+  {
+   "cid": 7,
+   "dir": 1,
+   "significant": true,
+   "b": 0.9576934105900462,
+   "bracket_w": 0.006250000000000018,
+   "captured": 0,
+   "kind": "edge/face",
+   "notes": [
+    "edge of the space at station 1"
+   ]
+  },
+  {
+   "cid": 7,
+   "dir": -1,
+   "significant": true,
+   "b": 0.9576934105900462,
+   "bracket_w": 0.006250000000000018,
+   "captured": 1,
+   "kind": "changed_identity",
+   "notes": [
+    "ridge changed identity at station 2 (junction?)"
+   ]
+  },
+  {
+   "cid": 8,
+   "dir": 1,
+   "significant": true,
+   "b": 0.9601775766179022,
+   "bracket_w": 0.006249999999999976,
+   "captured": 0,
+   "kind": "changed_identity",
+   "notes": [
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 8,
+   "dir": -1,
+   "significant": true,
+   "b": 0.9601775766179022,
+   "bracket_w": 0.006249999999999976,
+   "captured": 0,
+   "kind": "changed_identity",
+   "notes": [
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 9,
+   "dir": 1,
+   "significant": true,
+   "b": 0.6217681940830405,
+   "bracket_w": 0.006250000000000013,
+   "captured": 0,
+   "kind": "changed_identity",
+   "notes": [
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 9,
+   "dir": -1,
+   "significant": true,
+   "b": 0.6217681940830405,
+   "bracket_w": 0.006250000000000013,
+   "captured": 0,
+   "kind": "changed_identity",
+   "notes": [
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 10,
+   "dir": 1,
+   "significant": true,
+   "b": 0.6763072496957352,
+   "bracket_w": 0.006249999999999993,
+   "captured": 2,
+   "kind": "changed_identity",
+   "notes": [
+    "ridge changed identity at station 3 (junction?)"
+   ]
+  },
+  {
+   "cid": 10,
+   "dir": -1,
+   "significant": true,
+   "b": 0.6763072496957352,
+   "bracket_w": 0.006249999999999993,
+   "captured": 0,
+   "kind": "changed_identity",
+   "notes": [
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 11,
+   "dir": 1,
+   "significant": true,
+   "b": 0.6826336718841908,
+   "bracket_w": 0.006249999999999993,
+   "captured": 1,
+   "kind": "ended_no_straddle",
+   "notes": [
+    "ridge ended before station 2"
+   ]
+  },
+  {
+   "cid": 11,
+   "dir": -1,
+   "significant": true,
+   "b": 0.6826336718841908,
+   "bracket_w": 0.006249999999999993,
+   "captured": 0,
+   "kind": "changed_identity",
+   "notes": [
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 12,
+   "dir": 1,
+   "significant": false,
+   "b": 0.3788851411460542,
+   "bracket_w": 0.006249999999999999,
+   "captured": 0,
+   "kind": "changed_identity",
+   "notes": [
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 12,
+   "dir": -1,
+   "significant": false,
+   "b": 0.3788851411460542,
+   "bracket_w": 0.006249999999999999,
+   "captured": 0,
+   "kind": "changed_identity",
+   "notes": [
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 13,
+   "dir": 1,
+   "significant": false,
+   "b": 0.3373699731848622,
+   "bracket_w": 0.006249999999999993,
+   "captured": 0,
+   "kind": "changed_identity",
+   "notes": [
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 13,
+   "dir": -1,
+   "significant": false,
+   "b": 0.3373699731848622,
+   "bracket_w": 0.006249999999999993,
+   "captured": 0,
+   "kind": "changed_identity",
+   "notes": [
+    "edge of the space at station 2",
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 14,
+   "dir": 1,
+   "significant": false,
+   "b": 0.20049741960231265,
+   "bracket_w": 0.006249999999999992,
+   "captured": 1,
+   "kind": "changed_identity",
+   "notes": [
+    "ridge changed identity at station 2 (junction?)"
+   ]
+  },
+  {
+   "cid": 14,
+   "dir": -1,
+   "significant": false,
+   "b": 0.20049741960231265,
+   "bracket_w": 0.006249999999999992,
+   "captured": 0,
+   "kind": "changed_identity",
+   "notes": [
+    "edge of the space at station 2",
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 15,
+   "dir": 1,
+   "significant": true,
+   "b": 0.42866465324612,
+   "bracket_w": 0.006249999999999973,
+   "captured": 0,
+   "kind": "changed_identity",
+   "notes": [
+    "edge of the space at station 3",
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 15,
+   "dir": -1,
+   "significant": true,
+   "b": 0.42866465324612,
+   "bracket_w": 0.006249999999999973,
+   "captured": 0,
+   "kind": "changed_identity",
+   "notes": [
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 16,
+   "dir": 1,
+   "significant": true,
+   "b": 0.72803319626673,
+   "bracket_w": 0.006250000000000001,
+   "captured": 0,
+   "kind": "changed_identity",
+   "notes": [
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 16,
+   "dir": -1,
+   "significant": true,
+   "b": 0.72803319626673,
+   "bracket_w": 0.006250000000000001,
+   "captured": 0,
+   "kind": "changed_identity",
+   "notes": [
+    "edge of the space at station 2",
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 17,
+   "dir": 1,
+   "significant": false,
+   "b": 0.20606192393211045,
+   "bracket_w": 0.006250000000000024,
+   "captured": 0,
+   "kind": "changed_identity",
+   "notes": [
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 17,
+   "dir": -1,
+   "significant": false,
+   "b": 0.20606192393211045,
+   "bracket_w": 0.006250000000000024,
+   "captured": 1,
+   "kind": "edge/face",
+   "notes": [
+    "edge of the space at station 2"
+   ]
+  }
+ ]
+}

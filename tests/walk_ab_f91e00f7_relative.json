@@ -1,0 +1,478 @@
+{
+ "n_pairs": 36,
+ "n_differing": 24,
+ "frac_jvp_wins": 1.0,
+ "wilcoxon_p": 1.549142234871223e-05,
+ "mean_iso": 0.19444444444444445,
+ "mean_jvp": 1.8055555555555556,
+ "median_cos_with_bracket": NaN,
+ "jvp_overhead_s": 1.0008164644241333,
+ "verdict": "SUPPORTED",
+ "rows": [
+  {
+   "cid": 0,
+   "dir": 1,
+   "iso": 0,
+   "jvp": 0,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 0.0007777214050292969,
+   "wall_jvp": 0.00040721893310546875,
+   "notes_jvp": []
+  },
+  {
+   "cid": 0,
+   "dir": -1,
+   "iso": 0,
+   "jvp": 0,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 0.00038051605224609375,
+   "wall_jvp": 0.0003764629364013672,
+   "notes_jvp": []
+  },
+  {
+   "cid": 1,
+   "dir": 1,
+   "iso": 0,
+   "jvp": 0,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 0.0003542900085449219,
+   "wall_jvp": 0.0003647804260253906,
+   "notes_jvp": [
+    "edge of the space at station 1"
+   ]
+  },
+  {
+   "cid": 1,
+   "dir": -1,
+   "iso": 0,
+   "jvp": 0,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 8.006361246109009,
+   "wall_jvp": 8.007860898971558,
+   "notes_jvp": [
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 2,
+   "dir": 1,
+   "iso": 0,
+   "jvp": 0,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 6.005311012268066,
+   "wall_jvp": 6.005464553833008,
+   "notes_jvp": [
+    "edge of the space at station 2",
+    "ridge ended before station 1"
+   ]
+  },
+  {
+   "cid": 2,
+   "dir": -1,
+   "iso": 0,
+   "jvp": 2,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 8.007615327835083,
+   "wall_jvp": 12.009897232055664,
+   "notes_jvp": [
+    "ridge ended before station 3"
+   ]
+  },
+  {
+   "cid": 3,
+   "dir": 1,
+   "iso": 0,
+   "jvp": 6,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 8.006459951400757,
+   "wall_jvp": 8.006992101669312,
+   "notes_jvp": []
+  },
+  {
+   "cid": 3,
+   "dir": -1,
+   "iso": 1,
+   "jvp": 6,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 12.00910496711731,
+   "wall_jvp": 10.007747650146484,
+   "notes_jvp": []
+  },
+  {
+   "cid": 4,
+   "dir": 1,
+   "iso": 0,
+   "jvp": 3,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 8.007473230361938,
+   "wall_jvp": 10.007606506347656,
+   "notes_jvp": [
+    "ridge changed identity at station 4 (junction?)"
+   ]
+  },
+  {
+   "cid": 4,
+   "dir": -1,
+   "iso": 0,
+   "jvp": 2,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 8.006360292434692,
+   "wall_jvp": 10.007997751235962,
+   "notes_jvp": [
+    "ridge changed identity at station 3 (junction?)"
+   ]
+  },
+  {
+   "cid": 5,
+   "dir": 1,
+   "iso": 0,
+   "jvp": 1,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 8.00725793838501,
+   "wall_jvp": 12.019840002059937,
+   "notes_jvp": [
+    "ridge ended before station 2"
+   ]
+  },
+  {
+   "cid": 5,
+   "dir": -1,
+   "iso": 0,
+   "jvp": 3,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 8.011894702911377,
+   "wall_jvp": 10.032371759414673,
+   "notes_jvp": [
+    "ridge changed identity at station 4 (junction?)"
+   ]
+  },
+  {
+   "cid": 6,
+   "dir": 1,
+   "iso": 0,
+   "jvp": 3,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 8.006122350692749,
+   "wall_jvp": 10.007460832595825,
+   "notes_jvp": [
+    "edge of the space at station 6",
+    "ridge ended before station 4"
+   ]
+  },
+  {
+   "cid": 6,
+   "dir": -1,
+   "iso": 0,
+   "jvp": 0,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 4.00372838973999,
+   "wall_jvp": 4.004027843475342,
+   "notes_jvp": [
+    "too close to a face at station 2",
+    "ridge ended before station 1"
+   ]
+  },
+  {
+   "cid": 7,
+   "dir": 1,
+   "iso": 0,
+   "jvp": 0,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 0.0004608631134033203,
+   "wall_jvp": 0.00031685829162597656,
+   "notes_jvp": [
+    "edge of the space at station 1"
+   ]
+  },
+  {
+   "cid": 7,
+   "dir": -1,
+   "iso": 1,
+   "jvp": 5,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 10.007555484771729,
+   "wall_jvp": 8.006886005401611,
+   "notes_jvp": [
+    "edge of the space at station 6"
+   ]
+  },
+  {
+   "cid": 8,
+   "dir": 1,
+   "iso": 0,
+   "jvp": 2,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 8.006216526031494,
+   "wall_jvp": 10.034359693527222,
+   "notes_jvp": [
+    "edge of the space at station 6",
+    "ridge ended before station 3"
+   ]
+  },
+  {
+   "cid": 8,
+   "dir": -1,
+   "iso": 0,
+   "jvp": 1,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 8.006256103515625,
+   "wall_jvp": 10.007378101348877,
+   "notes_jvp": [
+    "ridge changed identity at station 2 (junction?)"
+   ]
+  },
+  {
+   "cid": 9,
+   "dir": 1,
+   "iso": 0,
+   "jvp": 3,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 8.00666069984436,
+   "wall_jvp": 10.00707221031189,
+   "notes_jvp": [
+    "ridge changed identity at station 4 (junction?)"
+   ]
+  },
+  {
+   "cid": 9,
+   "dir": -1,
+   "iso": 0,
+   "jvp": 3,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 8.008259296417236,
+   "wall_jvp": 12.008674383163452,
+   "notes_jvp": [
+    "edge of the space at station 6",
+    "ridge ended before station 4"
+   ]
+  },
+  {
+   "cid": 10,
+   "dir": 1,
+   "iso": 2,
+   "jvp": 3,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 12.011500835418701,
+   "wall_jvp": 10.007447242736816,
+   "notes_jvp": [
+    "edge of the space at station 6",
+    "ridge ended before station 4"
+   ]
+  },
+  {
+   "cid": 10,
+   "dir": -1,
+   "iso": 0,
+   "jvp": 1,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 8.006368398666382,
+   "wall_jvp": 12.01024866104126,
+   "notes_jvp": [
+    "ridge changed identity at station 2 (junction?)"
+   ]
+  },
+  {
+   "cid": 11,
+   "dir": 1,
+   "iso": 1,
+   "jvp": 1,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 12.009158372879028,
+   "wall_jvp": 12.010072946548462,
+   "notes_jvp": [
+    "ridge ended before station 2"
+   ]
+  },
+  {
+   "cid": 11,
+   "dir": -1,
+   "iso": 0,
+   "jvp": 1,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 8.006406545639038,
+   "wall_jvp": 12.009308099746704,
+   "notes_jvp": [
+    "ridge ended before station 2"
+   ]
+  },
+  {
+   "cid": 12,
+   "dir": 1,
+   "iso": 0,
+   "jvp": 0,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 8.006652593612671,
+   "wall_jvp": 8.006067037582397,
+   "notes_jvp": [
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 12,
+   "dir": -1,
+   "iso": 0,
+   "jvp": 1,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 8.006717920303345,
+   "wall_jvp": 12.009223222732544,
+   "notes_jvp": [
+    "ridge ended before station 2"
+   ]
+  },
+  {
+   "cid": 13,
+   "dir": 1,
+   "iso": 0,
+   "jvp": 4,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 8.00667667388916,
+   "wall_jvp": 10.007992506027222,
+   "notes_jvp": [
+    "ridge ended before station 5"
+   ]
+  },
+  {
+   "cid": 13,
+   "dir": -1,
+   "iso": 0,
+   "jvp": 0,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 4.003546476364136,
+   "wall_jvp": 4.0031726360321045,
+   "notes_jvp": [
+    "edge of the space at station 2",
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 14,
+   "dir": 1,
+   "iso": 1,
+   "jvp": 6,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 12.009213924407959,
+   "wall_jvp": 8.005911111831665,
+   "notes_jvp": []
+  },
+  {
+   "cid": 14,
+   "dir": -1,
+   "iso": 0,
+   "jvp": 1,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 4.003170967102051,
+   "wall_jvp": 10.006754636764526,
+   "notes_jvp": [
+    "edge of the space at station 2"
+   ]
+  },
+  {
+   "cid": 15,
+   "dir": 1,
+   "iso": 0,
+   "jvp": 2,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 4.003621816635132,
+   "wall_jvp": 8.005730152130127,
+   "notes_jvp": [
+    "edge of the space at station 3"
+   ]
+  },
+  {
+   "cid": 15,
+   "dir": -1,
+   "iso": 0,
+   "jvp": 1,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 8.006659507751465,
+   "wall_jvp": 10.007326364517212,
+   "notes_jvp": [
+    "ridge changed identity at station 2 (junction?)"
+   ]
+  },
+  {
+   "cid": 16,
+   "dir": 1,
+   "iso": 0,
+   "jvp": 2,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 8.005912065505981,
+   "wall_jvp": 12.008569478988647,
+   "notes_jvp": [
+    "ridge changed identity at station 3 (junction?)"
+   ]
+  },
+  {
+   "cid": 16,
+   "dir": -1,
+   "iso": 0,
+   "jvp": 1,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 6.005046129226685,
+   "wall_jvp": 6.005048751831055,
+   "notes_jvp": [
+    "edge of the space at station 2"
+   ]
+  },
+  {
+   "cid": 17,
+   "dir": 1,
+   "iso": 0,
+   "jvp": 0,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 8.006845951080322,
+   "wall_jvp": 8.00757884979248,
+   "notes_jvp": [
+    "ridge changed identity at station 1 (junction?)"
+   ]
+  },
+  {
+   "cid": 17,
+   "dir": -1,
+   "iso": 1,
+   "jvp": 1,
+   "cos": null,
+   "rank1": null,
+   "wall_iso": 6.005072832107544,
+   "wall_jvp": 6.00515604019165,
+   "notes_jvp": [
+    "edge of the space at station 2"
+   ]
+  }
+ ]
+}

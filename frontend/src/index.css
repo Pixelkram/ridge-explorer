@@ -2,3 +2,12 @@
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #1a1a2e; color: #e0e0e0; }
 button { cursor: pointer; }
 input, select { font-family: inherit; }
+
+/* Keyboard focus for the probe controls. Inline styles cannot express :focus-visible,
+   and the dark palette leaves the UA's default outline nearly invisible. */
+.rx-focus:focus-visible { outline: 2px solid #4ecca3; outline-offset: 2px; }
+
+/* the probe spinner; still legible with animation off */
+@keyframes rx-spin { to { transform: rotate(360deg); } }
+.rx-spin { animation: rx-spin 1s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .rx-spin { animation: none; } }

@@ -1,3 +1,4 @@
+import time
 import re
 import uuid
 
@@ -7,6 +8,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import FileResponse
 
 from backend.models import (
+    JvpProbeRequest, ProbeStartResponse, ProbeStatusResponse, TokenProbeRequest,
     SurpriseSampleRequest, SurpriseSampleResponse,
     GridStartRequest, GridStartResponse, GridStatusResponse, CellStatus,
     RenderHQRequest, RefineRequest, RefineResponse,
@@ -17,7 +19,7 @@ from backend.models import (
     RidgeGraphRequest, RidgeGraphResponse,
     HikeBranchRequest, HikeStartRequest, HikeStartResponse, HikeStatus,
 )
-from backend.services.gpu_pool import GenerateTask, HQTask, FastScanTask, HikeTask
+from backend.services.gpu_pool import GenerateTask, HQTask, FastScanTask, HikeTask, ProbeTask, TokenProbeTask
 from backend.cache.thumbnail_cache import ThumbnailStore
 from backend.services.ridge_detector import measured_mask
 from backend import config
@@ -2456,3 +2458,81 @@ async def surprise_sample_cells(job_id: str, req: SurpriseSampleRequest, request
         cells=[(cells[i].row, cells[i].col) for i in idxs],
         probabilities={f"{cells[i].row},{cells[i].col}": p for i, p in probs.items()},
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# Exact-JVP probes: grid-free ridge normal at a point, and per-token sensitivity of a prompt.
+# Evidence: search_problem/outputs/h07_chain_SUMMARY.md and h08_vector_uses/RESULTS.md.
+# ---------------------------------------------------------------------------------------------
+def _reading(normal_bary: list, k: int, names: list | None = None) -> str:
+    names = names or (list("ABCD") if k <= 4 else [f"P{i + 1}" for i in range(k)])
+    parts = sorted(zip(names, normal_bary), key=lambda x: -abs(x[1]))
+    return (f"±({parts[0][0]} {'+' if parts[0][1] > 0 else '-'}, {parts[1][0]} {'+' if parts[1][1] > 0 else '-'}): "
+            f"crossing here trades {parts[0][0]} against {parts[1][0]}")
+
+
+@router.post("/{job_id}/jvp-probe", response_model=ProbeStartResponse)
+async def jvp_probe_start(job_id: str, req: JvpProbeRequest, request: Request):
+    """Exact local Jacobian at (alpha, beta[, gamma]) of this job: the whitened ridge normal (seed-invariant),
+    rank-1 share and participation ratio. ~25 s on one GPU; the direction is the output, sigma1 is comparable
+    only within this job."""
+    jobs = request.app.state.jobs
+    master = jobs.get(job_id)
+    if not master or not isinstance(master, dict):
+        return ProbeStartResponse(probe_id="", status="error")
+    prompts = [master["prompt_a"], master["prompt_b"]]
+    weights = [1.0 - req.alpha - req.beta - req.gamma, req.alpha]
+    if master.get("prompt_c"):
+        prompts.append(master["prompt_c"]); weights.append(req.beta)
+    if master.get("prompt_d") and master.get("dimensions", 2) == 3:
+        prompts.append(master["prompt_d"]); weights.append(req.gamma)
+    # alpha + beta > 1 (negative weight on A) is outside the simplex but inside the square the 2-D grid draws;
+    # the mixing is affine there (see gpu_pool._nlerp), so the probe serves those cells too. The h07/h08 evidence
+    # for seed-invariance was gathered on the simplex proper; treat readings there as the same map, less tested.
+    probe_id = f"jvp_{uuid.uuid4().hex[:8]}"
+    jobs[probe_id] = {"type": "jvp_probe", "status": "running", "kind": "jvp", "job_id": job_id, "alpha": req.alpha,
+                      "beta": req.beta, "gamma": req.gamma, "k": len(prompts), "result": None, "error": "", "started_at": time.time()}
+    request.app.state.gpu_pool.submit(ProbeTask(
+        probe_id=probe_id, job_id=job_id, prompts=prompts, weights=weights,
+        seed=req.seed if req.seed is not None else int(master.get("seed", config.DEFAULT_SEED)),
+        height=master.get("height", config.DEFAULT_HEIGHT), width=master.get("width", config.DEFAULT_WIDTH),
+        steps=master.get("steps", config.DEFAULT_NUM_INFERENCE_STEPS),
+        guidance_scale=master.get("guidance_scale", config.DEFAULT_GUIDANCE_SCALE), use_slerp=bool(master.get("use_slerp", False))))
+    return ProbeStartResponse(probe_id=probe_id, status="running")
+
+
+@router.post("/{job_id}/token-probe", response_model=ProbeStartResponse)
+async def token_probe_start(job_id: str, req: TokenProbeRequest, request: Request):
+    """One exact JVP per token of prompt `which` (a-d): which word the generation is load-bearing on.
+    Rankings are seed-invariant and follow the word, not its slot (h08-3, h08-6). ~3 min on one GPU."""
+    jobs = request.app.state.jobs
+    master = jobs.get(job_id)
+    prompt = (master or {}).get(f"prompt_{req.which}") if isinstance(master, dict) else None
+    if not prompt:
+        return ProbeStartResponse(probe_id="", status="error")
+    probe_id = f"tok_{uuid.uuid4().hex[:8]}"
+    jobs[probe_id] = {"type": "token_probe", "status": "running", "kind": "token", "job_id": job_id, "which": req.which,
+                      "prompt": prompt, "result": None, "error": "", "started_at": time.time()}
+    request.app.state.gpu_pool.submit(TokenProbeTask(
+        probe_id=probe_id, job_id=job_id, prompt=prompt,
+        seed=req.seed if req.seed is not None else int(master.get("seed", config.DEFAULT_SEED)),
+        height=master.get("height", config.DEFAULT_HEIGHT), width=master.get("width", config.DEFAULT_WIDTH),
+        steps=master.get("steps", config.DEFAULT_NUM_INFERENCE_STEPS),
+        guidance_scale=master.get("guidance_scale", config.DEFAULT_GUIDANCE_SCALE)))
+    return ProbeStartResponse(probe_id=probe_id, status="running")
+
+
+@router.get("/jvp-probe/{probe_id}", response_model=ProbeStatusResponse)
+@router.get("/token-probe/{probe_id}", response_model=ProbeStatusResponse)
+async def probe_status(probe_id: str, request: Request):
+    entry = request.app.state.jobs.get(probe_id)
+    if not entry or entry.get("type") not in ("jvp_probe", "token_probe"):
+        return ProbeStatusResponse(probe_id=probe_id, status="error", kind="", error="unknown probe")
+    result = entry.get("result")
+    if entry.get("status") == "done" and entry["kind"] == "jvp" and result and "normal_reading" not in result:
+        result = dict(result, alpha=entry.get("alpha"), beta=entry.get("beta"), gamma=entry.get("gamma"),
+                      weights=entry.get("weights"), cid=entry.get("cid"),
+                      normal_reading=_reading(result["normal_bary"], result["k"], entry.get("names")))
+        entry["result"] = result
+    return ProbeStatusResponse(probe_id=probe_id, status=entry.get("status", "running"), kind=entry["kind"],
+                               error=entry.get("error", ""), result=result)

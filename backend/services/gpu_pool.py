@@ -1,3 +1,4 @@
+import time
 """
 Multi-GPU worker pool for FLUX.2 Klein 4B.
 
@@ -113,6 +114,44 @@ class DiscoverTask:
     steps: int
     guidance_scale: float
     epoch: int = 0
+
+
+@dataclass
+class ProbeTask:
+    """Exact-JVP ridge probe at one barycentric point of a job (services/jvp_probe.ridge_normal)."""
+    probe_id: str
+    job_id: str
+    prompts: list            # k prompts, prompts[0] = remainder prompt (prompt_a)
+    weights: list            # k barycentric weights, sum 1
+    seed: int
+    height: int
+    width: int
+    steps: int
+    guidance_scale: float
+    use_slerp: bool = False
+    epoch: int = 0
+
+
+@dataclass
+class TokenProbeTask:
+    """Per-token exact-JVP sensitivity of one prompt (services/jvp_probe.token_sensitivity)."""
+    probe_id: str
+    job_id: str
+    prompt: str
+    seed: int
+    height: int
+    width: int
+    steps: int
+    guidance_scale: float
+    epoch: int = 0
+
+
+@dataclass
+class ProbeResult:
+    probe_id: str
+    kind: str                # "jvp" | "token"
+    result: dict
+    error: str = ""
 
 
 @dataclass
@@ -239,6 +278,8 @@ def worker_main(gpu_id: int, task_queue, result_queue, cancel_epoch=None):
                 _process_discover(gpu_id, device, pipe, dino, dino_transform, task, result_queue, cancel_epoch)
             elif isinstance(task, HQTask):
                 _process_hq(gpu_id, device, pipe, dino, dino_transform, task, result_queue, cancel_epoch)
+            elif isinstance(task, (ProbeTask, TokenProbeTask)):
+                _process_probe(gpu_id, device, pipe, dino, task, result_queue)
         except Exception as exc:
             import traceback
             print(f"[GPU {gpu_id}] task {getattr(task, 'job_id', '?')} failed: "
@@ -606,6 +647,37 @@ def _process_discover(gpu_id, device, pipe, dino, dino_transform, task, result_q
     print(f"[GPU {gpu_id}] discover {task.job_id}: {len(task.points)} points", flush=True)
 
 
+def _process_probe(gpu_id, device, pipe, dino, task, result_queue):
+    """Run a JVP probe on the resident pipe. jvp_probe patches/unpatches the pipe around the call, so the
+    worker's ordinary generation stays bit-identical. Errors are returned as a ProbeResult, not raised, so a
+    failed probe never counts as a job failure."""
+    from . import jvp_probe
+    t0 = time.time()
+    try:
+        if isinstance(task, ProbeTask):
+            with torch.no_grad():
+                encoded = [pipe.encode_prompt(prompt=p, device=device) for p in task.prompts]
+            embs = [e for e, _ in encoded]
+            text_ids = encoded[0][1]
+            res = jvp_probe.ridge_normal(pipe, dino, embs, text_ids, task.weights, seed=task.seed, steps=task.steps,
+                                         guidance=task.guidance_scale, height=task.height, width=task.width,
+                                         use_slerp=task.use_slerp)
+            kind = "jvp"
+        else:
+            res = jvp_probe.token_sensitivity(pipe, dino, task.prompt, seed=task.seed, steps=task.steps,
+                                              guidance=task.guidance_scale, height=task.height, width=task.width)
+            kind = "token"
+        res["gpu_id"] = gpu_id
+        result_queue.put(ProbeResult(probe_id=task.probe_id, kind=kind, result=res))
+        print(f"[GPU {gpu_id}] probe {task.probe_id} ({kind}) done in {time.time() - t0:.1f}s", flush=True)
+    except Exception as exc:
+        import traceback
+        traceback.print_exc()
+        result_queue.put(ProbeResult(probe_id=task.probe_id, kind="jvp" if isinstance(task, ProbeTask) else "token",
+                                     result={}, error=f"{type(exc).__name__}: {exc}"))
+        torch.cuda.empty_cache()
+
+
 def _process_hq(gpu_id, device, pipe, dino, dino_transform, task, result_queue,
                 cancel_epoch=None):
     """Re-render specific cells at high quality (512px, 20 steps)."""
@@ -751,7 +823,7 @@ class GPUPool:
         while not self.result_queue.empty():
             try:
                 r = self.result_queue.get_nowait()
-                if isinstance(r, (CellResult, LatentResult, LatentBatchResult)):
+                if isinstance(r, (CellResult, LatentResult, LatentBatchResult, ProbeResult)):
                     results.append(r)
                 elif isinstance(r, dict) and r.get("type") in ("task_error", "worker_died"):
                     # keep worker-side failures reachable: without this a crashed task

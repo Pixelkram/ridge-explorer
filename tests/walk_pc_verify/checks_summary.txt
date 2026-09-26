@@ -1,0 +1,52 @@
+=== INTEGRITY ===
+C1: crossings 14, units 28 (2x: True), every (cid,dir) once: True; sig flag == (b > bg_p95): True (closest |b - p95| = 0.0170); unit sig/b/origin == crossing: True
+C2: crossings 10, units 20 (2x: True), every (cid,dir) once: True; sig flag == (b > bg_p95): True (closest |b - p95| = 0.0192); unit sig/b/origin == crossing: True
+C3: crossings 12, units 24 (2x: True), every (cid,dir) once: True; sig flag == (b > bg_p95): True (closest |b - p95| = 0.0191); unit sig/b/origin == crossing: True
+plane identical between arms: max |diff| = 0.00e+00; plane x0 vs unit origin: 0.00e+00; t,n orthonormal & sum-zero: max dev 1.67e-14
+station centres/weights in simplex: min coord 1.442e-03, max |sum-1| 2.22e-16; off-plane residual fan 2.38e-15 cont 2.38e-15
+fan: tangential coord == 0.05 j (max dev 1.17e-15), max |transversal| 0.0900, walks > 6 stations: 0
+cont: stations == successful attempts: True; images == sum(offs)+bisections: True; max attempts 11 (limit 28); station after budget: []
+modes ok: True; jvp None: True; cert issues: []; cert threshold per run: {'C1': [0.6162], 'C2': [0.2568], 'C3': [0.3921]}
+duplicate walk ids: []; duplicate station thumbs: {'C1': [], 'C2': [], 'C3': []}; identical station lists: 0
+note kinds: {'continuation|edge of the space': 23, 'continuation|ridge changed identity': 18, 'continuation|ridge ended': 6, 'fan|edge of the space': 31, 'fan|ridge changed identity': 25, 'fan|ridge ended': 17, 'fan|too close to a face': 1}
+walks with >1 note: 12: [('C1', 3, 1, 'fan', ['edge of the space at station 2', 'ridge ended before station 1']), ('C1', 6, 1, 'fan', ['edge of the space at station 5', 'ridge changed identity at station 4 (junction?)']), ('C1', 7, -1, 'fan', ['edge of the space at station 2', 'ridge changed identity at station 1 (junction?)']), ('C1', 8, 1, 'fan', ['edge of the space at station 3', 'ridge ended before station 1']), ('C1', 12, 1, 'fan', ['edge of the space at station 5', 'ridge changed identity at station 2 (junction?)']), ('C1', 13, -1, 'fan', ['edge of the space at station 6', 'ridge changed identity at station 3 (junction?)']), ('C2', 4, -1, 'fan', ['edge of the space at station 4', 'ridge ended before station 3']), ('C2', 6, 1, 'fan', ['edge of the space at station 6', 'ridge changed identity at station 3 (junction?)']), ('C2', 7, -1, 'fan', ['edge of the space at station 5', 'ridge ended before station 4']), ('C3', 2, -1, 'fan', ['edge of the space at station 4', 'ridge changed identity at station 1 (junction?)']), ('C3', 5, 1, 'fan', ['edge of the space at station 3', 'ridge changed identity at station 2 (junction?)']), ('C3', 10, 1, 'fan', ['too close to a face at station 5', 'ridge changed identity at station 3 (junction?)'])]
+
+=== COMPARISON WITH tests/walk_pc_results.json ===
+compared 142 registered numbers/fields; mismatches: 0
+
+=== ADVERSARIAL (primary population unless noted) ===
+consecutive-station distances (primary):
+  fan: segs 127, quantiles(10,25,50,75,90,max) [0.05, 0.0503, 0.0532, 0.0648, 0.0803, 0.144], mean 0.0614; first seg median/mean/max [0.0555, 0.0578, 0.103]; later [0.0528, 0.063, 0.144]; >0.06: 0.31, >0.08: 0.10; |turn| later median/p90/max [23.3, 83.2, 130.2] (>45deg 0.26); first seg angle to t median/p90 [25.0, 33.4]; tortuosity median 1.092; walks with a station behind the origin along t: 0
+  cont: segs 195, quantiles(10,25,50,75,90,max) [0.0258, 0.0465, 0.0504, 0.0534, 0.0576, 0.1063], mean 0.0478; first seg median/mean/max [0.0534, 0.0579, 0.1063]; later [0.0504, 0.0448, 0.0664]; >0.06: 0.05, >0.08: 0.02; |turn| later median/p90/max [14.0, 26.6, 60.3] (>45deg 0.03); first seg angle to t median/p90 [20.6, 48.4]; tortuosity median 1.036; walks with a station behind the origin along t: 0
+alternative metrics (D = cont - fan; differing |D| > 0.01; scipy-default Wilcoxon):
+  [primary]                    A: n=46 fan=0.1559 cont=0.1973 meanD=+0.0413 diff=27 +21/-6 p=0.007968038174457988
+  [primary]               A_cert: n=46 fan=0.1118 cont=0.1500 meanD=+0.0382 diff=30 +22/-8 p=0.01044243284850472
+  [primary]                 disp: n=46 fan=0.1466 cont=0.1938 meanD=+0.0472 diff=29 +24/-5 p=0.0012557224295113344
+  [primary]                  dec: n=46 fan=0.1510 cont=0.1962 meanD=+0.0452 diff=27 +22/-5 p=0.0026149379061465774
+  [primary]               smooth: n=46 fan=0.1500 cont=0.1960 meanD=+0.0459 diff=29 +24/-5 p=0.001866203554241179
+  [primary]               segcap: n=46 fan=0.1380 cont=0.1877 meanD=+0.0497 diff=30 +24/-6 p=0.0007613649301809271
+  [primary]               u_last: n=46 fan=0.1380 cont=0.1646 meanD=+0.0266 diff=30 +23/-7 p=0.005394615060466326
+  [primary]           n_stations: n=46 fan=2.7609 cont=4.2391 meanD=+1.4783 diff=29 +26/-3 p=7.431651506832738e-05
+  [primary] n_certified_stations: n=46 fan=1.9565 cont=3.2174 meanD=+1.2609 diff=27 +21/-6 p=0.0004119152001845844
+  [all]                    A: n=72 fan=0.1313 cont=0.1772 meanD=+0.0459 diff=44 +34/-10 p=0.0005113732353925996
+  [all]               A_cert: n=72 fan=0.0816 cont=0.1238 meanD=+0.0422 diff=42 +32/-10 p=0.0005672203766004877
+  [all]                 disp: n=72 fan=0.1203 cont=0.1739 meanD=+0.0537 diff=47 +39/-8 p=1.3760418350810224e-05
+  [all]                  dec: n=72 fan=0.1232 cont=0.1762 meanD=+0.0530 diff=45 +37/-8 p=2.961008160000288e-05
+  [all]               smooth: n=72 fan=0.1232 cont=0.1760 meanD=+0.0528 diff=47 +39/-8 p=2.6802643420807368e-05
+  [all]               segcap: n=72 fan=0.1132 cont=0.1688 meanD=+0.0556 diff=48 +39/-9 p=1.3845011152257935e-05
+  [all]               u_last: n=72 fan=0.1132 cont=0.1413 meanD=+0.0281 diff=47 +37/-10 p=0.0002923818838812648
+  [all]           n_stations: n=72 fan=2.2639 cont=3.7778 meanD=+1.5139 diff=47 +41/-6 p=7.579077666127179e-07
+  [all] n_certified_stations: n=72 fan=1.4167 cont=2.6667 meanD=+1.2500 diff=39 +32/-7 p=9.763500287447526e-06
+certified rate by station index (primary): fan {1: [0.7, 40], 2: [0.821, 28], 3: [0.714, 21], 4: [0.625, 16], 5: [0.692, 13], 6: [0.556, 9]} | cont {1: [0.705, 44], 2: [0.75, 36], 3: [0.906, 32], 4: [0.759, 29], 5: [0.708, 24], 6: [0.714, 21], 7: [0.75, 8], 8: [1.0, 1]}
+certified rate by arclength bin (primary): fan {'[0.05,0.10)': [0.692, 39], '[0.10,0.15)': [0.815, 27], '[0.15,0.20)': [0.8, 20], '[0.20,0.25)': [0.667, 12], '[0.25,0.30)': [0.643, 14], '[0.30,0.35)': [0.533, 15]} | cont {'[0.00,0.05)': [1.0, 4], '[0.05,0.10)': [0.667, 45], '[0.10,0.15)': [0.85, 40], '[0.15,0.20)': [0.816, 38], '[0.20,0.25)': [0.708, 24], '[0.25,0.30)': [0.704, 27], '[0.30,0.35)': [0.765, 17]}
+cert B - threshold median/mean: fan [0.1532, 0.1392] cont [0.1816, 0.1713]
+fan final-bracket half-width quantiles(25,50,75,90) [0.0132, 0.021, 0.0225, 0.03]; > EPS/2 (0.0235): 0.17 (cert rate 0.7619047619047619) vs <=: 0.698; cont |weights-center| max 0.00e+00 (station = bracket centre, +-0.00625 by construction)
+continuation corrector (primary): evidence-pair separation {1: 144, 2: 40, 3: 9, 4: 2}; cert rate adjacent 0.757 (n=144) vs soft (sep>=2) 0.7647058823529411 (n=51); |lateral offset of chosen flip| quantiles(50,75,90,max) [0.0125, 0.0125, 0.0375, 0.0875]; >=0.05: 0.04 (cert 0.8571428571428571) vs <0.05 cert 0.755; offset/h > 1: 0.06 (cert 0.9090909090909091); lines with >=2 adjacent flips: 154/245
+fan |dv| between consecutive stations quantiles(50,75,90,max) [0.0182, 0.0413, 0.0628, 0.135]; >0.05 (turn>45deg): 0.16 (cert 0.75) vs <=0.05 cert 0.701
+per-run contribution to sum of D (primary): C1: n=18 sumD=+0.833 (44%) meanD=+0.0463 +8/-0 zeros=6; C2: n=14 sumD=-0.016 (-1%) meanD=-0.0011 +5/-5 zeros=0; C3: n=14 sumD=+1.084 (57%) meanD=+0.0774 +8/-1 zeros=5
+  without_C1: n=28 fan=0.1674 cont=0.2056 meanD=+0.0382 diff=19 +13/-6 p=0.09436225831584012 guard_ok=True
+  without_C2: n=32 fan=0.1567 cont=0.2166 meanD=+0.0599 diff=17 +16/-1 p=0.0011546984443107464 guard_ok=True
+  without_C3: n=32 fan=0.1451 cont=0.1707 meanD=+0.0255 diff=18 +13/-5 p=0.1373368801747642 guard_ok=True
+robustness (primary): crossing-level (n=23, dirs averaged) meanD=+0.0413 +13/-4 Wilcoxon p=0.0273; sign test on differing p=0.0059; Wilcoxon pratt p=0.0143; signed-rank permutation (200k) p=0.0070
+A_cert alternative reading (cap on certified sum only), primary: n=46 fan=0.1178 cont=0.1513 meanD=+0.0335 diff=30 +20/-10 p=0.04269676953177257
+differing units by end class: {'cont longer | fan:edge cont:edge': 3, 'cont longer | fan:edge cont:ended': 1, 'cont longer | fan:ended cont:budget': 4, 'cont longer | fan:ended cont:edge': 1, 'cont longer | fan:ended cont:identity': 1, 'cont longer | fan:identity cont:budget': 4, 'cont longer | fan:identity cont:edge': 3, 'cont longer | fan:identity cont:identity': 4, 'fan longer | fan:budget cont:edge': 1, 'fan longer | fan:budget cont:identity': 1, 'fan longer | fan:ended cont:identity': 1, 'fan longer | fan:identity cont:edge': 1, 'fan longer | fan:identity cont:identity': 2}

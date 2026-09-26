@@ -86,6 +86,7 @@ class CascadeRun:
     crossings: list = field(default_factory=list)
     bg_mean: float | None = None
     bg_p95: float | None = None
+    bg_seed_vals: list = field(default_factory=list)   # per background pair: 1-cos per scoring seed j (seed + 997*j)
     patches: list = field(default_factory=list)
     notes: list = field(default_factory=list)
     error: str | None = None
@@ -312,6 +313,14 @@ class Walk:
     direction: int
     n_steps: int
     status: str = "running"
+    use_jvp: bool = False
+    jvp: dict | None = None
+    sig_mode: str = "relative"      # "absolute" (same_ridge) | "relative" (same_ridge_relative); relative won its A/B 24/24
+    mode: str = "continuation"      # "continuation" (predictor-corrector, won tests/walk_pc_results.json) | "fan" (old)
+    images: int = 0                 # images the walk rendered (efficiency = images per captured arclength)
+    plane: dict | None = None       # {x0, t, n}: the walk plane span(t, n) through the origin crossing
+    cert: dict | None = None        # certify_walk: held-out-seed B per station
+    trace: list = field(default_factory=list)   # continuation: one entry per corrector attempt (diagnostics)
     steps: list = field(default_factory=list)
     segs: list = field(default_factory=list)    # transversal probe lines, for the map
     notes: list = field(default_factory=list)
@@ -325,9 +334,111 @@ def same_ridge(ea1, eb1, ea2, eb2):
     return min(straight, flipped) < COS_T
 
 
+def same_ridge_relative(ea0, eb0, ea1, eb1):
+    """Relative side match for the WALK: the new pair straddles the same boundary if each new side is closer to
+    the origin's matching side than to its opposite (or the flipped assignment). Unlike same_ridge it does not
+    require the sides to stay similar images -- content along a front is location-specific (h07b-d), so the
+    absolute test rejected 28/36 first stations (tests/walk_diag_*.json)."""
+    straight = _cosd(ea1, ea0) < _cosd(ea1, eb0) and _cosd(eb1, eb0) < _cosd(eb1, ea0)
+    flipped = _cosd(ea1, eb0) < _cosd(ea1, ea0) and _cosd(eb1, ea0) < _cosd(eb1, eb0)
+    return straight or flipped
+
+
 WALK_STEP = 0.05          # tangent step per click-step
 WALK_PROBE = 0.024        # transversal probe arm (matches the patch cell scale)
 WALK_WIDE = 0.06          # one widened retry before declaring the ridge lost
+
+
+def _jvp_normal(app, run, pool, x0, walk, timeout=240.0):
+    """One exact-JVP probe at x0 through the pool; blocks this worker thread until the collector posts the
+    result into app.state.jobs. Returns the unit sum-zero normal in barycentric coordinates, or None."""
+    from .gpu_pool import ProbeTask
+    import uuid
+    pid = f"jvp_{uuid.uuid4().hex[:8]}"
+    app.state.jobs[pid] = {"type": "jvp_probe", "status": "running", "kind": "jvp", "job_id": run.run_id,
+                           "weights": [float(v) for v in x0], "k": run.k, "names": [f"P{i + 1}" for i in range(run.k)],
+                           "result": None, "error": "", "started_at": time.time()}
+    pool.submit(ProbeTask(probe_id=pid, job_id=run.run_id, prompts=list(run.prompts), weights=[float(v) for v in x0],
+                          seed=run.seed, height=run.height, width=run.width, steps=run.steps,
+                          guidance_scale=run.guidance_scale, use_slerp=False))
+    t0 = time.time()
+    while time.time() - t0 < timeout and walk.status == "running":
+        e = app.state.jobs.get(pid) or {}
+        if e.get("status") == "done" and e.get("result"):
+            r = e["result"]
+            n = np.asarray(r["normal_bary"], dtype=np.float64)
+            n -= n.mean()
+            nn = np.linalg.norm(n)
+            if nn < 1e-9:
+                return None
+            walk.jvp = {"rank1_share": float(r["rank1_share"]), "participation_ratio": float(r["participation_ratio"]),
+                        "wall_s": float(r.get("wall_s", 0.0)), "probe_id": pid}
+            return n / nn
+        if e.get("status") == "error":
+            walk.notes.append(f"JVP probe failed: {e.get('error')}")
+            return None
+        time.sleep(1.0)
+    return None
+
+
+def _clipn(w, k):
+    w = np.clip(w, 0, None)
+    s = w.sum()
+    return w / s if s > 0 else np.full(k, 1.0 / k)
+
+
+def _walk_setup(app, run, pool, walk):
+    """Shared by both walk modes: the origin crossing, the transversal (the bracket chord, or the exact JVP
+    normal), the side-signature test, and the tangent t -- seeded per crossing, so both modes of one
+    (crossing, direction) walk the SAME plane span(t, n). Returns (x0, nrm, t, match), or None after
+    flagging the walk as an error."""
+    origin = None
+    for c in run.crossings:
+        if c.cid == walk.cid and c.mid is not None and c.n is not None:
+            origin = c
+            break
+    if origin is None:
+        walk.status = "error"
+        walk.error = "crossing not found or not yet bisected"
+        return None
+    x0, nrm = origin.mid.copy(), origin.n.copy()
+    sig_a, sig_b = origin.ea, origin.eb
+    if getattr(walk, "sig_mode", "absolute") == "relative":
+        _match = lambda ea, eb: same_ridge_relative(sig_a, sig_b, ea, eb)
+    else:
+        _match = lambda ea, eb: same_ridge(ea, eb, sig_a, sig_b)
+    if getattr(walk, "use_jvp", False):
+        # Replace the bracket chord (an isotropic line that happened to cross) by the exact whitened normal at
+        # the origin: the shortest direction across the front, and the true tangent plane for the stations.
+        # Sign-aligned with the bracket so the a/b side signatures keep their meaning.
+        nj = _jvp_normal(app, run, pool, x0, walk)
+        if nj is not None:
+            walk.jvp["cos_with_bracket"] = float(abs(np.dot(nj, nrm)))
+            nrm = nj if np.dot(nj, nrm) >= 0 else -nj
+            walk.notes.append(f"transversal = JVP normal (|cos| with bracket {walk.jvp['cos_with_bracket']:.2f}, "
+                              f"rank-1 {walk.jvp['rank1_share']:.2f}, PR {walk.jvp['participation_ratio']:.2f})")
+        else:
+            walk.notes.append("JVP normal unavailable; fell back to the bracket chord")
+    k = run.k
+    rng = np.random.default_rng(run.seed + 7919 * walk.cid)
+    for _ in range(4):
+        t = rng.standard_normal(k)
+        t -= t.mean()
+        t -= np.dot(t, nrm) * nrm
+        tn = np.linalg.norm(t)
+        # cid 0 seeds default_rng(run.seed) -- the very stream run_cascade drew chord 0's direction from, so a
+        # crossing on chord 0 got t == n and failed here (the "other" rows of tests/walk_diag_*.json): redraw
+        if tn > 1e-6:
+            break
+    if tn < 1e-9:
+        walk.status = "error"
+        walk.error = (f"no tangent direction (k={k}, tn={tn:.2e}, "
+                      f"|nrm|={float(np.linalg.norm(nrm)):.3f}, "
+                      f"nrm_dim={len(nrm)}, mid_dim={len(x0)})")
+        return None
+    t = walk.direction * t / tn      # at k=3: THE ridge direction (up to sign)
+    walk.plane = {"x0": [float(v) for v in x0], "t": [float(v) for v in t], "n": [float(v) for v in nrm]}
+    return x0, nrm, t, _match
 
 
 def run_walk(app, run, pool, walk):
@@ -341,35 +452,16 @@ def run_walk(app, run, pool, walk):
     signature (same-ridge check); a mismatch means a junction or a neighbouring ridge
     (spacing ~0.2), and the walk truncates there with a note rather than derailing.
     """
-    origin = None
-    for c in run.crossings:
-        if c.cid == walk.cid and c.mid is not None and c.n is not None:
-            origin = c
-            break
-    if origin is None:
-        walk.status = "error"
-        walk.error = "crossing not found or not yet bisected"
+    if getattr(walk, "mode", "fan") == "continuation":
+        return run_walk_continuation(app, run, pool, walk)
+    su = _walk_setup(app, run, pool, walk)
+    if su is None:
         return
-    x0, nrm = origin.mid.copy(), origin.n.copy()
-    sig_a, sig_b = origin.ea, origin.eb
+    x0, nrm, t, _match = su
     k = run.k
-    rng = np.random.default_rng(run.seed + 7919 * walk.cid)
-    t = rng.standard_normal(k)
-    t -= t.mean()
-    t -= np.dot(t, nrm) * nrm
-    tn = np.linalg.norm(t)
-    if tn < 1e-9:
-        walk.status = "error"
-        walk.error = (f"no tangent direction (k={k}, tn={tn:.2e}, "
-                      f"|nrm|={float(np.linalg.norm(nrm)):.3f}, "
-                      f"nrm_dim={len(nrm)}, mid_dim={len(x0)})")
-        return
-    t = walk.direction * t / tn      # at k=3: THE ridge direction (up to sign)
 
     def clipn(w):
-        w = np.clip(w, 0, None)
-        s = w.sum()
-        return w / s if s > 0 else np.full(k, 1.0 / k)
+        return _clipn(w, k)
 
     # round 1: all stations' probe pairs in one batch (arm grows with lookahead)
     stations = []
@@ -401,6 +493,7 @@ def run_walk(app, run, pool, walk):
         ws.append(pa)
         ws.append(pb)
     gp = evaluate(app, run, pool, ws, run.seed, f"walk{walk.wid}fan", ctl=walk)
+    walk.images += len(ws)
     for i, s in enumerate(stations):
         ga, gb = gp[2 * i], gp[2 * i + 1]
         s["ea"] = run.embeddings.get(ga) if ga is not None else None
@@ -408,7 +501,7 @@ def run_walk(app, run, pool, walk):
         s["lo"], s["hi"] = -s["arm"], s["arm"]
         s["ok"] = (s["ea"] is not None and s["eb"] is not None
                    and _cosd(s["ea"], s["eb"]) > COS_T
-                   and same_ridge(s["ea"], s["eb"], sig_a, sig_b))
+                   and _match(s["ea"], s["eb"]))
     # widen retry (one batched round) for stations that failed the graded arm --
     # the V1 setting from the ground-truth sweep: conservative signature, but a second
     # look at 0.12 before giving up
@@ -428,12 +521,13 @@ def run_walk(app, run, pool, walk):
             ws.append(pa)
             ws.append(pb)
         gp = evaluate(app, run, pool, ws, run.seed, f"walk{walk.wid}wide", ctl=walk)
+        walk.images += len(ws)
         for i, s in enumerate(retry):
             ga, gb = gp[2 * i], gp[2 * i + 1]
             ea2 = run.embeddings.get(ga) if ga is not None else None
             eb2 = run.embeddings.get(gb) if gb is not None else None
             if (ea2 is not None and eb2 is not None and _cosd(ea2, eb2) > COS_T
-                    and same_ridge(ea2, eb2, sig_a, sig_b)):
+                    and _match(ea2, eb2)):
                 s["ea"], s["eb"] = ea2, eb2
                 s["lo"], s["hi"] = -s["arm2"], s["arm2"]
                 s["ok"] = True
@@ -456,6 +550,7 @@ def run_walk(app, run, pool, walk):
         ws = [clipn(s["base"] + ((s["lo"] + s["hi"]) / 2) * nrm) for s in good]
         gm = evaluate(app, run, pool, ws, run.seed,
                       f"walk{walk.wid}bis", ctl=walk)
+        walk.images += len(ws)
         for s, g in zip(good, gm):
             e = run.embeddings.get(g) if g is not None else None
             if e is None:
@@ -470,14 +565,186 @@ def run_walk(app, run, pool, walk):
     for s in good:
         off = s.get("gmid_off", (s["lo"] + s["hi"]) / 2)
         pos = clipn(s["base"] + off * nrm)
+        ctr = clipn(s["base"] + ((s["lo"] + s["hi"]) / 2) * nrm)   # best estimate: centre of the final bracket
         walk.steps.append(dict(weights=[float(v) for v in pos],
                                contrast=float(_cosd(s["ea"], s["eb"])
                                               if s["ea"] is not None
                                               and s["eb"] is not None else 0.0),
                                thumb=int(s.get("gmid", -1) if s.get("gmid") is not None
-                                         else -1)))
+                                         else -1),
+                               center=[float(v) for v in ctr]))
     if walk.status == "running":
         walk.status = "complete"
+
+
+# Continuation walk (RESEARCH_ridge_following_k4.md, fix 1). Under the relative rule the fan's remaining losses
+# are drift (12/36) and edge exits (7/36): its straight line leaves a front that bends -- or never ran along the
+# line at all, since t is only perpendicular to the CHORD that found the crossing, not to the front.
+PC_DS = STRIDE            # corrector spacing = the chord probe spacing of record (the detection protocol)
+PC_ARM_FIRST = 0.10       # first corrector half-width: t can miss the front's direction by ~60 deg
+PC_ARM = 0.05             # afterwards the secant predictor errs only at second order
+PC_H_MIN = 0.0125         # below half a stride a secant is mostly localisation noise
+PC_GROW = 1.5             # step growth after a success (Allgower-Georg step control), capped at WALK_STEP
+PC_EDGE = 0.003           # face margin, as in the fan walk
+PC_SEP_MAX = 4            # widest straddle pair on a corrector line: 0.10 (the fan's pairs span 0.09-0.24)
+
+
+def _pc_bracket(offs, em, match):
+    """Locate the front on a corrector line. Any pair (i, j), 1 <= j - i <= PC_SEP_MAX, with 1-cos > COS_T that
+    passes the side-signature test is evidence of it: soft fronts spread their change over several spacings (dev
+    traces: line ends at 1-cos 0.6-0.95 while no adjacent pair cleared 0.35). Each such pair is localised to one
+    spacing by labelling its interior points by the nearer end; the flip nearest the prediction (offset 0) wins,
+    the narrower pair on ties. Returns ((k_lo, k_hi, i, j) or None, straddled)."""
+    best, straddled = None, False
+    n = len(offs)
+    for i in range(n - 1):
+        for j in range(i + 1, min(i + PC_SEP_MAX, n - 1) + 1):
+            ea, eb = em[i], em[j]
+            if ea is None or eb is None or _cosd(ea, eb) <= COS_T:
+                continue
+            straddled = True
+            if not match(ea, eb):
+                continue
+            lo, hi = i, j
+            for m in range(i + 1, j):
+                if em[m] is None:
+                    continue
+                if _cosd(em[m], ea) < _cosd(em[m], eb):
+                    lo = m
+                else:
+                    hi = m
+                    break
+            key = (abs(offs[lo] + offs[hi]), j - i)
+            if best is None or key < best[0]:
+                best = (key, (lo, hi, i, j))
+    return (best[1] if best else None), straddled
+
+
+def run_walk_continuation(app, run, pool, walk):
+    """Predictor-corrector walk (pseudo-arclength continuation) in the plane span(t, n) -- the plane the fan
+    samples, so for one (crossing, direction) both modes trace the same slice of the front.
+
+    Each step predicts along the current tangent (t at first, then the secant through the last two captured
+    points), renders a corrector line perpendicular to it at the chord spacing in ONE GPU round, keeps the
+    straddle nearest the prediction that matches the origin's side signature, and bisects it once (station
+    localised to +-PC_DS/4). A success grows the step x1.5 up to WALK_STEP; a miss halves it and retries from the
+    same point; below PC_H_MIN the walk ends with the fan's failure notes. The budget is the fan's reach,
+    n_steps * WALK_STEP of arclength, so the two modes are compared over the same distance."""
+    su = _walk_setup(app, run, pool, walk)
+    if su is None:
+        return
+    x0, nrm, t, match = su
+    k = run.k
+    E = np.stack([t, nrm], axis=1)                  # orthonormal frame of the walk plane
+    budget = walk.n_steps * WALK_STEP
+    p = np.zeros(2)                                 # in-plane position; the origin crossing
+    tau = np.array([1.0, 0.0])                      # predictor tangent: t until the first secant exists
+    h, arc, attempt = WALK_STEP, 0.0, 0
+    while arc < budget - 1e-9 and walk.status == "running" and attempt < 4 * walk.n_steps + 4:
+        attempt += 1
+        j = len(walk.steps) + 1
+        perp = np.array([-tau[1], tau[0]])          # +90 deg: the +n side at the origin
+        # predictor, shortened to stay inside the simplex
+        here, d = x0 + E @ p, E @ tau
+        room = min(((here[i] - PC_EDGE) / -d[i] for i in range(k) if d[i] < -1e-12), default=np.inf)
+        h_try = min(h, room)
+        if h_try < PC_H_MIN:
+            walk.notes.append(f"edge of the space at station {j}")
+            break
+        q = p + h_try * tau
+        # corrector: chord-spaced points across the predicted point, inside the simplex
+        m = int(round((PC_ARM_FIRST if j == 1 else PC_ARM) / PC_DS))
+        offs = [i * PC_DS for i in range(-m, m + 1) if (x0 + E @ (q + i * PC_DS * perp)).min() >= 0]
+        if len(offs) < 2:
+            walk.notes.append(f"too close to a face at station {j}")
+            break
+        ws = [_clipn(x0 + E @ (q + s * perp), k) for s in offs]
+        walk.segs.append([[float(v) for v in ws[0]], [float(v) for v in ws[-1]]])
+        g = evaluate(app, run, pool, ws, run.seed, f"walk{walk.wid}pc{attempt}", ctl=walk)
+        walk.images += len(ws)
+        if walk.status != "running":
+            break
+        em = [run.embeddings.get(gi) if gi is not None else None for gi in g]
+        br, straddled = _pc_bracket(offs, em, match)
+        adj = [None if em[i] is None or em[i + 1] is None else round(_cosd(em[i], em[i + 1]), 3)
+               for i in range(len(offs) - 1)]
+        ends = _cosd(em[0], em[-1]) if em[0] is not None and em[-1] is not None else None
+        walk.trace.append({"j": j, "h": round(float(h_try), 4), "offs": [round(float(o), 4) for o in offs], "adj": adj,
+                           "ends": None if ends is None else round(ends, 3),
+                           "ends_match": bool(ends is not None and match(em[0], em[-1])),
+                           "chosen": None if br is None else [int(v) for v in br]})
+        if br is None:
+            h = h_try / 2
+            if h < PC_H_MIN:
+                walk.notes.append(f"ridge changed identity at station {j} (junction?)" if straddled
+                                  else f"ridge ended before station {j}")
+                break
+            continue
+        k_lo, k_hi, i_p, j_p = br
+        lo, hi, e_lo, e_hi = offs[k_lo], offs[k_hi], em[k_lo], em[k_hi]
+        contrast = _cosd(em[i_p], em[j_p])            # the pair that evidenced the front
+        mid = (lo + hi) / 2
+        gm = evaluate(app, run, pool, [_clipn(x0 + E @ (q + mid * perp), k)], run.seed,
+                      f"walk{walk.wid}pcb{attempt}", ctl=walk)
+        walk.images += 1
+        e_m = run.embeddings.get(gm[0]) if gm and gm[0] is not None else None
+        if e_m is not None:
+            if _cosd(e_m, e_lo) < _cosd(e_m, e_hi):
+                lo = mid
+            else:
+                hi = mid
+        p_new = q + ((lo + hi) / 2) * perp
+        step = float(np.linalg.norm(p_new - p))
+        tau, p = (p_new - p) / step, p_new           # secant: the next predictor direction
+        arc += step
+        h = min(WALK_STEP, h_try * PC_GROW)
+        pos = _clipn(x0 + E @ p, k)
+        walk.steps.append(dict(weights=[float(v) for v in pos], contrast=float(contrast),
+                               thumb=int(gm[0]) if e_m is not None else -1,
+                               center=[float(v) for v in pos]))
+    if walk.status == "running":
+        walk.status = "complete"
+
+
+CERT_SEEDS = (1, 2, 3)    # held out: seed = run.seed + 997*j -- the scoring seeds minus j = 0, which the walk used
+
+
+def certify_walk(app, run, pool, walk):
+    """Re-measure every captured station with the cascade's own statistic B (coupled-seed mean 1-cos across it at
+    +-EPS/2) on seeds the walk never used, against the run's background at the same seeds. The direction is
+    mode-agnostic -- the in-plane perpendicular of the walk's own polyline (origin -> stations) at each station --
+    so fan and continuation walks are judged the same way. B above the threshold = a certified boundary point."""
+    import types
+    k = run.k
+    pl = walk.plane
+    if not walk.steps or pl is None:
+        walk.cert = {"status": "done", "b": [], "significant": [], "threshold": None, "images": 0}
+        return
+    x0 = np.asarray(pl["x0"], dtype=float)
+    E = np.stack([np.asarray(pl["t"], dtype=float), np.asarray(pl["n"], dtype=float)], axis=1)
+    ctrs = [np.asarray(s.get("center") or s["weights"], dtype=float) for s in walk.steps]
+    uv = [np.zeros(2)] + [E.T @ (c - x0) for c in ctrs]
+    pairs = []
+    for i, c in enumerate(ctrs, start=1):
+        tan = (uv[i + 1] if i + 1 < len(uv) else uv[i]) - uv[i - 1]
+        tn = np.linalg.norm(tan)
+        tan = tan / tn if tn > 1e-12 else np.array([1.0, 0.0])
+        nv = E @ np.array([-tan[1], tan[0]])
+        pairs += [_clipn(c - (EPS / 2) * nv, k), _clipn(c + (EPS / 2) * nv, k)]
+    ctl = types.SimpleNamespace(status="running", notes=walk.notes)
+    seeds = [run.seed + 997 * j for j in CERT_SEEDS]
+    per = [evaluate(app, run, pool, pairs, sd, f"walk{walk.wid}cert{sd}", ctl=ctl) for sd in seeds]
+    b = []
+    for i in range(len(ctrs)):
+        ds = [_cosd(run.embeddings[g[2 * i]], run.embeddings[g[2 * i + 1]]) for g in per
+              if g[2 * i] in run.embeddings and g[2 * i + 1] in run.embeddings]
+        b.append(float(np.mean(ds)) if ds else None)
+    bg = [float(np.mean([r[j] for j in CERT_SEEDS if r[j] is not None])) for r in run.bg_seed_vals
+          if any(r[j] is not None for j in CERT_SEEDS)]
+    thr, kind = (float(np.percentile(bg, 95)), "held-out seeds") if bg else (run.bg_p95, "run p95, all seeds")
+    walk.cert = {"status": "done", "b": b, "threshold": thr, "threshold_kind": kind, "seeds": seeds,
+                 "images": len(pairs) * len(seeds),
+                 "significant": [bool(v is not None and thr is not None and v > thr) for v in b]}
 
 
 def _set_div(run, gi, d):
@@ -696,6 +963,9 @@ def run_cascade(app, run, pool):
                 ds.append(_cosd(run.embeddings[ga], run.embeddings[gb]))
         b_vals.append(float(np.mean(ds)) if ds else None)
     bg_vals = [v for v in b_vals[len(cand):] if v is not None]
+    run.bg_seed_vals = [[_cosd(run.embeddings[gs[2 * ui]], run.embeddings[gs[2 * ui + 1]])
+                         if gs[2 * ui] in run.embeddings and gs[2 * ui + 1] in run.embeddings else None
+                         for gs in per_seed] for ui in range(len(cand), n_units)]
     if bg_vals:
         run.bg_mean = float(np.mean(bg_vals))
         run.bg_p95 = float(np.percentile(bg_vals, 95))

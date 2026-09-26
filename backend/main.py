@@ -1,3 +1,4 @@
+import time
 import asyncio
 import threading
 from contextlib import asynccontextmanager
@@ -8,11 +9,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from backend import config
-from backend.services.gpu_pool import GPUPool, CellResult, LatentResult, LatentBatchResult
+from backend.services.gpu_pool import GPUPool, CellResult, LatentResult, LatentBatchResult, ProbeResult
 from backend.services.ridge_detector import compute_sensitivity, compute_clusters, classify_ridges, measured_mask
 from backend.services.visualization import render_heatmap, assemble_image_grid, render_overlay, render_clusters
 from backend.cache.thumbnail_cache import ThumbnailCache
-from backend.routers import health, grid, discover, cascade
+from backend.routers import health, grid, discover, cascade, probe
 
 import numpy as np
 
@@ -75,6 +76,14 @@ async def result_collector(app: FastAPI):
 
         results = pool.collect_results()
         for r in results:
+            if isinstance(r, ProbeResult):
+                entry = jobs.get(r.probe_id)
+                if entry is not None:
+                    entry["status"] = "error" if r.error else "done"
+                    entry["error"] = r.error
+                    entry["result"] = r.result
+                    entry["finished_at"] = time.time()
+                continue
             job = jobs.get(r.job_id)
             if not job:
                 # Hike tasks are not entries in `jobs`; route them to their inbox rather
@@ -794,3 +803,4 @@ app.include_router(health.router)
 app.include_router(grid.router)
 app.include_router(discover.router)
 app.include_router(cascade.router)
+app.include_router(probe.router)

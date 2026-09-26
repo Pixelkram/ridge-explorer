@@ -21,9 +21,14 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import type { CascadeStatus } from './api/types';
+import { useProbeStore, probeLabel, probeCodim } from './stores/probeStore';
+import type { CascadeProbeMap } from './stores/probeStore';
 
 const ACCENT = '#4ecca3';
 const WARN = '#e94560';
+// dark outline behind probe strokes and their labels, so a measured direction stays
+// readable where it crosses the bright sampling cloud
+const HALO = '#0a0a12';
 
 const REDUCED = typeof window !== 'undefined'
   && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
@@ -112,6 +117,42 @@ function short(p: string, n = 26) {
   return p.length > n ? p.slice(0, n - 1) + '…' : p;
 }
 
+/**
+ * Endpoints of one probed direction, drawn as a sign-free segment through its crossing.
+ *
+ * ε is not a fixed number of barycentric units. The map's scale changes with k, with the
+ * tile size in split view, and -- for k>3 -- with the rotation angle, because a normal
+ * lying near the shadow plane projects long while one near its complement projects short.
+ * So ε is solved for from the drawing rather than guessed: project the ε=1 offset once,
+ * measure how many pixels it covers, then set ε = 0.04·size / thatLength so the FULL
+ * segment (both halves) is ~8% of the map. Everything is recomputed from `project`, which
+ * the caller rebuilds on every render, so the segment follows the rotation instead of
+ * freezing at the angle it was measured at.
+ *
+ * A normal almost perpendicular to the current shadow plane covers nearly no pixels;
+ * scaling it up to 8% anyway would invent a direction the viewer cannot actually see in
+ * this projection, so it is reported as flat and drawn as a bare dot until the plane
+ * rotates far enough to show it.
+ */
+function probeSegment(
+  project: (w: number[]) => readonly [number, number],
+  w: number[], n: number[], size: number,
+): { cx: number; cy: number; ends: readonly [number, number, number, number] | null } | null {
+  const [cx, cy] = project(w);
+  if (!Number.isFinite(cx) || !Number.isFinite(cy)) return null;
+  if (!n || n.length < w.length) return null;
+  const [ux, uy] = project(w.map((wi, i) => wi + n[i]));
+  const unitPx = Math.hypot(ux - cx, uy - cy);
+  // relative cut: an in-plane unit normal covers roughly 0.4·size px, so 1.5% of the
+  // map is a direction within ~2° of perpendicular to the shadow plane
+  if (!Number.isFinite(unitPx) || unitPx < 0.015 * size) return { cx, cy, ends: null };
+  const eps = (0.04 * size) / unitPx;
+  const [x1, y1] = project(w.map((wi, i) => wi + eps * n[i]));
+  const [x2, y2] = project(w.map((wi, i) => wi - eps * n[i]));
+  if (![x1, y1, x2, y2].every(Number.isFinite)) return { cx, cy, ends: null };
+  return { cx, cy, ends: [x1, y1, x2, y2] as const };
+}
+
 const KEYFRAMES = `
   .cs-ping { transform-box: fill-box; transform-origin: center;
              animation: csPing 1.1s ease-out forwards; }
@@ -144,7 +185,7 @@ const KEYFRAMES = `
 /** One rendered shadow of the space; used once in single view, per-anchor in split. */
 function MapSvg({
   status, size, theta, base, sel, onPick, walkPath, walkSegs,
-  caption, showBadge, showBeat, spin, compact,
+  caption, showBadge, showBeat, spin, compact, probes, pendingCid,
 }: {
   status: CascadeStatus;
   size: number;
@@ -159,6 +200,10 @@ function MapSvg({
   showBeat?: boolean;
   spin?: boolean;
   compact?: boolean;
+  /** finished JVP probes of this run, by crossing id */
+  probes?: CascadeProbeMap;
+  /** crossing whose probe is in flight, if any */
+  pendingCid?: number | null;
 }) {
   const prevLen = useRef(0);
   const newFrom = prevLen.current;
@@ -290,6 +335,62 @@ function MapSvg({
           })}
         </g>
       )}
+      {/* Measured crossing directions. Sign-free, so a segment and never an arrow.
+          Re-projected from the stored barycentric normal on EVERY render — caching
+          screen coordinates would leave the lines behind as the shadow plane turns.
+          pointer-events:none keeps the crossing dots underneath clickable. */}
+      {(probes || pendingCid != null) && (
+        <g style={{ pointerEvents: 'none' }}>
+          {probes && status.crossings.map((c) => {
+            const r = probes[c.cid];
+            if (!r) return null;
+            const seg = probeSegment(proj.project, c.weights, r.normal_bary, size);
+            if (!seg) return null;
+            const fs = compact ? 9 : 11;
+            return (
+              <g key={`probe-${c.cid}`}>
+                {seg.ends && (
+                  <>
+                    {/* halo first, then the accent stroke on top of it */}
+                    <line x1={seg.ends[0]} y1={seg.ends[1]}
+                          x2={seg.ends[2]} y2={seg.ends[3]}
+                          stroke={HALO} strokeWidth={4.5} strokeLinecap="round"
+                          opacity={0.85} />
+                    <line x1={seg.ends[0]} y1={seg.ends[1]}
+                          x2={seg.ends[2]} y2={seg.ends[3]}
+                          stroke={ACCENT} strokeWidth={2.5} strokeLinecap="round" />
+                  </>
+                )}
+                <circle cx={seg.cx} cy={seg.cy} r={compact ? 2.6 : 3.5}
+                        fill={ACCENT} stroke={HALO} strokeWidth={1} />
+                <text x={seg.cx + 7} y={seg.cy - 7} fontSize={fs} fill={ACCENT}
+                      stroke={HALO} strokeWidth={3} paintOrder="stroke"
+                      style={{ fontFamily: 'system-ui' }}>
+                  {seg.ends ? probeLabel(r) : `${probeLabel(r)} · edge-on`}
+                </text>
+              </g>
+            );
+          })}
+          {pendingCid != null && (() => {
+            const c = status.crossings.find((x) => x.cid === pendingCid);
+            if (!c) return null;
+            const [x, y] = proj.project(c.weights);
+            if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+            return (
+              <g>
+                <circle className="cs-march" cx={x} cy={y} r={compact ? 7 : 9}
+                        fill="none" stroke={ACCENT} strokeWidth={1.5}
+                        strokeDasharray="3,3" opacity={0.9} />
+                <text x={x + 13} y={y + 4} fontSize={compact ? 9 : 10} fill={ACCENT}
+                      stroke={HALO} strokeWidth={3} paintOrder="stroke"
+                      style={{ fontFamily: 'system-ui' }}>
+                  probing…
+                </text>
+              </g>
+            );
+          })()}
+        </g>
+      )}
       {vs.map(([x, y], i) => {
         const outward = 14;
         const dx = (x - cx) / r, dy = (y - cy) / r;
@@ -317,6 +418,67 @@ function MapSvg({
                 fill={walking ? WARN : ACCENT} />
       )}
     </svg>
+  );
+}
+
+/**
+ * The crossing-direction probe for one selected crossing. The measurement is local and
+ * takes ~25 s, so it is always an explicit click -- never started by selecting a dot.
+ */
+function CascadeProbeBlock({ runId, cid }: { runId: string; cid: number }) {
+  const probes = useProbeStore((s) => s.cascadeProbes[runId]);
+  const pendingCid = useProbeStore((s) => s.cascadePendingCid);
+  const phase = useProbeStore((s) => s.cascadeStatus);
+  const error = useProbeStore((s) => s.cascadeError);
+  const start = useProbeStore((s) => s.startCascadeJvp);
+
+  const here = probes?.[cid];
+  const busy = phase === 'running';
+  const runningHere = busy && pendingCid === cid;
+
+  return (
+    <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid #23234d' }}>
+      <button className="rx-focus"
+              disabled={busy}
+              onClick={() => start(runId, cid)}
+              title="measure the direction across prompt space along which the image changes fastest here"
+              style={{ padding: '3px 10px', borderRadius: 3, fontSize: 11,
+                       background: busy ? '#333' : '#0f3460',
+                       color: busy ? '#777' : '#cfd',
+                       border: `1px solid ${busy ? '#333' : ACCENT}`,
+                       cursor: busy ? 'not-allowed' : 'pointer' }}>
+        {runningHere ? 'probing…'
+          : here ? 'Probe again (~25 s)' : 'Probe crossing direction (~25 s)'}
+      </button>
+      {busy && !runningHere && (
+        <div style={{ fontSize: 10, color: '#888', marginTop: 4 }}>
+          another probe is running…
+        </div>
+      )}
+      {phase === 'error' && error && !busy && (
+        <div style={{ fontSize: 10, color: '#ff8a9c', marginTop: 4 }}>{error}</div>
+      )}
+      {here && (
+        <div style={{ marginTop: 6, fontSize: 11, lineHeight: 1.5 }}>
+          <div style={{ color: ACCENT }}>{here.normal_reading}</div>
+          <div style={{ color: '#9ab', marginTop: 3 }}>
+            rank-1 share {here.rank1_share.toFixed(2)} · participation ratio{' '}
+            {here.participation_ratio.toFixed(2)}
+          </div>
+          <div style={{ color: '#9ab' }}>
+            {probeCodim(here)}
+            <span style={{ color: '#667' }}>
+              {probeCodim(here) === 'corner'
+                ? ' — two fronts meet here, so one direction is a poor summary'
+                : ' — a single front'}
+            </span>
+          </div>
+          <div style={{ fontSize: 10, color: '#777', marginTop: 4 }}>
+            Direction is seed-invariant; magnitude comparable only within this run.
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -364,6 +526,15 @@ export default function CascadeMap({
       () => setTheta((t) => (t + 0.012) % (Math.PI * 2)), 80);
     return () => window.clearInterval(iv);
   }, [rotating]);
+
+  // Probes are filed per run: a crossing id belongs to the survey that issued it, so a
+  // new run drops the map rather than drawing last run's directions on this one's dots.
+  const syncCascadeRun = useProbeStore((s) => s.syncCascadeRun);
+  useEffect(() => { syncCascadeRun(runId); }, [runId, syncCascadeRun]);
+  const probes = useProbeStore((s) => s.cascadeProbes[runId]);
+  const probePending = useProbeStore(
+    (s) => (s.cascadeStatus === 'running' ? s.cascadePendingCid : null));
+
   if (k < 3) return null;
 
   const pick = (cid: number | null) => {
@@ -388,13 +559,15 @@ export default function CascadeMap({
             <MapSvg key={b} status={status} size={tile} theta={theta} base={b}
                     sel={sel} onPick={pick} walkPath={walkPath} walkSegs={walkSegs}
                     caption={`view ${b + 1}·${(b % nViews) + 2 > nViews ? 1 : b + 2}`}
-                    showBeat={b === 0} compact />
+                    showBeat={b === 0} compact
+                    probes={probes} pendingCid={probePending} />
           ))}
         </div>
       ) : (
         <MapSvg status={status} size={mapSize} theta={theta} base={basePair}
                 sel={sel} onPick={pick} walkPath={walkPath} walkSegs={walkSegs}
-                showBadge showBeat spin={spin} />
+                showBadge showBeat spin={spin}
+                probes={probes} pendingCid={probePending} />
       )}
       <div style={{ fontSize: 11, color: '#889', maxWidth: 190 }}>
         <div style={{ marginBottom: 6 }}>
@@ -410,6 +583,13 @@ export default function CascadeMap({
           {' '}<span style={{ color: '#8a93b8' }}>(dashed = exploration slot)</span>
           <br /><span style={{ color: WARN }}>◦</span> same ridge as selection ·{' '}
           <span style={{ color: WARN }}>‖</span> walk probe rungs
+          {probes && Object.keys(probes).length > 0 && (
+            <>
+              <br /><span style={{ color: ACCENT }}>╱</span> probed crossing direction —
+              sign-free, so a line and not an arrow; it turns with the shadow plane and
+              shortens when it points out of it
+            </>
+          )}
           {k > 3 && (
             <>
               <br /><span style={{ color: '#667' }}>
@@ -444,6 +624,7 @@ export default function CascadeMap({
             </div>
           </div>
         )}
+        {selected && <CascadeProbeBlock runId={runId} cid={selected.cid} />}
         {!selected && status.crossings.length > 0 && (
           <div style={{ color: '#667' }}>tap a dot to see its image</div>
         )}

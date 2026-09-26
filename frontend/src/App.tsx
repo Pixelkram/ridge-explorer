@@ -1,5 +1,6 @@
 import { useMemo, useRef, useState, useCallback, useEffect, lazy, Suspense } from 'react';
 import { useRidgeStore } from './stores/ridgeStore';
+import { useProbeStore, probeAt, probeLabel } from './stores/probeStore';
 import { startSeedProbe, getSeedProbeStatus } from './api/client';
 import * as api from './api/client';
 import { loadResume, saveResume, onResumeVisible } from './resume';
@@ -12,6 +13,14 @@ const Plot = lazy(() => import('react-plotly.js'));
 
 const RESOLUTION_OPTIONS = [128, 256, 384, 512];
 const STEPS_OPTIONS = [2, 4, 8, 12, 20, 50];
+
+// The app's accent. Probes reuse it so a measured direction reads as part of the
+// tool's own instrumentation rather than as another data layer.
+const ACCENT = '#4ecca3';
+// Everything a probe draws sits on the heatmap, which runs black → red → yellow, so
+// no single colour is legible everywhere; a halo in the viewport's own background
+// colour goes down first.
+const HALO = '#0a0a12';
 
 function PromptInput() {
   const { promptA, promptB, promptC, promptD, dimensions, gridSize, seed, steps, resolution, seedCount, phase,
@@ -122,6 +131,135 @@ function PromptInput() {
                          cursor: busy ? 'not-allowed' : 'pointer', fontSize: 12 }}>
           {busy ? '...' : 'MF Scan'}
         </button>
+      )}
+    </div>
+  );
+}
+
+// ------------------------------------------------------------- Token probe
+// Which words of a prompt the generation is actually leaning on. One probe is ~3 min
+// of GPU, so this sits collapsed next to the prompts and is never started implicitly.
+function TokenPanel() {
+  const { jobId, promptA, promptB, promptC, promptD, dimensions, seed } = useRidgeStore();
+  const { token, startToken, clearToken } = useProbeStore();
+  const [open, setOpen] = useState(false);
+  const [showTemplate, setShowTemplate] = useState(false);
+
+  // Nothing to probe before a job exists: the backend needs the job's prompts.
+  if (!jobId) return null;
+
+  const which: { key: 'a' | 'b' | 'c' | 'd'; label: string; prompt: string }[] = [
+    { key: 'a', label: 'A', prompt: promptA },
+    { key: 'b', label: 'B', prompt: promptB },
+    { key: 'c', label: 'C', prompt: promptC },
+    ...(dimensions === 3 ? [{ key: 'd' as const, label: 'D', prompt: promptD }] : []),
+  ];
+
+  const running = token.status === 'running';
+  const result = token.status === 'done' ? token.result : null;
+  const content = result ? result.rows.filter(r => r.cls === 'content') : [];
+  const other = result ? result.rows.filter(r => r.cls !== 'content') : [];
+  const ranked = [...content].sort((a, b) => b.sigma - a.sigma);
+  const maxSigma = ranked.length ? Math.max(...ranked.map(r => r.sigma)) : 0;
+
+  const bar = (r: { text: string; sigma: number; cls: string }, key: string, muted: boolean) => (
+    <div key={key} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 2 }}>
+      <span style={{ width: 130, flexShrink: 0, fontSize: 11, textAlign: 'right',
+                     color: muted ? '#555' : '#ddd', overflow: 'hidden',
+                     textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+            title={`${r.text} (${r.cls})`}>
+        {r.text}
+      </span>
+      <div style={{ flex: 1, minWidth: 60, height: 10, background: '#12121f', borderRadius: 2 }}>
+        {/* clamped: the scale is set by the top CONTENT token, and a template or pad
+            token occasionally beats it — which must not run the bar off its track */}
+        <div style={{ width: maxSigma > 0
+                        ? `${Math.min(100, Math.max(1, (r.sigma / maxSigma) * 100))}%` : '0%',
+                      height: '100%', borderRadius: 2,
+                      background: muted ? '#3a3a4e' : ACCENT }} />
+      </div>
+      <span style={{ width: 54, flexShrink: 0, fontSize: 10,
+                     color: muted ? '#555' : '#8ab' }}>
+        {r.sigma.toPrecision(3)}
+      </span>
+    </div>
+  );
+
+  return (
+    <div style={{ background: '#151528', borderTop: '1px solid #222' }}>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '4px 12px',
+                    flexWrap: 'wrap' }}>
+        <button className="rx-focus" onClick={() => setOpen(o => !o)}
+                aria-expanded={open}
+                style={{ padding: '2px 10px', background: '#0f3460', color: '#aaa',
+                         border: '1px solid #333', borderRadius: 3, fontSize: 11 }}>
+          {open ? '▾' : '▸'} Which words matter?
+        </button>
+        {open && which.map(w => (
+          <button key={w.key} className="rx-focus"
+                  disabled={running}
+                  onClick={() => startToken(jobId, w.key, seed)}
+                  title={w.prompt}
+                  style={{ padding: '2px 10px', borderRadius: 3, fontSize: 11,
+                           background: running ? '#333'
+                             : token.which === w.key ? ACCENT : '#0f3460',
+                           color: running ? '#777' : token.which === w.key ? '#000' : '#cfd',
+                           border: `1px solid ${running ? '#333' : ACCENT}`,
+                           cursor: running ? 'not-allowed' : 'pointer' }}>
+            Which words matter? ({w.label})
+          </button>
+        ))}
+        {open && running && (
+          <span style={{ fontSize: 11, color: ACCENT }}>
+            probing prompt {token.which?.toUpperCase()}… (~3 min)
+          </span>
+        )}
+        {open && result && (
+          <button className="rx-focus" onClick={clearToken}
+                  style={{ padding: '2px 8px', background: '#222', color: '#888',
+                           border: '1px solid #333', borderRadius: 3, fontSize: 10 }}>
+            clear
+          </button>
+        )}
+      </div>
+
+      {open && token.status === 'error' && (
+        <div style={{ padding: '0 12px 6px 12px', fontSize: 11, color: '#ff8a9c' }}>
+          token probe failed: {token.error}
+        </div>
+      )}
+
+      {open && result && (
+        <div style={{ padding: '2px 12px 8px 12px', maxWidth: 620 }}>
+          <div style={{ fontSize: 10, color: '#666', marginBottom: 4 }}>
+            prompt {token.which?.toUpperCase()}: “{result.prompt}” · {result.n_jvp} JVPs ·{' '}
+            {result.steps} steps · seed {result.seed} · {result.wall_s.toFixed(1)} s
+          </div>
+          {ranked.length === 0 && (
+            <div style={{ fontSize: 11, color: '#888' }}>no content tokens in this prompt.</div>
+          )}
+          {ranked.map(r => bar(r, `c${r.pos}`, false))}
+
+          {other.length > 0 && (
+            <button className="rx-focus" onClick={() => setShowTemplate(s => !s)}
+                    aria-expanded={showTemplate}
+                    style={{ marginTop: 4, padding: '1px 8px', background: 'transparent',
+                             color: '#666', border: '1px solid #2a2a3a', borderRadius: 3,
+                             fontSize: 10 }}>
+              {showTemplate ? 'hide' : 'show'} template/pad ({other.length})
+            </button>
+          )}
+          {showTemplate && (
+            <div style={{ marginTop: 4 }}>
+              {other.map(r => bar(r, `o${r.pos}`, true))}
+            </div>
+          )}
+
+          <div style={{ fontSize: 10, color: '#777', marginTop: 6, lineHeight: 1.4 }}>
+            Rankings are seed-invariant and follow the word, not its position. They say
+            which word the generation depends on here — not how the image would change.
+          </div>
+        </div>
       )}
     </div>
   );
@@ -583,6 +721,87 @@ function ExportButton({ jobId, layer }: { jobId: string; layer: string }) {
   );
 }
 
+// ------------------------------------------------- Crossing direction (JVP probe)
+// Shown inside the per-cell detail overlay. The measurement is local and takes ~25 s,
+// so it is always an explicit click — never started by opening a cell.
+function CrossingProbeBlock({ alpha, beta }: { alpha: number; beta: number }) {
+  const jobId = useRidgeStore(s => s.jobId);
+  const seed = useRidgeStore(s => s.seed);
+  const probes = useProbeStore(s => s.probes);
+  const pendingAt = useProbeStore(s => s.pendingAt);
+  const jvpStatus = useProbeStore(s => s.jvpStatus);
+  const jvpError = useProbeStore(s => s.jvpError);
+  const startJvp = useProbeStore(s => s.startJvp);
+
+  const here = probeAt(probes, alpha, beta);
+  const runningHere = jvpStatus === 'running' && !!pendingAt
+    && Math.abs(pendingAt.alpha - alpha) < 1e-6 && Math.abs(pendingAt.beta - beta) < 1e-6;
+  const busy = jvpStatus === 'running';
+  // The grid extends the simplex affinely — cells with alpha+beta > 1 carry a NEGATIVE
+  // weight on prompt A. The probe serves them (the mixing is affine there, see
+  // gpu_pool._nlerp), but the seed-invariance evidence was gathered on the simplex
+  // proper, so say that the reading is less tested rather than hide the button.
+  const outside = alpha + beta > 1 + 1e-6;
+
+  return (
+    <div style={{ marginTop: 12, padding: 12, background: '#1a1a2e', borderRadius: 8,
+                  textAlign: 'left', maxWidth: 560, marginLeft: 'auto', marginRight: 'auto' }}>
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+        <button className="rx-focus"
+                disabled={busy || !jobId}
+                title={outside ? 'outside the prompt simplex (prompt A carries a negative weight): '
+                               + 'the map is affine here, but the direction is less tested' : undefined}
+                onClick={() => { if (jobId) startJvp(jobId, alpha, beta, seed); }}
+                style={{ padding: '4px 14px', borderRadius: 4, fontSize: 11,
+                         background: busy ? '#333' : '#0f3460',
+                         color: busy ? '#777' : '#cfd',
+                         border: `1px solid ${busy ? '#333' : ACCENT}`,
+                         cursor: busy || !jobId ? 'not-allowed' : 'pointer' }}>
+          {runningHere ? 'probing…' : here ? 'Probe again (~25 s)' : 'Probe crossing direction (~25 s)'}
+        </button>
+        {outside && (
+          <span style={{ fontSize: 11, color: '#888' }}>
+            outside the prompt simplex (α+β &gt; 1): affine extension of the map, less tested
+          </span>
+        )}
+        {runningHere && (
+          <span style={{ fontSize: 11, color: ACCENT }}>
+            <span className="rx-spin" style={{ display: 'inline-block', marginRight: 6 }}>◐</span>
+            measuring the direction the image changes fastest…
+          </span>
+        )}
+        {busy && !runningHere && (
+          <span style={{ fontSize: 11, color: '#888' }}>another probe is running…</span>
+        )}
+        {jvpStatus === 'error' && jvpError && !busy && (
+          <span style={{ fontSize: 11, color: '#ff8a9c' }}>{jvpError}</span>
+        )}
+      </div>
+
+      {here && (
+        <div style={{ marginTop: 8, fontSize: 12, color: '#ddd', lineHeight: 1.5 }}>
+          <div style={{ color: ACCENT }}>{here.result.normal_reading}</div>
+          <div style={{ fontSize: 11, color: '#9ab', marginTop: 4 }}>
+            rank-1 share {here.result.rank1_share.toFixed(2)} ·{' '}
+            participation ratio {here.result.participation_ratio.toFixed(2)}{' '}
+            <span style={{ color: '#667' }}>
+              ({here.result.participation_ratio >= 1.5
+                ? 'a corner — two fronts meet here, so one direction is a poor summary'
+                : 'a single front'})
+            </span>
+          </div>
+          <div style={{ fontSize: 10, color: '#777', marginTop: 4 }}>
+            Direction is seed-invariant; magnitude comparable only within this job.
+          </div>
+          <div style={{ fontSize: 10, color: '#555', marginTop: 2 }}>
+            drawn on the map as a line through this cell (no arrow: the direction has no sign)
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function UnifiedViewport() {
   const { phase, cells, currentGridSize, tau, seeds, seedCells, activeSeedIdx, setActiveSeedIdx,
           manualSelection, toggleManualCell, clearManualSelection, jobId } = useRidgeStore();
@@ -622,6 +841,35 @@ function UnifiedViewport() {
   const isPanning = useRef(false);
   const lastMouse = useRef({ x: 0, y: 0 });
   const containerRef = useRef<HTMLDivElement>(null);
+
+  // --- JVP probes: measured crossing directions drawn over the grid ----------
+  const probes = useProbeStore(s => s.probes);
+  const pendingAt = useProbeStore(s => s.pendingAt);
+  const jvpStatus = useProbeStore(s => s.jvpStatus);
+  const clearProbes = useProbeStore(s => s.clearProbes);
+  const syncProbeJob = useProbeStore(s => s.syncJob);
+  // A probe is measured at (alpha, beta) of ONE prompt simplex. Carrying the list
+  // across a new job would draw segments at coordinates that now mean something else,
+  // so the probe store follows this store's job id (including to null on cancel).
+  useEffect(() => { syncProbeJob(jobId); }, [jobId, syncProbeJob]);
+  // Probe segments are sized as a fraction of the VIEWPORT, not of the grid, so they
+  // stay readable at every zoom — which needs the container's pixel size. Keyed on
+  // `phase` because the container does not exist while the app is idle, so a mount-only
+  // effect would attach the observer to nothing.
+  const [viewSize, setViewSize] = useState({ w: 0, h: 0 });
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const update = () => {
+      const r = el.getBoundingClientRect();
+      setViewSize(s => (Math.abs(s.w - r.width) < 0.5 && Math.abs(s.h - r.height) < 0.5)
+        ? s : { w: r.width, h: r.height });
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [phase]);
 
   // For multi-seed: show active seed's thumbnails but use averaged sensitivity
   const isMultiSeed = seeds.length > 1 && seedCells;
@@ -785,6 +1033,18 @@ function UnifiedViewport() {
   const ts = baseTileSize;
   const gridPx = gs * ts;
 
+  // (alpha, beta) in [0,1]² -> screen px, using the same projection the cells use:
+  // alpha indexes columns left→right, beta indexes rows but is drawn flipped
+  // (displayRow = gs-1-betaIdx), so beta grows UPWARD on screen.
+  const toScreen = (alpha: number, beta: number) => {
+    const worldX = (alpha * (gs - 1) + 0.5) * ts;
+    const worldY = ((gs - 1) * (1 - beta) + 0.5) * ts;
+    return { x: pan.x + worldX * zoom, y: pan.y + worldY * zoom };
+  };
+  // ~10% of the viewport's short side, with a floor so a probe is still visible in a
+  // small pane.
+  const segLen = Math.max(28, 0.10 * Math.min(viewSize.w, viewSize.h));
+
   // Sensitivity to color
   const sensToColor = (s: number): string => {
     const t = (s - sensMin) / (sensMax - sensMin + 1e-10);
@@ -830,6 +1090,15 @@ function UnifiedViewport() {
                   style={{ padding: '2px 8px', border: 'none', borderRadius: 3, fontSize: 10,
                            background: '#e94560', color: '#fff', cursor: 'pointer', marginLeft: 4 }}>
             clear {manualSelection.size} selected
+          </button>
+        )}
+        {probes.length > 0 && (
+          <button className="rx-focus" onClick={clearProbes}
+                  title="remove the measured crossing directions from the map"
+                  style={{ padding: '2px 8px', borderRadius: 3, fontSize: 10,
+                           background: '#0f3460', color: ACCENT,
+                           border: `1px solid ${ACCENT}`, cursor: 'pointer', marginLeft: 4 }}>
+            clear {probes.length} probe{probes.length > 1 ? 's' : ''}
           </button>
         )}
         {jobId && (
@@ -1035,6 +1304,60 @@ function UnifiedViewport() {
             );
           })}
         </div>
+
+        {/* Probe overlay: one sign-free segment per measured crossing direction.
+            It is a child of the pan/zoom CONTAINER, not of the transformed grid div,
+            and projects its own coordinates: inside the transform, stroke width,
+            label size and segment length would all scale with zoom, so a 2.5px line
+            would either vanish or swallow the grid. pointer-events: none keeps
+            drag/zoom/double-click behaviour on the grid underneath unchanged. */}
+        {(probes.length > 0 || (pendingAt && jvpStatus === 'running')) && viewSize.w > 0 && (
+          <svg width={viewSize.w} height={viewSize.h}
+               style={{ position: 'absolute', left: 0, top: 0, pointerEvents: 'none' }}>
+            {probes.map((p) => {
+              const th = p.result.normal_theta;
+              if (!th || th.length < 2) return null;
+              // screen: +alpha is right, +beta is UP (the grid draws beta flipped)
+              let dx = th[0], dy = -th[1];
+              const n = Math.hypot(dx, dy);
+              if (!(n > 1e-9)) return null;
+              dx /= n; dy /= n;
+              const { x, y } = toScreen(p.alpha, p.beta);
+              if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+              const hx = (dx * segLen) / 2, hy = (dy * segLen) / 2;
+              return (
+                <g key={`probe-${p.alpha.toFixed(6)}-${p.beta.toFixed(6)}`}>
+                  {/* halo first, then the accent stroke on top of it */}
+                  <line x1={x - hx} y1={y - hy} x2={x + hx} y2={y + hy}
+                        stroke={HALO} strokeWidth={4.5} strokeLinecap="round" opacity={0.85} />
+                  <line x1={x - hx} y1={y - hy} x2={x + hx} y2={y + hy}
+                        stroke={ACCENT} strokeWidth={2.5} strokeLinecap="round" />
+                  <circle cx={x} cy={y} r={3.5} fill={ACCENT} stroke={HALO} strokeWidth={1} />
+                  <text x={x + 7} y={y - 7} fontSize={11} fill={ACCENT}
+                        stroke={HALO} strokeWidth={3} paintOrder="stroke"
+                        style={{ fontFamily: 'system-ui' }}>
+                    {probeLabel(p.result)}
+                  </text>
+                </g>
+              );
+            })}
+            {pendingAt && jvpStatus === 'running' && (() => {
+              const { x, y } = toScreen(pendingAt.alpha, pendingAt.beta);
+              if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+              return (
+                <g>
+                  <circle cx={x} cy={y} r={9} fill="none" stroke={ACCENT} strokeWidth={1.5}
+                          strokeDasharray="3 3" opacity={0.9} />
+                  <text x={x + 13} y={y + 4} fontSize={10} fill={ACCENT}
+                        stroke={HALO} strokeWidth={3} paintOrder="stroke"
+                        style={{ fontFamily: 'system-ui' }}>
+                    probing…
+                  </text>
+                </g>
+              );
+            })()}
+          </svg>
+        )}
       </div>
 
       {/* Full-res image overlay with seed probe */}
@@ -1053,6 +1376,9 @@ function UnifiedViewport() {
             <div style={{ marginTop: 8, fontSize: 12, color: '#aaa' }}>
               α={overlayImg.alpha.toFixed(3)} β={overlayImg.beta.toFixed(3)}
             </div>
+
+            {/* Which way does the image change here? (~25 s JVP probe) */}
+            <CrossingProbeBlock alpha={overlayImg.alpha} beta={overlayImg.beta} />
 
             {/* Seed probe controls */}
             <div style={{ marginTop: 16, padding: 12, background: '#1a1a2e', borderRadius: 8,
@@ -2182,6 +2508,7 @@ export default function App() {
         </h1>
       </div>
       <PromptInput />
+      <TokenPanel />
       <ProgressBar />
       <ScanCompletePanel />
       {feature('refine') && <RefinePanel />}

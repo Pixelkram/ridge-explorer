@@ -1,0 +1,589 @@
+{
+ "runs": {
+  "C1": {
+   "run_id": "d0dc601d",
+   "set": "k4_T0",
+   "seed": 7,
+   "units": 28,
+   "crossings": 14,
+   "significant": 9,
+   "bg_p95": 0.6614036749244672
+  },
+  "C2": {
+   "run_id": "b443d5ba",
+   "set": "k4_T2",
+   "seed": 42,
+   "units": 20,
+   "crossings": 10,
+   "significant": 7,
+   "bg_p95": 0.2898096357806957
+  },
+  "C3": {
+   "run_id": "71163d7e",
+   "set": "k4_T3",
+   "seed": 42,
+   "units": 24,
+   "crossings": 12,
+   "significant": 7,
+   "bg_p95": 0.3486406825334114
+  }
+ },
+ "excluded_units": {
+  "C1": 0,
+  "C2": 0,
+  "C3": 0
+ },
+ "verdict": "SUPPORTED",
+ "checks": {
+  "i_frac>=0.65": true,
+  "ii_p<0.05": true,
+  "iii_meanD>0": true,
+  "iv_runs": "2/3 eligible runs favour continuation",
+  "iv_majority": true,
+  "v_guard": true
+ },
+ "primary": {
+  "A": {
+   "n": 46,
+   "n_differing": 27,
+   "cont_longer": 21,
+   "fan_longer": 6,
+   "frac_cont_wins": 0.7777777777777778,
+   "wilcoxon_p": 0.007968038174457988,
+   "mean_D": 0.04133488085158747,
+   "mean_fan": 0.15593537118156786,
+   "mean_cont": 0.19727025203315537
+  },
+  "A_cert": {
+   "n": 46,
+   "n_differing": 30,
+   "cont_longer": 22,
+   "fan_longer": 8,
+   "frac_cont_wins": 0.7333333333333333,
+   "wilcoxon_p": 0.01044243284850472,
+   "mean_D": 0.038151589419962606,
+   "mean_fan": 0.11182317694646056,
+   "mean_cont": 0.14997476636642312
+  },
+  "fan": {
+   "stations": 127,
+   "certified": 90,
+   "certified_rate": 0.7086614173228346,
+   "certified_rate_by_station": {
+    "1": [
+     0.7,
+     40
+    ],
+    "2": [
+     0.821,
+     28
+    ],
+    "3": [
+     0.714,
+     21
+    ],
+    "4": [
+     0.625,
+     16
+    ],
+    "5": [
+     0.692,
+     13
+    ],
+    "6": [
+     0.556,
+     9
+    ]
+   },
+   "images_per_walk": 18.26086956521739,
+   "images_per_unit_A": 117.10537145517048,
+   "images_per_unit_A_cert": 163.30129463197466,
+   "median_wall_s": 14.00818920135498,
+   "end_classes": {
+    "edge": 12,
+    "ended": 10,
+    "budget": 9,
+    "identity": 15
+   },
+   "cert_missing": 0
+  },
+  "continuation": {
+   "stations": 195,
+   "certified": 148,
+   "certified_rate": 0.7589743589743589,
+   "certified_rate_by_station": {
+    "1": [
+     0.705,
+     44
+    ],
+    "2": [
+     0.75,
+     36
+    ],
+    "3": [
+     0.906,
+     32
+    ],
+    "4": [
+     0.759,
+     29
+    ],
+    "5": [
+     0.708,
+     24
+    ],
+    "6": [
+     0.714,
+     21
+    ],
+    "7": [
+     0.75,
+     8
+    ],
+    "8": [
+     1.0,
+     1
+    ]
+   },
+   "images_per_walk": 33.5,
+   "images_per_unit_A": 169.81779895718708,
+   "images_per_unit_A_cert": 223.37090973125257,
+   "median_wall_s": 31.028310298919678,
+   "end_classes": {
+    "edge": 17,
+    "budget": 17,
+    "identity": 11,
+    "ended": 1
+   },
+   "cert_missing": 0
+  }
+ },
+ "all_units": {
+  "A": {
+   "n": 72,
+   "n_differing": 44,
+   "cont_longer": 34,
+   "fan_longer": 10,
+   "frac_cont_wins": 0.7727272727272727,
+   "wilcoxon_p": 0.0005113732353925996,
+   "mean_D": 0.045871970845856896,
+   "mean_fan": 0.1313029272894016,
+   "mean_cont": 0.17717489813525847
+  },
+  "A_cert": {
+   "n": 72,
+   "n_differing": 42,
+   "cont_longer": 32,
+   "fan_longer": 10,
+   "frac_cont_wins": 0.7619047619047619,
+   "wilcoxon_p": 0.0005672203766004877,
+   "mean_D": 0.042197413560569344,
+   "mean_fan": 0.08163478515870642,
+   "mean_cont": 0.12383219871927577
+  },
+  "fan": {
+   "stations": 163,
+   "certified": 102,
+   "certified_rate": 0.6257668711656442,
+   "certified_rate_by_station": {
+    "1": [
+     0.604,
+     53
+    ],
+    "2": [
+     0.718,
+     39
+    ],
+    "3": [
+     0.63,
+     27
+    ],
+    "4": [
+     0.579,
+     19
+    ],
+    "5": [
+     0.6,
+     15
+    ],
+    "6": [
+     0.5,
+     10
+    ]
+   },
+   "images_per_walk": 16.86111111111111,
+   "images_per_unit_A": 128.41382487953177,
+   "images_per_unit_A_cert": 206.54321657527947,
+   "median_wall_s": 12.0102219581604,
+   "end_classes": {
+    "edge": 20,
+    "ended": 17,
+    "identity": 25,
+    "budget": 10
+   },
+   "cert_missing": 0
+  },
+  "continuation": {
+   "stations": 272,
+   "certified": 192,
+   "certified_rate": 0.7058823529411765,
+   "certified_rate_by_station": {
+    "1": [
+     0.609,
+     64
+    ],
+    "2": [
+     0.7,
+     50
+    ],
+    "3": [
+     0.8,
+     45
+    ],
+    "4": [
+     0.744,
+     39
+    ],
+    "5": [
+     0.697,
+     33
+    ],
+    "6": [
+     0.69,
+     29
+    ],
+    "7": [
+     0.818,
+     11
+    ],
+    "8": [
+     1.0,
+     1
+    ]
+   },
+   "images_per_walk": 32.18055555555556,
+   "images_per_unit_A": 181.6315736272547,
+   "images_per_unit_A_cert": 259.87227787586977,
+   "median_wall_s": 28.019480228424072,
+   "end_classes": {
+    "edge": 23,
+    "budget": 25,
+    "identity": 18,
+    "ended": 6
+   },
+   "cert_missing": 0
+  }
+ },
+ "per_run_primary": {
+  "C1": {
+   "n": 18,
+   "n_differing": 8,
+   "cont_longer": 8,
+   "fan_longer": 0,
+   "frac_cont_wins": 1.0,
+   "wilcoxon_p": 0.018602929901135743,
+   "mean_D": 0.04628767433582694,
+   "mean_fan": 0.1380765594642824,
+   "mean_cont": 0.1843642338001093
+  },
+  "C2": {
+   "n": 14,
+   "n_differing": 10,
+   "cont_longer": 5,
+   "fan_longer": 5,
+   "frac_cont_wins": 0.5,
+   "wilcoxon_p": 0.855224609375,
+   "mean_D": -0.0011225904266491155,
+   "mean_fan": 0.1541919165600423,
+   "mean_cont": 0.15306932613339322
+  },
+  "C3": {
+   "n": 14,
+   "n_differing": 9,
+   "cont_longer": 8,
+   "fan_longer": 1,
+   "frac_cont_wins": 0.8888888888888888,
+   "wilcoxon_p": 0.028401837044201694,
+   "mean_D": 0.07742447479294476,
+   "mean_fan": 0.18064015515388906,
+   "mean_cont": 0.25806462994683377
+  }
+ },
+ "per_run_all": {
+  "C1": {
+   "n": 28,
+   "n_differing": 15,
+   "cont_longer": 13,
+   "fan_longer": 2,
+   "frac_cont_wins": 0.8666666666666667,
+   "wilcoxon_p": 0.011129014082381268,
+   "mean_D": 0.05066159771458873,
+   "mean_fan": 0.11426479908292904,
+   "mean_cont": 0.16492639679751778
+  },
+  "C2": {
+   "n": 20,
+   "n_differing": 13,
+   "cont_longer": 7,
+   "fan_longer": 6,
+   "frac_cont_wins": 0.5384615384615384,
+   "wilcoxon_p": 0.7583123742610346,
+   "mean_D": 0.015784735813106278,
+   "mean_fan": 0.14693084833625317,
+   "mean_cont": 0.16271558414935944
+  },
+  "C3": {
+   "n": 24,
+   "n_differing": 16,
+   "cont_longer": 14,
+   "fan_longer": 2,
+   "frac_cont_wins": 0.875,
+   "wilcoxon_p": 0.011285575373529618,
+   "mean_D": 0.06535676869296193,
+   "mean_fan": 0.13815747599124326,
+   "mean_cont": 0.20351424468420523
+  }
+ },
+ "D1": {
+  "run_id": "7f79fc8d",
+  "excluded": 0,
+  "all_units": {
+   "A": {
+    "n": 36,
+    "n_differing": 28,
+    "cont_longer": 21,
+    "fan_longer": 7,
+    "frac_cont_wins": 0.75,
+    "wilcoxon_p": 0.0056487426824679875,
+    "mean_D": 0.06884332422795648,
+    "mean_fan": 0.11003380166488554,
+    "mean_cont": 0.17887712589284202
+   },
+   "A_cert": {
+    "n": 36,
+    "n_differing": 25,
+    "cont_longer": 16,
+    "fan_longer": 9,
+    "frac_cont_wins": 0.64,
+    "wilcoxon_p": 0.06510374304560712,
+    "mean_D": 0.040745937137149184,
+    "mean_fan": 0.07777487482434307,
+    "mean_cont": 0.11852081196149222
+   },
+   "fan": {
+    "stations": 72,
+    "certified": 51,
+    "certified_rate": 0.7083333333333334,
+    "certified_rate_by_station": {
+     "1": [
+      0.643,
+      28
+     ],
+     "2": [
+      0.765,
+      17
+     ],
+     "3": [
+      0.833,
+      12
+     ],
+     "4": [
+      0.5,
+      6
+     ],
+     "5": [
+      0.8,
+      5
+     ],
+     "6": [
+      0.75,
+      4
+     ]
+    },
+    "images_per_walk": 17.944444444444443,
+    "images_per_unit_A": 163.08120025785635,
+    "images_per_unit_A_cert": 230.72289714348653,
+    "median_wall_s": 14.00964617729187,
+    "end_classes": {
+     "budget": 4,
+     "edge": 8,
+     "identity": 12,
+     "ended": 12
+    },
+    "cert_missing": 0
+   },
+   "continuation": {
+    "stations": 142,
+    "certified": 95,
+    "certified_rate": 0.6690140845070423,
+    "certified_rate_by_station": {
+     "1": [
+      0.647,
+      34
+     ],
+     "2": [
+      0.679,
+      28
+     ],
+     "3": [
+      0.583,
+      24
+     ],
+     "4": [
+      0.667,
+      21
+     ],
+     "5": [
+      0.765,
+      17
+     ],
+     "6": [
+      0.643,
+      14
+     ],
+     "7": [
+      1.0,
+      4
+     ]
+    },
+    "images_per_walk": 34.97222222222222,
+    "images_per_unit_A": 195.50975032533032,
+    "images_per_unit_A_cert": 295.0724150757995,
+    "median_wall_s": 32.02375602722168,
+    "end_classes": {
+     "budget": 14,
+     "edge": 3,
+     "identity": 13,
+     "ended": 6
+    },
+    "cert_missing": 0
+   }
+  },
+  "primary": {
+   "A": {
+    "n": 24,
+    "n_differing": 17,
+    "cont_longer": 12,
+    "fan_longer": 5,
+    "frac_cont_wins": 0.7058823529411765,
+    "wilcoxon_p": 0.04004379807224231,
+    "mean_D": 0.06505402462620861,
+    "mean_fan": 0.11547411995493707,
+    "mean_cont": 0.18052814458114572
+   },
+   "A_cert": {
+    "n": 24,
+    "n_differing": 18,
+    "cont_longer": 13,
+    "fan_longer": 5,
+    "frac_cont_wins": 0.7222222222222222,
+    "wilcoxon_p": 0.02981667619948975,
+    "mean_D": 0.0636237537455459,
+    "mean_fan": 0.08690528307058677,
+    "mean_cont": 0.15052903681613264
+   },
+   "fan": {
+    "stations": 50,
+    "certified": 38,
+    "certified_rate": 0.76,
+    "certified_rate_by_station": {
+     "1": [
+      0.737,
+      19
+     ],
+     "2": [
+      0.75,
+      12
+     ],
+     "3": [
+      0.875,
+      8
+     ],
+     "4": [
+      0.5,
+      4
+     ],
+     "5": [
+      1.0,
+      4
+     ],
+     "6": [
+      0.667,
+      3
+     ]
+    },
+    "images_per_walk": 17.583333333333332,
+    "images_per_unit_A": 152.2707714957698,
+    "images_per_unit_A_cert": 202.32755376967916,
+    "median_wall_s": 14.009216070175171,
+    "end_classes": {
+     "budget": 3,
+     "edge": 6,
+     "identity": 6,
+     "ended": 9
+    },
+    "cert_missing": 0
+   },
+   "continuation": {
+    "stations": 95,
+    "certified": 81,
+    "certified_rate": 0.8526315789473684,
+    "certified_rate_by_station": {
+     "1": [
+      0.818,
+      22
+     ],
+     "2": [
+      0.833,
+      18
+     ],
+     "3": [
+      0.75,
+      16
+     ],
+     "4": [
+      0.857,
+      14
+     ],
+     "5": [
+      1.0,
+      12
+     ],
+     "6": [
+      0.889,
+      9
+     ],
+     "7": [
+      1.0,
+      4
+     ]
+    },
+    "images_per_walk": 33.791666666666664,
+    "images_per_unit_A": 187.18226315940242,
+    "images_per_unit_A_cert": 224.48603526203595,
+    "median_wall_s": 32.02852523326874,
+    "end_classes": {
+     "budget": 9,
+     "edge": 2,
+     "identity": 8,
+     "ended": 5
+    },
+    "cert_missing": 0
+   }
+  },
+  "lattice": {
+   "fan": {
+    "n": 72,
+    "mean_S_percentile": 0.8011502692119432,
+    "certified": 0.8186058564394924,
+    "uncertified": 0.7587581288021817
+   },
+   "continuation": {
+    "n": 142,
+    "mean_S_percentile": 0.8664453682447105,
+    "certified": 0.8782517968931138,
+    "uncertified": 0.8425813103383636
+   }
+  }
+ }
+}

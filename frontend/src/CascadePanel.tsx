@@ -298,10 +298,13 @@ export default function CascadePanel() {
     setWalk(null);
   };
 
+  const [useJvp, setUseJvp] = useState(false);
+  const [sigMode, setSigMode] = useState<'relative' | 'absolute'>('relative');
+  const [walkMode, setWalkMode] = useState<'fan' | 'continuation'>('continuation');
   const startWalk = async (direction: number) => {
     if (!runId || selCid === null) return;
     try {
-      const w = await cascadeWalkStart(runId, { cid: selCid, direction, n_steps: 5 });
+      const w = await cascadeWalkStart(runId, { cid: selCid, direction, n_steps: 5, use_jvp: useJvp, sig_mode: sigMode, mode: walkMode });
       if (w.error) { setErr(w.error); return; }
       setWalk(w);
     } catch (e: any) { setErr(String(e.message || e)); }
@@ -464,9 +467,22 @@ export default function CascadePanel() {
                               border: '1px solid #333', borderRadius: 4 }}>
                   <span style={{ color: '#aaa', marginRight: 10 }}>
                     walk the boundary from crossing {selCid}
-                    <span title="Each step is a certified boundary point near the tangent direction (~6-9 images/step, median localisation under half a cell). Honest caveat from ground-truth evaluation: ridge IDENTITY is soft at this fidelity -- the walk may slide onto an adjacent boundary; it truncates with a note when it detects that."
+                    <span title="Continuation (default): each station is re-found across the line through the last two, so the walk bends with the ridge; stations appear as they are found (~6 images each). Pre-registered test: ~26% further along boundaries than the straight fan (2 of 3 prompt sets; the third was a tie), at ~1.8x the images. Honest caveat: ridge IDENTITY is soft at this fidelity -- near junctions the walk may slide onto an adjacent boundary; it stops with a note when it notices."
                           style={{ color: '#667', cursor: 'help' }}> ⓘ</span>
                   </span>
+                  <label className="rx-focus" title="continuation = step along the secant of the last two captured points and re-find the ridge across it, one step at a time (follows curving ridges; stations appear as they are found); fan = all stations on one straight line, rendered at once (old)" style={{ fontSize: 11, display: "inline-flex", alignItems: "center", gap: 4, marginRight: 8 }}>
+                    walk <select value={walkMode} onChange={(e) => setWalkMode(e.target.value as "fan" | "continuation")} style={{ fontSize: 11 }}><option value="continuation">continuation (new)</option><option value="fan">straight fan (old)</option></select>
+                  </label>
+                  <label className="rx-focus" title="how a station is accepted as the same ridge: relative = each new side closer to its matching origin side than to the opposite one (won its A/B 24/24); absolute = both sides within cosine distance 0.35 of the origin sides (the old rule)" style={{ fontSize: 11, display: "inline-flex", alignItems: "center", gap: 4, marginRight: 8 }}>
+
+                    ridge test <select value={sigMode} onChange={(e) => setSigMode(e.target.value as "relative" | "absolute")} style={{ fontSize: 11 }}><option value="relative">relative (new)</option><option value="absolute">absolute (old)</option></select>
+
+                  </label>
+                  <label className="rx-focus" title="one exact JVP at the origin (~30 s) gives the true normal and tangent plane instead of the bracket chord" style={{ fontSize: 11, display: "inline-flex", alignItems: "center", gap: 4, marginRight: 8 }}>
+
+                    <input type="checkbox" checked={useJvp} onChange={(e) => setUseJvp(e.target.checked)} /> JVP normal
+
+                  </label>
                   <button onClick={() => startWalk(-1)}
                           disabled={walk?.status === 'running'}
                           style={{ background: '#0f3460', color: '#fff',
@@ -487,6 +503,7 @@ export default function CascadePanel() {
                       {walk.status === 'running'
                         ? `walking… ${walk.steps.length} steps`
                         : `${walk.status} · ${walk.steps.length} steps`}
+                      {(walk.images ?? 0) > 0 && ` · ${walk.images} images`}
                       {walk.notes.length > 0 && ` · ${walk.notes[walk.notes.length - 1]}`}
                     </span>
                   )}
