@@ -76,6 +76,15 @@ class CascadeRun:
     # recall, 94% certified recall vs full steps, 1 spurious; bracket endpoints
     # are re-rendered at full fidelity before bisection). None = full steps.
     probe_steps: int | None = 4
+    # survey randomness (chords, background pairs, patches) apart from the image seed; None = seed. Lets several
+    # surveys of ONE image field be compared against a single dense ground truth.
+    chord_seed: int | None = None
+    # trace phase: walk every significant crossing both ways and link the crossings the walks reach
+    trace: bool = False
+    trace_steps: int = 8
+    trace_certify: bool = True
+    traces: list = field(default_factory=list)        # [{cid, direction, points, cert}]
+    trace_links: list = field(default_factory=list)   # [(cid, cid)] crossings joined by a walk
     status: str = "running"
     phase: str = "chords"
     chords_geo: list = field(default_factory=list)   # [(a_weights, b_weights)] for the map
@@ -261,7 +270,7 @@ def evaluate(app, run, pool, weights, seed, label, ctl=None, on_arrival=None, st
     return [gi if gi in got_idx else None for gi in idxs]
 
 
-def coverage_stats(crossings):
+def coverage_stats(crossings, links=None, use_signature=True):
     """Group crossings into distinct ridges and estimate unexplored boundary share.
 
     Two crossings portray the same ridge if their side-embedding pairs match
@@ -285,6 +294,8 @@ def coverage_stats(crossings):
 
     for i in range(n):
         for j in range(i + 1, n):
+            if not use_signature:
+                break
             a1, b1 = xs[i].ea, xs[i].eb
             a2, b2 = xs[j].ea, xs[j].eb
             straight = max(_cosd(a1, a2), _cosd(b1, b2))
@@ -293,6 +304,14 @@ def coverage_stats(crossings):
                 ri, rj = find(i), find(j)
                 if ri != rj:
                     parent[ri] = rj
+    # trace links: a walk from one crossing reached the other -- same ridge by construction, even where the
+    # side images have drifted too far apart for the signature test
+    pos = {x.cid: i for i, x in enumerate(xs)}
+    for ca, cb in links or ():
+        if ca in pos and cb in pos:
+            ri, rj = find(pos[ca]), find(pos[cb])
+            if ri != rj:
+                parent[ri] = rj
     from collections import Counter
     roots = [find(i) for i in range(n)]
     sizes = Counter(roots)
@@ -321,6 +340,8 @@ class Walk:
     plane: dict | None = None       # {x0, t, n}: the walk plane span(t, n) through the origin crossing
     cert: dict | None = None        # certify_walk: held-out-seed B per station
     trace: list = field(default_factory=list)   # continuation: one entry per corrector attempt (diagnostics)
+    side_embs: list = field(default_factory=list, repr=False)   # continuation: (a, b) side embeddings per station
+    cont_gamma: float | None = None   # research override of PC_CONT_GAMMA
     steps: list = field(default_factory=list)
     segs: list = field(default_factory=list)    # transversal probe lines, for the map
     notes: list = field(default_factory=list)
@@ -403,7 +424,7 @@ def _walk_setup(app, run, pool, walk):
         return None
     x0, nrm = origin.mid.copy(), origin.n.copy()
     sig_a, sig_b = origin.ea, origin.eb
-    if getattr(walk, "sig_mode", "absolute") == "relative":
+    if getattr(walk, "sig_mode", "absolute") in ("relative", "continuity"):
         _match = lambda ea, eb: same_ridge_relative(sig_a, sig_b, ea, eb)
     else:
         _match = lambda ea, eb: same_ridge(ea, eb, sig_a, sig_b)
@@ -438,7 +459,7 @@ def _walk_setup(app, run, pool, walk):
         return None
     t = walk.direction * t / tn      # at k=3: THE ridge direction (up to sign)
     walk.plane = {"x0": [float(v) for v in x0], "t": [float(v) for v in t], "n": [float(v) for v in nrm]}
-    return x0, nrm, t, _match
+    return x0, nrm, t, _match, sig_a, sig_b
 
 
 def run_walk(app, run, pool, walk):
@@ -457,7 +478,7 @@ def run_walk(app, run, pool, walk):
     su = _walk_setup(app, run, pool, walk)
     if su is None:
         return
-    x0, nrm, t, _match = su
+    x0, nrm, t, _match, _, _ = su
     k = run.k
 
     def clipn(w):
@@ -587,6 +608,46 @@ PC_H_MIN = 0.0125         # below half a stride a secant is mostly localisation 
 PC_GROW = 1.5             # step growth after a success (Allgower-Georg step control), capped at WALK_STEP
 PC_EDGE = 0.003           # face margin, as in the fan walk
 PC_SEP_MAX = 4            # widest straddle pair on a corrector line: 0.10 (the fan's pairs span 0.09-0.24)
+PC_CONT_GAMMA = 0.5       # sig_mode "continuity": a new station's largest side move, as a share of the previous station's
+                          # contrast, must stay below this. Dev (k3_T0 + dense ground truth, tests/walk_gt_dev/): the
+                          # ratio separates ridge switches from continuing steps with AUC 0.87; at 0.5 it rejected
+                          # 16/16 switches and 27 % of continuing steps on the first try (they retry at a shorter step)
+
+
+def _pc_candidates(offs, em, match):
+    """Every localised crossing on a corrector line (see _pc_bracket), as (key, k_lo, k_hi, i, j), one per
+    localised bracket (the narrowest evidence pair wins it), plus whether anything straddled at all."""
+    best, straddled = {}, False
+    n = len(offs)
+    for i in range(n - 1):
+        for j in range(i + 1, min(i + PC_SEP_MAX, n - 1) + 1):
+            ea, eb = em[i], em[j]
+            if ea is None or eb is None or _cosd(ea, eb) <= COS_T:
+                continue
+            straddled = True
+            if not match(ea, eb):
+                continue
+            lo, hi = i, j
+            for m in range(i + 1, j):
+                if em[m] is None:
+                    continue
+                if _cosd(em[m], ea) < _cosd(em[m], eb):
+                    lo = m
+                else:
+                    hi = m
+                    break
+            key = (abs(offs[lo] + offs[hi]), j - i)
+            if (lo, hi) not in best or key < best[(lo, hi)][0]:
+                best[(lo, hi)] = (key, lo, hi, i, j)
+    return sorted(best.values()), straddled
+
+
+def _orient(prev_a, prev_b, s1, s2):
+    """Assign a new side pair to the previous station's sides (the assignment that moves them least).
+    Returns (s_a, s_b, d_a, d_b) with d_* = 1-cos to the matching previous side."""
+    st = (_cosd(s1, prev_a), _cosd(s2, prev_b))
+    fl = (_cosd(s2, prev_a), _cosd(s1, prev_b))
+    return (s1, s2, *st) if max(st) <= max(fl) else (s2, s1, *fl)
 
 
 def _pc_bracket(offs, em, match):
@@ -633,7 +694,7 @@ def run_walk_continuation(app, run, pool, walk):
     su = _walk_setup(app, run, pool, walk)
     if su is None:
         return
-    x0, nrm, t, match = su
+    x0, nrm, t, match, prev_a, prev_b = su          # prev_*: the sides the next station must continue
     k = run.k
     E = np.stack([t, nrm], axis=1)                  # orthonormal frame of the walk plane
     budget = walk.n_steps * WALK_STEP
@@ -665,14 +726,26 @@ def run_walk_continuation(app, run, pool, walk):
         if walk.status != "running":
             break
         em = [run.embeddings.get(gi) if gi is not None else None for gi in g]
-        br, straddled = _pc_bracket(offs, em, match)
+        cands, straddled = _pc_candidates(offs, em, match)
+        # continuity: how far each side moved since the previous station (the origin for station 1), relative to
+        # that station's own contrast -- a third basin appearing at a junction moves one side by about a full contrast
+        c_prev = max(_cosd(prev_a, prev_b), 1e-6)
+        scored = []
+        for key, k_lo, k_hi, i_p, j_p in cands:
+            s_a, s_b, d_a, d_b = _orient(prev_a, prev_b, em[i_p], em[j_p])
+            scored.append((key, k_lo, k_hi, i_p, j_p, max(d_a, d_b) / c_prev, s_a, s_b))
+        gamma = PC_CONT_GAMMA if walk.cont_gamma is None else walk.cont_gamma
+        ok = [c for c in scored if walk.sig_mode != "continuity" or c[5] < gamma]
+        br = min(ok, key=lambda c: c[0]) if ok else None
         adj = [None if em[i] is None or em[i + 1] is None else round(_cosd(em[i], em[i + 1]), 3)
                for i in range(len(offs) - 1)]
         ends = _cosd(em[0], em[-1]) if em[0] is not None and em[-1] is not None else None
         walk.trace.append({"j": j, "h": round(float(h_try), 4), "offs": [round(float(o), 4) for o in offs], "adj": adj,
                            "ends": None if ends is None else round(ends, 3),
                            "ends_match": bool(ends is not None and match(em[0], em[-1])),
-                           "chosen": None if br is None else [int(v) for v in br]})
+                           "cands": [[int(c[1]), int(c[2]), int(c[3]), int(c[4]), round(float(c[0][0]), 4),
+                                      round(float(c[5]), 3)] for c in scored],
+                           "chosen": None if br is None else [int(br[1]), int(br[2]), int(br[3]), int(br[4])]})
         if br is None:
             h = h_try / 2
             if h < PC_H_MIN:
@@ -680,7 +753,8 @@ def run_walk_continuation(app, run, pool, walk):
                                   else f"ridge ended before station {j}")
                 break
             continue
-        k_lo, k_hi, i_p, j_p = br
+        _, k_lo, k_hi, i_p, j_p, r_cont, prev_a, prev_b = br   # the accepted sides become the next reference
+        walk.side_embs.append((prev_a, prev_b))
         lo, hi, e_lo, e_hi = offs[k_lo], offs[k_hi], em[k_lo], em[k_hi]
         contrast = _cosd(em[i_p], em[j_p])            # the pair that evidenced the front
         mid = (lo + hi) / 2
@@ -701,9 +775,32 @@ def run_walk_continuation(app, run, pool, walk):
         pos = _clipn(x0 + E @ p, k)
         walk.steps.append(dict(weights=[float(v) for v in pos], contrast=float(contrast),
                                thumb=int(gm[0]) if e_m is not None else -1,
-                               center=[float(v) for v in pos]))
+                               center=[float(v) for v in pos], cont=round(float(r_cont), 4)))
     if walk.status == "running":
         walk.status = "complete"
+
+
+def render_points(app, run, pool, weights, seed, job):
+    """Research tool: render arbitrary weight vectors through the cascade's own path (evaluate: same pipeline,
+    mixing, steps and size as every walk and chord of this run) and save the DINOv2 embeddings to job["path"]
+    (npz: weights, emb, idx). Used to build dense ground-truth lattices (tests/walk_gt_*)."""
+    import types
+    ctl = types.SimpleNamespace(status="running", notes=job.setdefault("notes", []))
+    job["total"], job["done"] = len(weights), 0
+    out = []
+    for off in range(0, len(weights), 280):
+        chunk = [np.asarray(w, dtype=float) for w in weights[off:off + 280]]
+        out += evaluate(app, run, pool, chunk, seed, f"render{job['id']}o{off}", ctl=ctl)
+        job["done"] = off + len(chunk)
+        if ctl.status != "running":
+            raise RuntimeError("render cancelled")
+    dim = next(len(run.embeddings[gi]) for gi in out if gi is not None and gi in run.embeddings)
+    emb = np.stack([run.embeddings[gi] if gi is not None and gi in run.embeddings else np.full(dim, np.nan)
+                    for gi in out]).astype(np.float32)
+    np.savez(job["path"], weights=np.asarray(weights, dtype=np.float64), emb=emb,
+             idx=np.array([-1 if gi is None else gi for gi in out]), seed=seed, prompts=np.array(run.prompts),
+             steps=run.steps, height=run.height, width=run.width, guidance=run.guidance_scale)
+    job["status"] = "done"
 
 
 CERT_SEEDS = (1, 2, 3)    # held out: seed = run.seed + 997*j -- the scoring seeds minus j = 0, which the walk used
@@ -747,6 +844,77 @@ def certify_walk(app, run, pool, walk):
                  "significant": [bool(v is not None and thr is not None and v > thr) for v in b]}
 
 
+# Trace phase (RESEARCH_ridge_following_k4.md §7). After the survey, walk every significant crossing both ways with
+# the continuation walk, certify the stations, and link crossings a walk reaches: two crossings on one ridge are
+# often too far apart for their side images to match (content changes along a ridge, h07), which splits one ridge
+# into several "singletons" and inflates the Good-Turing unexplored share.
+TRACE_LINK = 0.02         # a crossing this close to another crossing's walk polyline is on that walk's ridge
+TRACE_SIG_MODE = "continuity"   # traces must not change ridge -- a switch would link two different ridges
+TRACE_WORKERS = 4
+
+
+def _seg_dist(p, a, b):
+    ab = b - a
+    t = float(np.clip(np.dot(p - a, ab) / max(float(np.dot(ab, ab)), 1e-18), 0.0, 1.0))
+    return float(np.linalg.norm(p - (a + t * ab)))
+
+
+def trace_links(run, walks):
+    """Crossing pairs joined by a walk: crossing Y lies within TRACE_LINK of the polyline of a walk from X, and Y's
+    sides pass the relative side test against the station ending that segment (so a walk that merely passes a
+    different ridge's crossing does not claim it)."""
+    by_cid = {x.cid: x for x in run.crossings}
+    links = set()
+    for w in walks:
+        if not w.steps or len(w.side_embs) != len(w.steps):
+            continue
+        pts = [np.asarray(by_cid[w.cid].mid, dtype=float)] + [np.asarray(st["center"], dtype=float) for st in w.steps]
+        for y in run.crossings:
+            if y.cid == w.cid or y.mid is None or y.ea is None or y.eb is None:
+                continue
+            d = [_seg_dist(np.asarray(y.mid, dtype=float), pts[i], pts[i + 1]) for i in range(len(pts) - 1)]
+            i = int(np.argmin(d))
+            if d[i] < TRACE_LINK and same_ridge_relative(*w.side_embs[i], y.ea, y.eb):
+                links.add(tuple(sorted((w.cid, y.cid))))
+    return sorted(links)
+
+
+def run_trace(app, run, pool):
+    """Walk both ways from every significant crossing (TRACE_WORKERS at a time), certify, and link."""
+    from concurrent.futures import ThreadPoolExecutor
+    jobs = [(x, d) for x in run.crossings if x.significant and x.mid is not None and x.n is not None
+            for d in (1, -1)]
+    if not jobs:
+        run.notes.append("trace: no significant crossing to walk from")
+        return
+    run.phase, run.phase_total, run.phase_done = "trace", len(jobs) * 40, 0
+
+    def go(xd):
+        x, d = xd
+        if run.status != "running":
+            return None
+        w = Walk(wid=f"t{x.cid}{'p' if d > 0 else 'm'}", cid=x.cid, direction=d, n_steps=run.trace_steps,
+                 mode="continuation", sig_mode=TRACE_SIG_MODE)
+        run_walk_continuation(app, run, pool, w)
+        if run.trace_certify and w.steps and run.status == "running":
+            certify_walk(app, run, pool, w)
+        return w
+
+    with ThreadPoolExecutor(TRACE_WORKERS) as ex:
+        walks = [w for w in ex.map(go, jobs) if w is not None]
+    run.walks = getattr(run, "walks", {})
+    for w in walks:
+        run.walks[w.wid] = w
+    run.traces = [{"cid": w.cid, "direction": w.direction, "walk_id": w.wid,
+                   "points": [[float(v) for v in next(x.mid for x in run.crossings if x.cid == w.cid)]]
+                             + [st["center"] for st in w.steps],
+                   "cert": (w.cert or {}).get("significant"), "end": (w.notes or ["budget reached"])[-1]}
+                  for w in walks]
+    run.trace_links = trace_links(run, walks)
+    run.notes.append(f"trace: {len(walks)} walks, {sum(len(w.steps) for w in walks)} stations, "
+                     f"{len(run.trace_links)} crossing links")
+
+
 def _set_div(run, gi, d):
     """Record a point's local divergence for the live map colouring (max over
     the measurements that touched it)."""
@@ -758,7 +926,7 @@ def _set_div(run, gi, d):
 
 def run_cascade(app, run, pool):
     """The full cascade. Called from the router's guarded thread body."""
-    rng = np.random.default_rng(run.seed)
+    rng = np.random.default_rng(run.seed if run.chord_seed is None else run.chord_seed)
     k = run.k
 
     # ---------------- phase 1: chords (m=1, seed = run.seed)
@@ -1057,6 +1225,10 @@ def run_cascade(app, run, pool):
                 cols += 1
         live.grid = grid
         live.cols_with_crossing = cols
+    if run.trace and run.status == "running":
+        run_trace(app, run, pool)
+    if run.status != "running":
+        return
     run.phase = "done"
     run.status = "complete"
     run.notes.append(f"total images: {run.generated}")

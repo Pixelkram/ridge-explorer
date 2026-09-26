@@ -175,3 +175,34 @@ simplex — mostly fronts that genuinely run into it; walking along the face is 
 ~1.45× the images per unit distance; a batched fan of step lengths per round (§3, fix 1 variant) would trade images
 for latency.
 
+
+## 7. Same-ridge rule, trace phase, coverage — development findings (2026-09-26, NOT confirmatory)
+
+**Ground truth.** At k = 3 the simplex is 2-D, so a dense lattice (N = 80, 3,321 images, rendered through the run's own
+path via `POST /api/cascade/{run}/render`) shows every front (`tests/walk_gt_lib.py`): boundary points (1 − cos > 0.35
+across 2 lattice steps), regions (connected non-boundary components), and a point's *ridge* = the pair of regions on
+rings around it (radii 0.03–0.08). On the development field (k3_T0, seed 42, full-fidelity detection) 56/57 crossings
+sit on ground-truth boundary points; 39/57 separate two regions (the rest are cracks inside one region — not
+judgeable by this definition). Crossing weights per ridge come from 20,000 virtual cascade chords.
+
+**How often does the current walk switch ridges?** Continuation walk, relative rule: 25 of 78 walks from judgeable
+crossings ended up on a different region pair than their origin (dev c1).
+
+**Continuity rule** (`sig_mode = "continuity"`, `PC_CONT_GAMMA`): a new station's largest side move, as a share of
+the previous station's contrast (`steps[].cont`), must stay below γ. It separates switching steps from continuing
+steps with AUC 0.87 (296 steps, 16 switches). Live dev check (fresh chords, 28 paired walks, γ = 0.5): switches
+9 → 4, but distance before any switch 0.166 → 0.128 (walks stop more often at "junctions"). Offline replay (dev c1):
+at every γ the rule beats simply stopping every walk sooner — e.g. γ = 0.7: 5 switches at 0.125 vs keep-3-stations:
+10 switches at 0.132. **It is smart stopping, i.e. a strictness dial, not a free win**: a rule that only stops walks
+can never increase the distance before the first switch. Shipped as an option ("strict"); the trace phase uses it.
+
+**Coverage.** (i) With *perfect* ridge identity the Good-Turing unexplored share is well calibrated on this field
+(simulated surveys: mean abs error 0.11 at 10 chords, 0.06 at 16, 0.035 at 24). (ii) The signature grouping finds
+only about half of the true same-ridge crossing pairs (recall 0.48–0.50, precision 0.92–1.00), so it over-splits.
+(iii) Joining crossings by walks is dangerous: individual walk links are ~80 % right, but union-find chains the wrong
+ones — with distance-only links from 6-station walks every judgeable crossing merged into one group (precision 0.18)
+and the estimate fell to 0 (truth 0.155). The implemented trace phase (strict walks + side check) made 14 links on the
+second dev run, none of them wrong where judgeable, but it did not change the grouping of any judgeable crossing, so
+the estimate did not move there. **Verdict so far: the trace phase draws useful ridge maps, but it does not (yet)
+improve the coverage estimate; the traced number is labelled experimental in the UI. The better lever for a
+reliable estimate is more chords (default 24).** A confirmatory test on fresh prompt sets has not been run.

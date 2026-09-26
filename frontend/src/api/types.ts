@@ -273,6 +273,22 @@ export interface CascadeStartRequest {
   focus_radius?: number;
   // tier-1 detection steps (default 4: gated at 93%/94% recall, ~2x faster probes)
   probe_steps?: number | null;
+  // survey randomness apart from the image seed (null = seed)
+  chord_seed?: number | null;
+  // trace phase: walk every significant crossing both ways, certify, link crossings the walks reach
+  trace?: boolean;
+  trace_steps?: number;
+  trace_certify?: boolean;
+}
+
+// one walk of the trace phase: origin crossing first, then the stations
+export interface CascadeTrace {
+  cid: number;
+  direction: number;
+  walk_id: string;
+  points: number[][];
+  cert?: boolean[] | null;   // per station: held on unseen seeds (null if not certified)
+  end?: string;
 }
 
 export interface CascadePointInfo {
@@ -304,6 +320,8 @@ export interface CascadeCrossing {
   ridge_group: number | null;
   // current bisection bracket width; ~0.012 = pinned (drives the lock-on reticle)
   bracket_w: number | null;
+  // ridge group with the trace phase's walk links added (null without a trace phase)
+  traced_group?: number | null;
 }
 
 export interface CascadePatch {
@@ -340,6 +358,12 @@ export interface CascadeStatus {
   distinct_ridges: number | null;
   singleton_ridges: number | null;
   unexplored_share: number | null;
+  // trace phase: walked ridges, crossing pairs a walk joined, and the certificate recomputed with those links
+  traces?: CascadeTrace[];
+  trace_links?: number[][];
+  traced_ridges?: number | null;
+  traced_singletons?: number | null;
+  traced_unexplored_share?: number | null;
   patches: CascadePatch[];
   notes: string[];
   error?: string | null;
@@ -464,7 +488,7 @@ export interface WalkStartRequest {
   direction: number;   // +1 / -1
   n_steps?: number;
   use_jvp?: boolean;
-  sig_mode?: 'relative' | 'absolute';
+  sig_mode?: 'relative' | 'absolute' | 'continuity';
   // fan = stations on one straight line (old); continuation = predictor-corrector along the secant (new)
   mode?: 'fan' | 'continuation';
 }
@@ -488,6 +512,6 @@ export interface WalkStatus {
   error?: string | null;
   mode?: string;
   images?: number;            // images the walk rendered
-  cert?: { status: string; b?: (number | null)[]; significant?: boolean[]; threshold?: number | null } | null;
+  cert?: { status: string; b?: (number | null)[]; significant?: boolean[]; threshold?: number | null; error?: string } | null;
   jvp?: { rank1_share: number; participation_ratio: number; cos_with_bracket?: number; wall_s: number } | null;
 }

@@ -442,6 +442,13 @@ class CascadeStartRequest(BaseModel):
     # null = probe at full fidelity.
     probe_steps: int | None = Field(4, ge=1, le=50)
     seed: int = 42
+    # survey randomness (chords, background, patches) apart from the image seed; null = seed
+    chord_seed: int | None = None
+    # trace phase: after the survey, walk both ways from every significant crossing (continuation walk,
+    # trace_steps x 0.05 each way), certify the stations, and link crossings a walk reaches
+    trace: bool = False
+    trace_steps: int = Field(8, ge=1, le=20)
+    trace_certify: bool = True
     steps: int = Field(config.DEFAULT_NUM_INFERENCE_STEPS, ge=1, le=50)
     height: int = Field(config.DEFAULT_HEIGHT, ge=64, le=1024)
     width: int = Field(config.DEFAULT_WIDTH, ge=64, le=1024)
@@ -481,6 +488,8 @@ class CascadeCrossing(BaseModel):
     # current bisection bracket width (barycentric); ~0.012 = pinned. Drives the
     # lock-on reticle in the map during the pinning phase.
     bracket_w: float | None = None
+    # ridge group with the trace phase's links added (None without a trace phase)
+    traced_group: int | None = None
 
 
 class CascadePatch(BaseModel):
@@ -502,14 +511,25 @@ class WalkStartRequest(BaseModel):
     use_jvp: bool = False
     # "absolute": both new sides within COS_T of the origin's sides (the coverage criterion);
     # "relative": each new side closer to its matching origin side than to the opposite one.
-    sig_mode: str = Field("relative", pattern="^(absolute|relative)$")   # relative won its A/B 24/24 (tests/walk_ab_*_relative.json)
+    # "continuity": relative + each new station's sides must continue the previous station's (PC_CONT_GAMMA)
+    sig_mode: str = Field("relative", pattern="^(absolute|relative|continuity)$")   # relative won its A/B 24/24 (tests/walk_ab_*_relative.json)
     # "fan": stations on one straight line, all rendered at once; "continuation": sequential predictor-corrector
     # along the secant of the last two captured points (RESEARCH_ridge_following_k4.md, fix 1). Continuation won
     # its pre-registered A/B (tests/PREREG_walk_continuation.md, tests/walk_pc_results.json) and is the default.
     mode: str = Field("continuation", pattern="^(fan|continuation)$")
+    # research override of the continuity threshold (PC_CONT_GAMMA); null = default
+    cont_gamma: float | None = Field(None, gt=0.0, le=10.0)
     # +1 / -1: the two ways along the ridge from the crossing
     direction: int = Field(1, ge=-1, le=1)
     n_steps: int = Field(5, ge=1)
+
+
+class RenderRequest(BaseModel):
+    """Research tool: render arbitrary weight vectors through a run's own generation path; saves embeddings to
+    tests/gt/<name>.npz. Used for dense ground-truth lattices."""
+    weights: list[list[float]]
+    seed: int | None = None
+    name: str = Field(..., pattern=r"^[A-Za-z0-9_.-]{1,80}$")
 
 
 class WalkStep(BaseModel):
@@ -519,6 +539,8 @@ class WalkStep(BaseModel):
     thumb: int
     # best estimate of the crossing: centre of the final bisection bracket (the thumb sits within a bracket of it)
     center: list[float] | None = None
+    # continuation: largest side move since the previous station / that station's contrast (continuity statistic)
+    cont: float | None = None
 
 
 class WalkStatus(BaseModel):
@@ -562,6 +584,13 @@ class CascadeStatus(BaseModel):
     distinct_ridges: int | None = None
     singleton_ridges: int | None = None
     unexplored_share: float | None = None
+    # trace phase: walked ridges ({cid, direction, walk_id, points, cert, end}), crossing pairs a walk joined, and
+    # the coverage certificate recomputed with those links (None without a trace phase)
+    traces: list[dict] = []
+    trace_links: list[list[int]] = []
+    traced_ridges: int | None = None
+    traced_singletons: int | None = None
+    traced_unexplored_share: float | None = None
     patches: list[CascadePatch] = []
     notes: list[str] = []
     error: str | None = None

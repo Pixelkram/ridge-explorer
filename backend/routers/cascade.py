@@ -20,7 +20,7 @@ from backend.services.gpu_pool import ProbeTask
 from backend.models import (
     ProbeStartResponse, CascadeProbeRequest,CascadeStartRequest, CascadeStartResponse, CascadeStatus,
                             CascadeCrossing, CascadePatch, CascadeChord,
-                            WalkStartRequest, WalkStep, WalkStatus,
+                            WalkStartRequest, WalkStep, WalkStatus, RenderRequest,
                             CascadePointInfo)
 from backend.services import cascade as cs
 from backend.cache.thumbnail_cache import ThumbnailStore
@@ -55,7 +55,8 @@ async def start(req: CascadeStartRequest, request: Request):
         seed=req.seed, steps=req.steps, height=req.height, width=req.width,
         guidance_scale=req.guidance_scale, n_chords=req.n_chords,
         n_patches=req.n_patches, focus=req.focus, focus_radius=req.focus_radius,
-        probe_steps=req.probe_steps)
+        probe_steps=req.probe_steps, chord_seed=req.chord_seed,
+        trace=req.trace, trace_steps=req.trace_steps, trace_certify=req.trace_certify)
     run.thumbs = ThumbnailStore(app.state.cache)
     run._target_sim = req.target_sim
     run._k_req = req.k
@@ -92,6 +93,8 @@ async def status(run_id: str, request: Request):
     if run is None:
         return CascadeStatus(run_id=run_id, status="unknown", error="no such run")
     cov = cs.coverage_stats(run.crossings)
+    traced = bool(getattr(run, "traces", None))
+    cov_t = cs.coverage_stats(run.crossings, links=run.trace_links) if traced else (None, None, None, None)
     return CascadeStatus(
         run_id=run.run_id, status=run.status, phase=run.phase,
         generated=run.generated, phase_done=run.phase_done,
@@ -106,12 +109,16 @@ async def status(run_id: str, request: Request):
             else [float(v) for v in (x.wa + x.wb) / 2],
             b=x.b, significant=x.significant, thumb=x.thumb,
             ridge_group=(cov[3] or {}).get(x.cid),
+            traced_group=(cov_t[3] or {}).get(x.cid),
             bracket_w=float(np.linalg.norm(x.wa - x.wb))
             if x.wa is not None and x.wb is not None else None)
             for x in run.crossings],
         bg_mean=run.bg_mean, bg_p95=run.bg_p95,
         distinct_ridges=cov[0], singleton_ridges=cov[1],
         unexplored_share=cov[2],
+        traces=list(getattr(run, "traces", [])),
+        trace_links=[list(l) for l in getattr(run, "trace_links", [])],
+        traced_ridges=cov_t[0], traced_singletons=cov_t[1], traced_unexplored_share=cov_t[2],
         patches=[CascadePatch(
             region=p.region, cid=p.cid, b=p.b, significant=p.significant,
             exploration=p.exploration, grid=p.grid,
@@ -130,7 +137,8 @@ async def walk_start(run_id: str, req: WalkStartRequest, request: Request):
                           error="crossing not found (or run still bisecting)")
     wid = uuid.uuid4().hex[:8]
     walk = cs.Walk(wid=wid, cid=req.cid, direction=1 if req.direction >= 0 else -1,
-                   n_steps=req.n_steps, use_jvp=bool(req.use_jvp), sig_mode=req.sig_mode, mode=req.mode)
+                   n_steps=req.n_steps, use_jvp=bool(req.use_jvp), sig_mode=req.sig_mode, mode=req.mode,
+                   cont_gamma=req.cont_gamma)
     run.walks = getattr(run, "walks", {})
     run.walks[wid] = walk
 
@@ -183,6 +191,44 @@ async def walk_certify(run_id: str, walk_id: str, request: Request):
 
     asyncio.create_task(asyncio.to_thread(_go))
     return _walk_status(walk)
+
+
+@router.post("/{run_id}/render")
+async def render_start(run_id: str, req: RenderRequest, request: Request):
+    """Research tool (cs.render_points): render weight vectors with this run's pipeline/seed/steps/size, save the
+    DINOv2 embeddings to tests/gt/<name>.npz; poll GET /{run_id}/render/{render_id}."""
+    from pathlib import Path
+    app = request.app
+    run = _runs(app).get(run_id)
+    if run is None:
+        return {"status": "error", "error": "no such run"}
+    if not req.weights or any(len(w) != run.k for w in req.weights):
+        return {"status": "error", "error": f"every weight vector needs k={run.k} entries"}
+    out = Path(__file__).resolve().parents[2] / "tests" / "gt"
+    out.mkdir(parents=True, exist_ok=True)
+    rid = uuid.uuid4().hex[:8]
+    job = {"id": rid, "status": "running", "done": 0, "total": len(req.weights), "path": str(out / f"{req.name}.npz")}
+    run.renders = getattr(run, "renders", {})
+    run.renders[rid] = job
+
+    def _go():
+        try:
+            cs.render_points(app, run, app.state.gpu_pool, req.weights,
+                             run.seed if req.seed is None else req.seed, job)
+        except Exception as exc:                 # noqa: BLE001
+            job["status"], job["error"] = "error", f"{type(exc).__name__}: {exc}"
+
+    asyncio.create_task(asyncio.to_thread(_go))
+    return {k: v for k, v in job.items() if k != "notes"}
+
+
+@router.get("/{run_id}/render/{render_id}")
+async def render_status(run_id: str, render_id: str, request: Request):
+    run = _runs(request.app).get(run_id)
+    job = getattr(run, "renders", {}).get(render_id) if run is not None else None
+    if job is None:
+        return {"status": "unknown"}
+    return {k: v for k, v in job.items() if k != "notes"}
 
 
 @router.post("/{run_id}/walk/{walk_id}/cancel")

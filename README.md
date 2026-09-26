@@ -216,6 +216,20 @@ generation is bit-identical afterwards (`tests/probe_e2e.py`). Routes: `POST /ap
 - **Certifying a walk** — `POST /api/cascade/{run}/walk/{walk}/certify` re-measures every station with the
   cascade's boundary statistic B on three seeds the walk never used, against the run's background at the same
   seeds (`cert` in the walk status). A walk's stations are single-seed until certified.
+  In the UI: **certify on 3 unseen seeds** next to a finished walk; stations turn green (hold) or grey (do not),
+  in the thumbnail strip and on the map.
+- **Strict ridge test** (`sig_mode = "continuity"`, UI: *ridge test → strict*): each new station's sides may change
+  by at most half the previous station's contrast (`PC_CONT_GAMMA`). Development test against a dense ground truth
+  (`RESEARCH_ridge_following_k4.md` §7, not yet confirmed on fresh prompts): about half the ridge switches, about a
+  quarter less distance — a strictness dial, so `relative` stays the default.
+- **Trace phase** (`trace: true` in `POST /api/cascade/start`, UI: *trace ridges*): after the survey, walk both ways
+  from every significant crossing with the strict rule, draw the walked ridges on the map, and link crossings a walk
+  reaches (`traces`, `trace_links`, `traced_*` in the status). The traced unexplored share is **experimental**: on
+  the development field it did not improve on the plain estimate, and walk links can chain different ridges together
+  (§7). More chords is the reliable way to a better coverage estimate.
+- **Ground-truth tooling** — `POST /api/cascade/{run}/render` renders any list of weight vectors through a run's own
+  generation path and saves the DINOv2 embeddings (`tests/gt/`); `chord_seed` lets several surveys share one image
+  field; `tests/walk_gt_lib.py` turns a dense k = 3 lattice into regions, ridges and chord-crossing weights.
 - Fixed 2026-09-26: a walk from crossing 0 errored ("no tangent direction") whenever that crossing lay on chord 0 —
   the walk's tangent seed and chord 0's direction came from the same random stream. It now redraws; all other
   walks keep their exact plane.

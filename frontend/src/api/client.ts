@@ -323,6 +323,14 @@ export async function cascadeWalkStatus(
   return r.json();
 }
 
+// Re-measure a finished walk's stations on three seeds it never used; poll the walk for `cert`.
+export async function cascadeWalkCertify(
+  runId: string, walkId: string,
+): Promise<import('./types').WalkStatus> {
+  const r = await fetch(`${BASE}/api/cascade/${runId}/walk/${walkId}/certify`, { method: 'POST' });
+  return jsonOrThrow(r, 'cascadeWalkCertify');
+}
+
 export async function cascadeWalkCancel(runId: string, walkId: string): Promise<void> {
   await fetch(`${BASE}/api/cascade/${runId}/walk/${walkId}/cancel`, { method: 'POST' });
 }

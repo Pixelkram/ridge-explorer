@@ -28,3 +28,6 @@ logs/
 # --- Large binary payloads never belong in this repo -----------------------
 *.npy
 *.safetensors
+
+# --- Dense ground-truth lattices (regenerate with tests/walk_gt_collect.py; hashes in tests/gt/MANIFEST_SHA256.txt)
+tests/gt/*.npz

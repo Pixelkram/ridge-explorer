@@ -11,7 +11,7 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   cascadeStart, cascadeStatus, cascadeCancel, cascadeImageUrl,
-  cascadeWalkStart, cascadeWalkStatus, cascadeWalkCancel, cascadePointInfo,
+  cascadeWalkStart, cascadeWalkStatus, cascadeWalkCancel, cascadeWalkCertify, cascadePointInfo,
 } from './api/client';
 import type { CascadeStatus, CascadePatch, WalkStatus } from './api/types';
 import CascadeMap from './CascadeMap';
@@ -26,6 +26,7 @@ const NUM: React.CSSProperties = {
 };
 const ACCENT = '#4ecca3';
 const WARN = '#e94560';
+const CERT_NO = '#8a93b8';   // the map's grey for "not significant", reused for stations that did not certify
 
 // Presets k=3..16 from the measured yield model: chords = max(12, ceil(12k/7)) keeps
 // ~3 crossings per patch slot at 4 patches; k>9 is beyond the calibrated range (the
@@ -165,6 +166,7 @@ export default function CascadePanel() {
   const [open, setOpen] = useState(false);
   const [k, setK] = useState(4);
   const [nChords, setNChords] = useState(24);
+  const [trace, setTrace] = useState(false);
   const [nPatches, setNPatches] = useState(4);
   const [seed, setSeed] = useState(42);
   const [promptText, setPromptText] = useState('');
@@ -217,6 +219,7 @@ export default function CascadePanel() {
         n_patches: nPatches,
         seed,
         focus: weights,
+        trace,
       });
       if (r.error) { setErr(r.error); return; }
       setStatus(null);
@@ -246,16 +249,16 @@ export default function CascadePanel() {
     };
   }, [runId]);
 
-  // walk poll chain
+  // walk poll chain -- also while a finished walk is being certified
   useEffect(() => {
-    if (!runId || !walk || walk.status !== 'running') return;
+    if (!runId || !walk || (walk.status !== 'running' && walk.cert?.status !== 'running')) return;
     let live = true;
     const tick = async () => {
       try {
         const w = await cascadeWalkStatus(runId, walk.walk_id);
         if (!live) return;
         setWalk(w);
-        if (w.status === 'running') walkTimer.current = window.setTimeout(tick, 1000);
+        if (w.status === 'running' || w.cert?.status === 'running') walkTimer.current = window.setTimeout(tick, 1000);
       } catch {
         if (live) walkTimer.current = window.setTimeout(tick, 3000);
       }
@@ -265,7 +268,7 @@ export default function CascadePanel() {
       live = false;
       if (walkTimer.current) window.clearTimeout(walkTimer.current);
     };
-  }, [runId, walk?.walk_id, walk?.status]);
+  }, [runId, walk?.walk_id, walk?.status, walk?.cert?.status]);
 
   const start = async () => {
     setErr(null);
@@ -284,6 +287,7 @@ export default function CascadePanel() {
         n_chords: nChords,
         n_patches: nPatches,
         seed,
+        trace,
       });
       if (r.error) { setErr(r.error); return; }
       setRunId(r.run_id);
@@ -299,7 +303,7 @@ export default function CascadePanel() {
   };
 
   const [useJvp, setUseJvp] = useState(false);
-  const [sigMode, setSigMode] = useState<'relative' | 'absolute'>('relative');
+  const [sigMode, setSigMode] = useState<'relative' | 'absolute' | 'continuity'>('relative');
   const [walkMode, setWalkMode] = useState<'fan' | 'continuation'>('continuation');
   const startWalk = async (direction: number) => {
     if (!runId || selCid === null) return;
@@ -310,6 +314,18 @@ export default function CascadePanel() {
     } catch (e: any) { setErr(String(e.message || e)); }
   };
 
+  const certifyWalk = async () => {
+    if (!runId || !walk) return;
+    try {
+      const w = await cascadeWalkCertify(runId, walk.walk_id);
+      if (w.error) { setErr(w.error); return; }
+      setWalk(w);
+    } catch (e: any) { setErr(String(e.message || e)); }
+  };
+  // per-station verdict once certified: true = held on the unseen seeds
+  const certOk = (i: number): boolean | null =>
+    walk?.cert?.status === 'done' ? !!walk.cert.significant?.[i] : null;
+
   const running = status?.status === 'running';
   const sigCount = status?.crossings.filter((c) => c.significant).length ?? 0;
   const scored = status?.crossings.filter((c) => c.b !== null) ?? [];
@@ -318,6 +334,9 @@ export default function CascadePanel() {
   const walkPath = walk && status
     ? [status.crossings.find((c) => c.cid === walk.cid)?.weights ?? [],
        ...walk.steps.map((s) => s.weights)].filter((w) => w.length > 0)
+    : null;
+  const walkColors = walkPath && walk?.cert?.status === 'done'
+    ? walkPath.map((_, i) => (i === 0 ? null : certOk(i - 1) ? ACCENT : CERT_NO))
     : null;
 
   return (
@@ -357,6 +376,10 @@ export default function CascadePanel() {
             <label title="a style lever, not a quality dial: same prompts + new seed = a genuinely different boundary map (measured). Fix it to compare settings; change it for another atlas">
               seed <input style={NUM} type="number" value={seed}
                           onChange={(e) => setSeed(Number(e.target.value))} />
+            </label>
+            <label className="rx-focus" title="after the survey, walk both ways from every certified crossing (continuation walk), check the stations on unseen seeds, and link crossings a walk reaches: one ridge often shows up as several crossings whose side images no longer match. Draws the ridges on the map and recomputes the unexplored share. Adds a few minutes."
+                   style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <input type="checkbox" checked={trace} onChange={(e) => setTrace(e.target.checked)} /> trace ridges
             </label>
             <button onClick={start} disabled={running}
                     style={{ background: running ? '#333' : '#0f3460',
@@ -425,6 +448,15 @@ export default function CascadePanel() {
                     {status.distinct_ridges} ridges · ≈{Math.round(status.unexplored_share * 100)}% unexplored
                   </span>
                 )}
+                {status.traced_unexplored_share != null && status.traced_ridges != null && (
+                  <span title={`EXPERIMENTAL -- recomputed after the trace phase: ${status.trace_links?.length ?? 0} crossing pairs were joined by a walk (${status.traces?.length ?? 0} walks). A development test against a dense ground truth showed no reliable improvement over the plain estimate, and walk links can merge different ridges; trust the map more than this number.`}
+                        style={{ color: status.traced_unexplored_share <= 0.15 ? ACCENT : '#c9a227' }}>
+                    → traced: {status.traced_ridges} ridges · ≈{Math.round(status.traced_unexplored_share * 100)}% unexplored
+                  </span>
+                )}
+                {status.phase === 'trace' && running && (
+                  <span style={{ color: WARN }}>tracing ridges…</span>
+                )}
               </div>
               {status.prompts.length > 0 && (
                 <div style={{ color: '#666', marginTop: 4, fontSize: 11 }}>
@@ -458,7 +490,8 @@ export default function CascadePanel() {
                               onSelect={select}
                               onImage={openDetail}
                               walkPath={walkPath}
-                              walkSegs={walk?.segs ?? null} />
+                              walkSegs={walk?.segs ?? null}
+                              walkColors={walkColors} />
                 </div>
               )}
 
@@ -473,9 +506,9 @@ export default function CascadePanel() {
                   <label className="rx-focus" title="continuation = step along the secant of the last two captured points and re-find the ridge across it, one step at a time (follows curving ridges; stations appear as they are found); fan = all stations on one straight line, rendered at once (old)" style={{ fontSize: 11, display: "inline-flex", alignItems: "center", gap: 4, marginRight: 8 }}>
                     walk <select value={walkMode} onChange={(e) => setWalkMode(e.target.value as "fan" | "continuation")} style={{ fontSize: 11 }}><option value="continuation">continuation (new)</option><option value="fan">straight fan (old)</option></select>
                   </label>
-                  <label className="rx-focus" title="how a station is accepted as the same ridge: relative = each new side closer to its matching origin side than to the opposite one (won its A/B 24/24); absolute = both sides within cosine distance 0.35 of the origin sides (the old rule)" style={{ fontSize: 11, display: "inline-flex", alignItems: "center", gap: 4, marginRight: 8 }}>
+                  <label className="rx-focus" title="how a station is accepted as the same ridge: relative = each new side closer to its matching origin side than to the opposite one (won its A/B 24/24); strict = also each side may change by at most half the previous station's contrast (dev test against a dense ground truth: about half the ridge switches, about a quarter less distance); absolute = both sides within cosine distance 0.35 of the origin sides (the old rule)" style={{ fontSize: 11, display: "inline-flex", alignItems: "center", gap: 4, marginRight: 8 }}>
 
-                    ridge test <select value={sigMode} onChange={(e) => setSigMode(e.target.value as "relative" | "absolute")} style={{ fontSize: 11 }}><option value="relative">relative (new)</option><option value="absolute">absolute (old)</option></select>
+                    ridge test <select value={sigMode} onChange={(e) => setSigMode(e.target.value as "relative" | "absolute" | "continuity")} style={{ fontSize: 11 }}><option value="relative">relative</option><option value="continuity">strict: must continue last station</option><option value="absolute">absolute (old)</option></select>
 
                   </label>
                   <label className="rx-focus" title="one exact JVP at the origin (~30 s) gives the true normal and tangent plane instead of the bracket chord" style={{ fontSize: 11, display: "inline-flex", alignItems: "center", gap: 4, marginRight: 8 }}>
@@ -507,6 +540,30 @@ export default function CascadePanel() {
                       {walk.notes.length > 0 && ` · ${walk.notes[walk.notes.length - 1]}`}
                     </span>
                   )}
+                  {walk && walk.status === 'complete' && walk.steps.length > 0 && (
+                    walk.cert?.status === 'done' ? (
+                      <span style={{ marginLeft: 10, fontSize: 11 }}
+                            title={`each station re-rendered on 3 seeds the walk never used; it holds if its boundary strength B beats 95% of random pairs at those seeds (threshold ${walk.cert.threshold?.toFixed(2) ?? '?'})`}>
+                        <span style={{ color: ACCENT }}>
+                          {walk.cert.significant?.filter(Boolean).length ?? 0}/{walk.steps.length}
+                        </span>
+                        <span style={{ color: '#888' }}> stations hold on unseen seeds</span>
+                      </span>
+                    ) : walk.cert?.status === 'error' ? (
+                      <span style={{ color: WARN, marginLeft: 10, fontSize: 11 }}>
+                        certification failed: {walk.cert.error}
+                      </span>
+                    ) : (
+                      <button className="rx-focus" onClick={certifyWalk}
+                              disabled={walk.cert?.status === 'running'}
+                              title="Is this a real boundary or a one-seed accident? Re-renders every station on 3 seeds the walk never saw and compares its boundary strength with random pairs at those seeds. Stations turn green (holds) or grey (does not)."
+                              style={{ background: '#0f3460', color: '#fff', marginLeft: 10,
+                                       border: `1px solid ${ACCENT}`, borderRadius: 3,
+                                       padding: '2px 10px', cursor: 'pointer', fontSize: 11 }}>
+                        {walk.cert?.status === 'running' ? 'certifying…' : 'certify on 3 unseen seeds (~15 s)'}
+                      </button>
+                    )
+                  )}
                   {walk && walk.steps.length > 0 && (
                     <div style={{ display: 'flex', gap: 4, marginTop: 8,
                                   overflowX: 'auto' }}>
@@ -516,13 +573,20 @@ export default function CascadePanel() {
                                height={72}
                                onClick={() => openDetail(s.thumb,
                                  `walk step ${i + 1}`,
-                                 [['local contrast', s.contrast.toFixed(3)]],
+                                 [['local contrast (walk seed)', s.contrast.toFixed(3)],
+                                  ...(certOk(i) === null ? [] : [
+                                    ['B on 3 unseen seeds', walk.cert?.b?.[i] != null ? walk.cert.b[i]!.toFixed(3) : 'n/a'],
+                                    ['holds on unseen seeds', certOk(i) ? 'yes' : 'no'],
+                                  ] as [string, string][])],
                                  s.weights)}
                                style={{ objectFit: 'cover', borderRadius: 3,
-                                        border: `1px solid ${WARN}`,
+                                        border: certOk(i) === null ? `1px solid ${WARN}`
+                                          : `2px solid ${certOk(i) ? ACCENT : CERT_NO}`,
+                                        opacity: certOk(i) === false ? 0.6 : 1,
                                         cursor: 'pointer' }} />
-                          <div style={{ fontSize: 10, color: '#888' }}>
-                            {s.contrast.toFixed(2)}
+                          <div style={{ fontSize: 10, color: certOk(i) === null ? '#888' : certOk(i) ? ACCENT : CERT_NO }}>
+                            {certOk(i) === null ? s.contrast.toFixed(2)
+                              : `B ${walk.cert?.b?.[i] != null ? walk.cert.b[i]!.toFixed(2) : '–'}`}
                           </div>
                         </div>
                       ))}

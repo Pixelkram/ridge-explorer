@@ -1,0 +1,4 @@
+# Dense k=3 ground-truth lattices (not in git: large binaries).
+# Regenerate: python tests/walk_gt_collect.py --set k3_T0 --seed 42 --chord-seed 1 --modes relative --out <file>
+# (renders the N=80 lattice through the run's own path via POST /api/cascade/{run}/render)
+1c9a4a3af44f0f8ce9a2590de98a08cbae15b6b2d45070ce5b7667c8959070cc  k3_e7674abe_s42_N80.npz

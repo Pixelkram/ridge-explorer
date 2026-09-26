@@ -26,6 +26,7 @@ import type { CascadeProbeMap } from './stores/probeStore';
 
 const ACCENT = '#4ecca3';
 const WARN = '#e94560';
+const CERT_NO = '#8a93b8';   // the grey of non-significant crossings, reused for stations that did not certify
 // dark outline behind probe strokes and their labels, so a measured direction stays
 // readable where it crosses the bright sampling cloud
 const HALO = '#0a0a12';
@@ -184,7 +185,7 @@ const KEYFRAMES = `
 
 /** One rendered shadow of the space; used once in single view, per-anchor in split. */
 function MapSvg({
-  status, size, theta, base, sel, onPick, walkPath, walkSegs,
+  status, size, theta, base, sel, onPick, walkPath, walkSegs, walkColors,
   caption, showBadge, showBeat, spin, compact, probes, pendingCid,
 }: {
   status: CascadeStatus;
@@ -195,6 +196,8 @@ function MapSvg({
   onPick: (cid: number | null) => void;
   walkPath?: number[][] | null;
   walkSegs?: number[][][] | null;
+  // per walkPath point once the walk is certified (null = keep the walk colour)
+  walkColors?: (string | null)[] | null;
   caption?: string;
   showBadge?: boolean;
   showBeat?: boolean;
@@ -267,6 +270,18 @@ function MapSvg({
                 style={{ animationDelay: `${(i % 8) * 0.12}s` }} />
         );
       })}
+      {(status.traces ?? []).map((tr, i) => (
+        <g key={`tr${i}`} style={{ pointerEvents: 'none' }}>
+          <polyline points={tr.points.map((w) => proj.project(w).join(',')).join(' ')}
+                    fill="none" stroke={ACCENT} strokeWidth={compact ? 1.3 : 1.9}
+                    strokeOpacity={0.7} strokeLinejoin="round" />
+          {tr.points.slice(1).map((w, j) => {
+            const [x, y] = proj.project(w);
+            return <circle key={j} cx={x} cy={y} r={compact ? 1.5 : 2.1}
+                           fill={tr.cert && tr.cert[j] === false ? CERT_NO : ACCENT} />;
+          })}
+        </g>
+      ))}
       {walkSegs && walkSegs.map((seg, i) => {
         const [x1, y1] = proj.project(seg[0]);
         const [x2, y2] = proj.project(seg[1]);
@@ -331,7 +346,7 @@ function MapSvg({
             const [x, y] = proj.project(w);
             return <circle key={`wk${i}`}
                            cx={x} cy={y} r={i === walkPath.length - 1 ? 5 : 3.2}
-                           fill={WARN} />;
+                           fill={walkColors?.[i] ?? WARN} />;
           })}
         </g>
       )}
@@ -484,7 +499,7 @@ function CascadeProbeBlock({ runId, cid }: { runId: string; cid: number }) {
 
 export default function CascadeMap({
   status, runId, imageUrl, size = 340, onSelect, onImage, walkPath, walkSegs,
-  selectedCid,
+  walkColors, selectedCid,
 }: {
   status: CascadeStatus;
   runId: string;
@@ -495,6 +510,7 @@ export default function CascadeMap({
   onImage?: (thumb: number, title: string, rows: [string, string][]) => void;
   walkPath?: number[][] | null;
   walkSegs?: number[][][] | null;
+  walkColors?: (string | null)[] | null;
   selectedCid?: number | null;
 }) {
   const [internalSel, setInternalSel] = useState<number | null>(null);
@@ -558,6 +574,7 @@ export default function CascadeMap({
           {Array.from({ length: nViews }, (_, b) => (
             <MapSvg key={b} status={status} size={tile} theta={theta} base={b}
                     sel={sel} onPick={pick} walkPath={walkPath} walkSegs={walkSegs}
+                    walkColors={walkColors}
                     caption={`view ${b + 1}·${(b % nViews) + 2 > nViews ? 1 : b + 2}`}
                     showBeat={b === 0} compact
                     probes={probes} pendingCid={probePending} />
@@ -566,6 +583,7 @@ export default function CascadeMap({
       ) : (
         <MapSvg status={status} size={mapSize} theta={theta} base={basePair}
                 sel={sel} onPick={pick} walkPath={walkPath} walkSegs={walkSegs}
+                walkColors={walkColors}
                 showBadge showBeat spin={spin}
                 probes={probes} pendingCid={probePending} />
       )}
@@ -582,7 +600,9 @@ export default function CascadeMap({
           <br /><span style={{ color: ACCENT }}>◇</span> refined patch
           {' '}<span style={{ color: '#8a93b8' }}>(dashed = exploration slot)</span>
           <br /><span style={{ color: WARN }}>◦</span> same ridge as selection ·{' '}
-          <span style={{ color: WARN }}>‖</span> walk probe rungs
+          <span style={{ color: WARN }}>‖</span> walk probe rungs · after certifying, stations turn{' '}
+          <span style={{ color: ACCENT }}>●</span> held on unseen seeds /{' '}
+          <span style={{ color: CERT_NO }}>●</span> did not · <span style={{ color: ACCENT }}>—</span> traced ridge
           {probes && Object.keys(probes).length > 0 && (
             <>
               <br /><span style={{ color: ACCENT }}>╱</span> probed crossing direction —
