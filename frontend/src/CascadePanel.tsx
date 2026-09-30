@@ -414,8 +414,8 @@ export default function CascadePanel() {
                 {stride.toFixed(3)} · ≈{(stride / CELL).toFixed(1)} cells
               </span>
             </label>
-            <label title="after each chord's strongest crossing, spawn this many rays from it and repeat `depth` times; root chords stay fair samples, child chords are exploratory">
-              branch <input style={NUM} type="number" min={0} max={6} value={branch}
+            <label title="how many NEW chords (rays) are spawned at each chord's most divergent crossing; 0 = no branching. Root chords stay fair samples, child chords are exploratory">
+              new chords / crossing <input style={NUM} type="number" min={0} max={6} value={branch}
                             onChange={(e) => {
                               const b = Math.max(0, Math.min(6, Number(e.target.value)));
                               setBranch(b);
@@ -423,9 +423,9 @@ export default function CascadePanel() {
                               if (b > 0 && depth === 0) setDepth(1);
                             }} />
             </label>
-            <label title="how many generations of child rays to spawn (each generation branches from the previous one's strongest crossings); 0 = none"
+            <label title="how many times the branching is executed recursively: generation 1 branches from the root chords' strongest crossings, generation 2 from generation 1's, and so on; 0 = none"
                    style={{ color: branch > 0 ? undefined : '#667' }}>
-              depth <input style={NUM} type="number" min={0} max={4} value={depth}
+              recursion depth <input style={NUM} type="number" min={0} max={4} value={depth}
                            disabled={branch === 0}
                            onChange={(e) => setDepth(
                              Math.max(0, Math.min(4, Number(e.target.value))))} />
