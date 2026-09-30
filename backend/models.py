@@ -450,13 +450,17 @@ class CascadeStartRequest(BaseModel):
     # Finer resolves boundaries closer together than one stride at a cost ~1/stride; coarser
     # merges them. Detection only -- the continuation walk's corrector spacing is unaffected.
     stride: float = Field(0.025, ge=0.01, le=0.2)
-    # recursive ("branching") chords: after each chord's strongest crossing, spawn this many
-    # rays out of it and repeat for `depth` generations. 0 = off (one fair generation, the
+    # recursive ("branching") chords: out of each selected crossing of the previous generation,
+    # spawn this many rays and repeat for `depth` generations. 0 = off (one fair generation, the
     # protocol of record). Root chords stay fair area samples; child rays are exploratory
     # (preferential), so the coverage certificate is quoted on the roots only. Total chords
     # are capped at the geometric sum n_chords*(1 + branch + ... + branch^depth).
     branch: int = Field(0, ge=0, le=6)
     depth: int = Field(0, ge=0, le=4)
+    # which crossings of a generation spawn the next one: the top this-many % by probe-to-probe
+    # divergence (always at least one). 100 = every crossing branches; 20 (default) spends the
+    # branching budget on the fifth of the evidence that diverged most.
+    branch_top_pct: int = Field(20, ge=1, le=100)
     seed: int = 42
     # survey randomness (chords, background, patches) apart from the image seed; null = seed
     chord_seed: int | None = None
@@ -606,6 +610,11 @@ class CascadeStatus(BaseModel):
     chords_meta: list[CascadeChordMeta] = []
     # the chord probe spacing this run was started with (0.025 = protocol of record)
     stride: float = 0.025
+    # the branching settings this run was started with: rays per selected crossing (0 = off),
+    # generations of them, and the divergence percentile that selects the origins
+    branch: int = 0
+    depth: int = 0
+    branch_top_pct: int = 20
     # False = detection only: the crossings below were never bisected or scored, so their
     # positions carry bracket precision (+-stride/2) and b/significant mean nothing. The
     # default here is the back-compatible reading (a status without the field predates the

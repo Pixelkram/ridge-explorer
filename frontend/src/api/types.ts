@@ -279,10 +279,13 @@ export interface CascadeStartRequest {
   probe_steps?: number | null;
   // chord probe spacing in weight space (default 0.025 = protocol of record, ~1 fine cell)
   stride?: number;
-  // recursive chords: rays spawned from each chord's strongest crossing (0-6, 0 = off) and
-  // how many generations of them (0-4). Roots stay fair area samples, children are exploratory
+  // recursive chords: rays spawned from each selected crossing (0-6, 0 = off) and how many
+  // generations of them (0-4). Roots stay fair area samples, children are exploratory
   branch?: number;
   depth?: number;
+  // which crossings of a generation spawn the next: the top this-many % by probe-to-probe
+  // divergence, at least one (1-100, default 20; 100 = every crossing branches)
+  branch_top_pct?: number;
   // survey randomness apart from the image seed (null = seed)
   chord_seed?: number | null;
   // trace phase: walk every significant crossing both ways, certify, link crossings the walks reach
@@ -375,6 +378,11 @@ export interface CascadeStatus {
   chords_meta?: CascadeChordMeta[];
   // the chord probe spacing this run was started with
   stride?: number;
+  // the branching settings this run was started with: rays per selected crossing (0 = off),
+  // generations of them, and the divergence percentile that picks the origins
+  branch?: number;
+  depth?: number;
+  branch_top_pct?: number;
   // false = detection only: the crossings were never bisected or scored, so their positions
   // carry bracket precision (+-stride/2) and b/significant mean nothing
   certify?: boolean;

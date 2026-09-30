@@ -6,10 +6,11 @@ The field is a stack of parallel BANDS in one fixed sum-zero direction: consecut
 the same band are identical images (1-cos = 0), probes in neighbouring bands differ far above
 COS_T, and the contrast varies band to band so "strongest crossing" is not a tie.
 
-  (i)   BRANCHING on that field: child rays start on their parent's strongest crossing and
-        skip the probe0-probe1 bracket (so the parent's own sheet is not re-counted), carry
-        gen/parent/origin_cid, and never exceed the geometric chord cap -- checked for
-        (branch, depth) in {(2,2), (3,1), (1,3)}.
+  (i)   BRANCHING on that field: child rays start on a crossing in the previous generation's
+        top-divergence selection (_branch_origins; tests/branch_top_test.py covers the rule
+        itself) and skip the probe0-probe1 bracket (so the origin's own sheet is not
+        re-counted), carry gen/parent/origin_cid, and never exceed the geometric chord cap --
+        checked for (branch, depth) in {(2,2), (3,1), (1,3)}.
   (ii)  DETERMINISM: with branch=0 the probe list is bit-identical to the pre-refactor chord
         phase, replayed here from the same helpers and rng stream; and turning branching on
         does not disturb generation 0.
@@ -164,11 +165,12 @@ def part1():
     check(offending == 0, "no crossing is quoted at a child ray's first bracket",
           f"{offending} offending crossings")
 
-    # provenance: a child's origin is the MIDPOINT of its parent's strongest bracket
+    # provenance: a child's origin is the MIDPOINT of the bracket it was spawned from, and that
+    # crossing lies on the parent chord one generation up
     check(all(m["parent"] == -1 and m["origin_cid"] == -1
               for m in run.chords_meta if m["gen"] == 0),
           "root chords carry parent -1 / origin -1")
-    bad_parent, bad_origin, bad_strong = 0, 0, 0
+    bad_parent, bad_origin, bad_chord = 0, 0, 0
     by_cid = {x.cid: x for x in run.crossings}
     for ci, m in enumerate(run.chords_meta):
         if m["gen"] == 0:
@@ -182,14 +184,26 @@ def part1():
                 np.asarray(run.chords_geo[ci][0], dtype=float), (x.wa + x.wb) / 2):
             bad_origin += 1
             continue
-        sibs = [y for y in run.crossings
-                if y.gen == x.gen and _on_chord(run, p, (y.wa + y.wb) / 2)]
-        if sibs and cs._cosd(x.ea, x.eb) < max(cs._cosd(y.ea, y.eb) for y in sibs) - 1e-12:
-            bad_strong += 1
+        if not _on_chord(run, p, (x.wa + x.wb) / 2):
+            bad_chord += 1
     check(bad_parent == 0, "every child names a parent chord one generation up")
     check(bad_origin == 0, "every child ray starts at its origin crossing's bracket midpoint")
-    check(bad_strong == 0,
-          "the origin crossing is the STRONGEST (max 1-cos) found on the parent chord")
+    check(bad_chord == 0, "the origin crossing sits on the parent chord it is attributed to")
+
+    # the origins of a generation are exactly the top branch_top_pct % of the PREVIOUS
+    # generation's crossings by divergence -- not one per crossing-bearing chord (the rule
+    # this replaced), so they need not be spread over the chords at all
+    bad_sel, detail = [], []
+    for g in (1, 2):
+        prev = [y for y in run.crossings if y.gen == g - 1]
+        want = {x.cid for x in cs._branch_origins(prev, run.branch_top_pct)}
+        got = {m["origin_cid"] for m in run.chords_meta if m["gen"] == g}
+        detail.append(f"gen {g}: {len(got)} of {len(want)} selected from {len(prev)}")
+        if not got or not got <= want:
+            bad_sel.append(g)
+    check(not bad_sel,
+          f"origins come from the previous generation's top {run.branch_top_pct} % "
+          "by divergence", "; ".join(detail))
 
     # crossings inherit their chord's generation, and the roots-only filter keeps a subset
     gset = sorted({x.gen for x in run.crossings})

@@ -187,6 +187,7 @@ export default function CascadePanel() {
   const [stride, setStride] = useState(STRIDE_REF);
   const [branch, setBranch] = useState(0);
   const [depth, setDepth] = useState(0);
+  const [branchTopPct, setBranchTopPct] = useState(20);
   const [trace, setTrace] = useState(false);
   const [certify, setCertify] = useState(false);
   const [nPatches, setNPatches] = useState(4);
@@ -243,6 +244,7 @@ export default function CascadePanel() {
         stride,
         branch,
         depth,
+        branch_top_pct: branchTopPct,
         seed,
         focus: weights,
         trace,
@@ -316,6 +318,7 @@ export default function CascadePanel() {
         stride,
         branch,
         depth,
+        branch_top_pct: branchTopPct,
         seed,
         trace,
       });
@@ -428,7 +431,7 @@ export default function CascadePanel() {
                 {stride.toFixed(3)} · ≈{(stride / CELL).toFixed(1)} cells
               </span>
             </label>
-            <label title="how many NEW chords (rays) are spawned at each chord's most divergent crossing; 0 = no branching. Root chords stay fair samples, child chords are exploratory">
+            <label title="how many NEW chords (rays) are spawned from each selected crossing of the previous generation; 0 = no branching. Root chords stay fair samples, child chords are exploratory">
               new chords / crossing <input style={NUM} type="number" min={0} max={6} value={branch}
                             onChange={(e) => {
                               const b = Math.max(0, Math.min(6, Number(e.target.value)));
@@ -437,16 +440,23 @@ export default function CascadePanel() {
                               if (b > 0 && depth === 0) setDepth(1);
                             }} />
             </label>
-            <label title="how many times the branching is executed recursively: generation 1 branches from the root chords' strongest crossings, generation 2 from generation 1's, and so on; 0 = none"
+            <label title="how many times the branching is executed recursively: generation 1 branches from the selected crossings of the root chords, generation 2 from generation 1's, and so on; 0 = none"
                    style={{ color: branch > 0 ? undefined : '#667' }}>
               recursion depth <input style={NUM} type="number" min={0} max={4} value={depth}
                            disabled={branch === 0}
                            onChange={(e) => setDepth(
                              Math.max(0, Math.min(4, Number(e.target.value))))} />
             </label>
+            <label title="which crossings of the previous generation spawn new chords: those in the top X % by probe-to-probe divergence (at least one). 100 = every crossing spawns"
+                   style={{ color: branch > 0 ? undefined : '#667' }}>
+              from top % divergence <input style={NUM} type="number" min={1} max={100}
+                           value={branchTopPct} disabled={branch === 0}
+                           onChange={(e) => setBranchTopPct(
+                             Math.max(1, Math.min(100, Number(e.target.value))))} />
+            </label>
             {branch > 0 && (
               <span style={{ color: '#8a9', fontSize: 11 }}
-                    title="hard cap on the total chords: the geometric sum chords x (1 + branch + ... + branch^depth). Reached only where every chord keeps finding crossings.">
+                    title="hard cap on the total chords: the geometric sum chords x (1 + branch + ... + branch^depth). Reached only at 100 % top-divergence, with every selected crossing spawning a full fan.">
                 ≤ {chordCap(nChords, branch, depth)} chords
               </span>
             )}
@@ -516,7 +526,7 @@ export default function CascadePanel() {
                 {certify && cross < 3 * nPatches &&
                   ' — few crossings per patch; consider more chords'}
                 {branch > 0 && ' — upper bound: child rays are half-length and only spawn'
-                  + ' from chords that crossed something'}
+                  + ` from the top ${branchTopPct} % most divergent crossings of each generation`}
                 {k > 9 && ' — k>9: beyond calibrated range (verdicts still self-calibrated)'}
               </div>
             );
@@ -542,6 +552,11 @@ export default function CascadePanel() {
                 <span title="chord probe spacing this run was started with (0.025 = protocol of record ≈ 1 fine cell)">
                   stride {(status.stride ?? STRIDE_REF).toFixed(3)}
                 </span>
+                {(status.branch ?? 0) > 0 && (
+                  <span title="branching this run was started with: rays per selected crossing, generations of them, and the divergence percentile that picked the origins (at least one crossing per generation)">
+                    branch {status.branch} · depth {status.depth ?? 0} · top {status.branch_top_pct ?? 20} %
+                  </span>
+                )}
                 {status.bg_p95 !== null && (
                   <span title="background = the run's own measured drift at the same step size; certified means B beats its 95th percentile">
                     background p95 {status.bg_p95.toFixed(2)}

@@ -63,7 +63,8 @@ async def start(req: CascadeStartRequest, request: Request):
         guidance_scale=req.guidance_scale, n_chords=req.n_chords,
         n_patches=req.n_patches, focus=req.focus, focus_radius=req.focus_radius,
         probe_steps=req.probe_steps, stride=req.stride, certify=req.certify,
-        branch=req.branch, depth=req.depth, chord_seed=req.chord_seed,
+        branch=req.branch, depth=req.depth, branch_top_pct=req.branch_top_pct,
+        chord_seed=req.chord_seed,
         trace=req.trace, trace_steps=req.trace_steps, trace_certify=req.trace_certify)
     run.thumbs = ThumbnailStore(app.state.cache)
     run._target_sim = req.target_sim
@@ -124,6 +125,8 @@ async def status(run_id: str, request: Request):
                 for c in getattr(run, "chords_geo", [])],
         chords_meta=[CascadeChordMeta(**m) for m in getattr(run, "chords_meta", [])],
         stride=float(getattr(run, "stride", cs.STRIDE)),
+        branch=int(getattr(run, "branch", 0)), depth=int(getattr(run, "depth", 0)),
+        branch_top_pct=int(getattr(run, "branch_top_pct", 20)),
         certify=bool(getattr(run, "certify", True)),
         crossings=[CascadeCrossing(
             cid=x.cid, weights=[float(v) for v in x.mid] if x.mid is not None

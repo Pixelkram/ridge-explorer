@@ -91,14 +91,17 @@ class CascadeRun:
     # sit closer together than one stride and costs probes as 1/stride. Detection only: the
     # continuation walk's corrector spacing (PC_DS) stays at STRIDE whatever this says.
     stride: float = STRIDE
-    # recursive ("branching") chord exploration: children per chord (0 = off) and how many
-    # generations of them to spawn. Generation 0 is the fair isotropic-uniform survey; a child
-    # is a RAY out of its parent's strongest crossing, so children are PREFERENTIAL samples --
-    # they land where a boundary already is. Fair-area statistics (the Good-Turing coverage
-    # certificate) are therefore quoted on generation 0 alone; the local-density map, whose
-    # ratio estimator only needs isotropic DIRECTIONS, uses every chord.
+    # recursive ("branching") chord exploration: children per selected crossing (0 = off) and
+    # how many generations of them to spawn. Generation 0 is the fair isotropic-uniform survey;
+    # a child is a RAY out of a crossing, so children are PREFERENTIAL samples -- they land
+    # where a boundary already is. Fair-area statistics (the Good-Turing coverage certificate)
+    # are therefore quoted on generation 0 alone; the local-density map, whose ratio estimator
+    # only needs isotropic DIRECTIONS, uses every chord.
     branch: int = 0
     depth: int = 0
+    # which crossings of a generation become the next generation's origins: the top this-many %
+    # by probe-to-probe divergence (_branch_origins).
+    branch_top_pct: int = 20
     # survey randomness (chords, background pairs, patches) apart from the image seed; None = seed. Lets several
     # surveys of ONE image field be compared against a single dense ground truth.
     chord_seed: int | None = None
@@ -230,6 +233,24 @@ def _norm_emb(e):
     e = np.asarray(e, dtype=np.float64)
     n = np.linalg.norm(e)
     return e / n if n > 0 else e
+
+
+def _branch_origins(crossings, pct):
+    """Which crossings of one generation spawn the next: the top `pct` % by probe-to-probe
+    divergence, at least one, strongest first.
+
+    Replaces the one-origin-per-chord rule of 733f3d1. A chord is an accident of the survey
+    geometry, so spending one fan per crossing-bearing chord spread the branching budget evenly
+    over chords instead of over evidence; ranking the generation's crossings puts the fans where
+    the field diverged most, and lets one chord contribute several origins or none.
+    """
+    xs = list(crossings)
+    if not xs:
+        return []
+    n = max(1, math.ceil(len(xs) * pct / 100.0))
+    # stable sort: equally divergent crossings keep their detection order (cid), so the fans a
+    # given survey spawns do not depend on how numpy happened to break a tie
+    return sorted(xs, key=lambda x: _cosd(x.ea, x.eb), reverse=True)[:n]
 
 
 _EVAL_SEQ = [0]
@@ -1079,6 +1100,7 @@ def run_cascade(app, run, pool):
     run.phase_total = 0
     run.phase_done = 0
     found_prev = {}
+    prev_x, origins = [], []      # generation g-1's crossings and the ones that spawned gen g
     for g in range(run.depth + 1 if run.branch > 0 else 1):
         if run.status != "running" or len(chords) >= max_chords:
             break
@@ -1107,13 +1129,16 @@ def run_cascade(app, run, pool):
                     f"only {len(chords)}/{run.n_chords} chords long enough at k={k}; "
                     "continuing")
         else:
-            # A fan of RAYS out of every chord that crossed something, from the midpoint of
-            # its STRONGEST bracket and forward only (t >= 0), so the sheet it was spawned
-            # from sits at the origin and _detect's first-bracket skip drops it.
-            for ci in sorted(found_prev):
+            # A fan of RAYS out of the previous generation's most divergent crossings (the top
+            # branch_top_pct %), from the midpoint of each one's bracket and forward only
+            # (t >= 0), so the sheet it was spawned from sits at the origin and _detect's
+            # first-bracket skip drops it.
+            parent_of = {x.cid: ci for ci in found_prev for x in found_prev[ci]}
+            prev_x = [x for ci in sorted(found_prev) for x in found_prev[ci]]
+            origins = _branch_origins(prev_x, run.branch_top_pct)
+            for x in origins:
                 if len(chords) >= max_chords:
                     break
-                x = max(found_prev[ci], key=lambda c: _cosd(c.ea, c.eb))
                 w0 = np.clip((x.wa + x.wb) / 2, 0, None)
                 for _ in range(run.branch):
                     if len(chords) >= max_chords:
@@ -1126,7 +1151,8 @@ def run_cascade(app, run, pool):
                         if cl is None:
                             continue
                         lo, hi = cl
-                    _add_chord(w0, u, lo, hi, g, ci, x.cid, chord_pts, chord_meta)
+                    _add_chord(w0, u, lo, hi, g, parent_of[x.cid], x.cid,
+                               chord_pts, chord_meta)
             if not chord_pts:
                 break
         run.phase_total += len(chord_pts)
@@ -1159,7 +1185,12 @@ def run_cascade(app, run, pool):
         if run.branch > 0:
             n_gen = sum(1 for m in run.chords_meta if m["gen"] == g)
             n_new = sum(len(v) for v in found_prev.values())
-            run.notes.append(f"gen {g}: {n_gen} chords, {n_new} crossings")
+            run.notes.append(
+                f"gen {g}: {n_gen} chords"
+                + ("" if g == 0 else
+                   f" from {len(origins)} origins "
+                   f"(top {run.branch_top_pct} % of {len(prev_x)} crossings)")
+                + f", {n_new} crossings")
         else:
             run.notes.append(f"{len(chords)} chords, {len(cand)} crossings")
     if run.branch > 0:
