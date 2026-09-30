@@ -93,7 +93,8 @@ def _survey(k=4, n_chords=4, branch=0, depth=0, seed=11, stride=cs.STRIDE):
     run = cs.CascadeRun(
         run_id="t", prompts=[f"p{i}" for i in range(k)], seed=seed, steps=8, height=64,
         width=64, guidance_scale=3.5, n_chords=n_chords, n_patches=2, stride=stride,
-        branch=branch, depth=depth, probe_steps=None)   # None skips the rebracket pass
+        branch=branch, depth=depth, probe_steps=None,   # None skips the rebracket pass
+        certify=True)   # the full pipeline, so the stub still stops the run AT the bisection
     probes = {}
     orig = cs.evaluate
     cs.evaluate = _stub_evaluate(run, _band_field(k), probes)

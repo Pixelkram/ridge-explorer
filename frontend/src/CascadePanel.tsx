@@ -30,6 +30,12 @@ const WARN = '#e94560';
 const CELL = 0.0236;         // one fine patch cell -- the unit the stride slider reads out in
 const STRIDE_REF = 0.025;    // chord probe spacing of record; the cost model below is quoted at it
 const CERT_NO = '#8a93b8';   // the map's grey for "not significant", reused for stations that did not certify
+// What a detection-only run cannot do, in the backend's own words (routers/cascade.py).
+const UNCERT = 'run was detection-only: no bisected crossings — re-run with certify on';
+const CERTIFY_TIP = 'off (default): detection only — bracket-precision positions, no '
+  + 'certification, no patches; ~6× cheaper per crossing. on: rebracket + bisect + 4-seed '
+  + 'score every detected crossing (~12 images each) → certified boundaries, patches, walks. '
+  + 'The boundary-density overlay and the coverage count still work (uncertified)';
 
 // Total chords a branching survey may draw: the geometric sum n*(1 + b + ... + b^depth),
 // with branch=1 the ratio formula's removable singularity. A cap, not a target -- a
@@ -62,11 +68,13 @@ const PHASES: [string, string][] = [
 ];
 
 function PhaseBar({ status }: { status: CascadeStatus }) {
-  const idx = PHASES.findIndex(([p]) => p === status.phase);
+  // a detection-only run stops after the chords: the phases it never runs must not light up
+  const phases = status.certify === false ? PHASES.slice(0, 1) : PHASES;
+  const idx = phases.findIndex(([p]) => p === status.phase);
   const done = status.phase === 'done' || status.status === 'complete';
   return (
     <div style={{ display: 'flex', gap: 4, margin: '8px 0 2px' }}>
-      {PHASES.map(([key, label], i) => {
+      {phases.map(([key, label], i) => {
         const active = !done && i === idx;
         const past = done || i < idx;
         const frac = active && status.phase_total > 0
@@ -91,9 +99,9 @@ function PhaseBar({ status }: { status: CascadeStatus }) {
   );
 }
 
-function CrossingCard({ c, runId, selected, onClick }: {
+function CrossingCard({ c, runId, selected, uncertified, onClick }: {
   c: CascadeStatus['crossings'][number]; runId: string;
-  selected: boolean; onClick: () => void;
+  selected: boolean; uncertified?: boolean; onClick: () => void;
 }) {
   const scored = c.b !== null;
   return (
@@ -112,7 +120,8 @@ function CrossingCard({ c, runId, selected, onClick }: {
       <div style={{ padding: '3px 5px 5px' }}>
         <div style={{ display: 'flex', justifyContent: 'space-between',
                       fontSize: 10, color: c.significant ? ACCENT : '#8a93b8' }}>
-          <span>{scored ? `B ${c.b!.toFixed(2)}` : 'pinning…'}</span>
+          <span>{scored ? `B ${c.b!.toFixed(2)}`
+                        : uncertified ? 'uncertified' : 'pinning…'}</span>
           {c.ridge_group !== null && (
             <span style={{ color: '#667' }}>r{c.ridge_group}</span>
           )}
@@ -179,6 +188,7 @@ export default function CascadePanel() {
   const [branch, setBranch] = useState(0);
   const [depth, setDepth] = useState(0);
   const [trace, setTrace] = useState(false);
+  const [certify, setCertify] = useState(false);
   const [nPatches, setNPatches] = useState(4);
   const [seed, setSeed] = useState(42);
   const [promptText, setPromptText] = useState('');
@@ -229,6 +239,7 @@ export default function CascadePanel() {
         prompts: status.prompts,
         n_chords: nChords,
         n_patches: nPatches,
+        certify,
         stride,
         branch,
         depth,
@@ -301,6 +312,7 @@ export default function CascadePanel() {
         prompts: lines.length ? lines : null,
         n_chords: nChords,
         n_patches: nPatches,
+        certify,
         stride,
         branch,
         depth,
@@ -362,6 +374,8 @@ export default function CascadePanel() {
   }, [svOn, runId, status?.status, fetchSv]);
 
   const running = status?.status === 'running';
+  // this RUN was started with certify off, whatever the checkbox says now
+  const uncert = status?.certify === false;
   const sigCount = status?.crossings.filter((c) => c.significant).length ?? 0;
   const scored = status?.crossings.filter((c) => c.b !== null) ?? [];
   const sorted = [...(status?.crossings ?? [])]
@@ -436,17 +450,32 @@ export default function CascadePanel() {
                 ≤ {chordCap(nChords, branch, depth)} chords
               </span>
             )}
-            <label title="how many boundary walks you want to see (25 images each); one slot is ALWAYS the exploration floor">
+            <label className="rx-focus" title={CERTIFY_TIP}
+                   style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <input type="checkbox" checked={certify}
+                     onChange={(e) => {
+                       setCertify(e.target.checked);
+                       // the trace phase walks certified crossings; nothing to walk without them
+                       if (!e.target.checked) setTrace(false);
+                     }} /> certify crossings
+            </label>
+            <label title={'how many boundary walks you want to see (25 images each); one slot is ALWAYS the exploration floor'
+                          + (certify ? '' : ' — off with "certify crossings" unchecked: a detection-only run renders no patches')}
+                   style={{ color: certify ? undefined : '#667' }}>
               patches <input style={NUM} type="number" min={2} value={nPatches}
+                             disabled={!certify}
                              onChange={(e) => setNPatches(Number(e.target.value))} />
             </label>
             <label title="a style lever, not a quality dial: same prompts + new seed = a genuinely different boundary map (measured). Fix it to compare settings; change it for another atlas">
               seed <input style={NUM} type="number" value={seed}
                           onChange={(e) => setSeed(Number(e.target.value))} />
             </label>
-            <label className="rx-focus" title="after the survey, walk both ways from every certified crossing (continuation walk), check the stations on unseen seeds, and link crossings a walk reaches: one ridge often shows up as several crossings whose side images no longer match. Draws the ridges on the map and recomputes the unexplored share. Adds a few minutes."
-                   style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-              <input type="checkbox" checked={trace} onChange={(e) => setTrace(e.target.checked)} /> trace ridges
+            <label className="rx-focus" title={'after the survey, walk both ways from every certified crossing (continuation walk), check the stations on unseen seeds, and link crossings a walk reaches: one ridge often shows up as several crossings whose side images no longer match. Draws the ridges on the map and recomputes the unexplored share. Adds a few minutes.'
+                     + (certify ? '' : ' — needs certified crossings: ' + UNCERT)}
+                   style={{ display: 'inline-flex', alignItems: 'center', gap: 4,
+                            color: certify ? undefined : '#667' }}>
+              <input type="checkbox" checked={trace} disabled={!certify}
+                     onChange={(e) => setTrace(e.target.checked)} /> trace ridges
             </label>
             <button onClick={start} disabled={running}
                     style={{ background: running ? '#333' : '#0f3460',
@@ -472,14 +501,19 @@ export default function CascadePanel() {
             const cross = Math.max(1, Math.round((chordTotal * 7) / k));
             // 110/k probes per chord is measured AT the stride of record; the count is ~1/stride
             const probeImgs = ((chordTotal * 110) / k) * (STRIDE_REF / stride);
-            const imgs = Math.round(probeImgs + cross * 4
-                                    + (cross + 12) * 8 + nPatches * 25);
+            // detection only: the probes are the whole bill -- nothing is rebracketed,
+            // bisected, scored or refined
+            const imgs = Math.round(certify
+              ? probeImgs + cross * 4 + (cross + 12) * 8 + nPatches * 25
+              : probeImgs);
             // probes run at 4 denoising steps (gated: 93%/94% recall) ~ half price
             const mins = Math.max(1, Math.round((imgs - probeImgs * 0.5) / 8 / 60));
             return (
               <div style={{ color: '#667', marginTop: 4, fontSize: 11 }}>
                 estimate: ≤~{imgs} images · ≤~{mins} min · ~{cross} crossings
-                {cross < 3 * nPatches &&
+                {!certify && ' — detection only: uncertified, bracket-precision positions,'
+                  + ' no patches and no walks'}
+                {certify && cross < 3 * nPatches &&
                   ' — few crossings per patch; consider more chords'}
                 {branch > 0 && ' — upper bound: child rays are half-length and only spawn'
                   + ' from chords that crossed something'}
@@ -516,6 +550,11 @@ export default function CascadePanel() {
                 {scored.length > 0 && (
                   <span style={{ color: ACCENT }}>
                     {sigCount}/{scored.length} certified
+                  </span>
+                )}
+                {uncert && (
+                  <span style={{ color: '#c9a227' }} title={CERTIFY_TIP}>
+                    {status.crossings.length} crossings · detection only · uncertified
                   </span>
                 )}
                 {status.unexplored_share !== null && status.distinct_ridges !== null && (
@@ -639,20 +678,29 @@ export default function CascadePanel() {
 
                   </label>
                   <button onClick={() => startWalk(-1)}
-                          disabled={walk?.status === 'running'}
+                          disabled={walk?.status === 'running' || uncert}
+                          title={uncert ? UNCERT : undefined}
                           style={{ background: '#0f3460', color: '#fff',
                                    border: `1px solid ${WARN}`, borderRadius: 3,
                                    padding: '2px 10px', marginRight: 6,
-                                   cursor: 'pointer' }}>
+                                   opacity: uncert ? 0.5 : 1,
+                                   cursor: uncert ? 'default' : 'pointer' }}>
                     ← 5 steps
                   </button>
                   <button onClick={() => startWalk(1)}
-                          disabled={walk?.status === 'running'}
+                          disabled={walk?.status === 'running' || uncert}
+                          title={uncert ? UNCERT : undefined}
                           style={{ background: '#0f3460', color: '#fff',
                                    border: `1px solid ${WARN}`, borderRadius: 3,
-                                   padding: '2px 10px', cursor: 'pointer' }}>
+                                   padding: '2px 10px', opacity: uncert ? 0.5 : 1,
+                                   cursor: uncert ? 'default' : 'pointer' }}>
                     5 steps →
                   </button>
+                  {uncert && (
+                    <span style={{ color: '#c9a227', marginLeft: 10, fontSize: 11 }}>
+                      {UNCERT}
+                    </span>
+                  )}
                   {walk && (
                     <span style={{ color: '#888', marginLeft: 10 }}>
                       {walk.status === 'running'
@@ -729,6 +777,7 @@ export default function CascadePanel() {
                     {sorted.map((c) => (
                       <CrossingCard key={c.cid} c={c} runId={runId}
                                     selected={selCid === c.cid}
+                                    uncertified={uncert}
                                     onClick={() => {
                                       select(c.cid);
                                       openDetail(c.thumb, `crossing ${c.cid}`, [

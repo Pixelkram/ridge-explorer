@@ -265,6 +265,10 @@ export interface CascadeStartRequest {
   target_sim?: number;
   n_chords?: number;
   n_patches?: number;
+  // full pipeline per detected crossing (rebracket + bisect + 4-seed score + patches), or
+  // detection alone. OFF by default: ~6x cheaper per crossing, and the run stays uncertified
+  // -- bracket-precision positions, no B, no patches, no walks
+  certify?: boolean;
   seed?: number;
   steps?: number;
   // focused exploration: confine the survey to a ball around this recipe
@@ -371,6 +375,9 @@ export interface CascadeStatus {
   chords_meta?: CascadeChordMeta[];
   // the chord probe spacing this run was started with
   stride?: number;
+  // false = detection only: the crossings were never bisected or scored, so their positions
+  // carry bracket precision (+-stride/2) and b/significant mean nothing
+  certify?: boolean;
   crossings: CascadeCrossing[];
   bg_mean: number | null;
   bg_p95: number | null;

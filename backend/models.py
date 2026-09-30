@@ -434,6 +434,11 @@ class CascadeStartRequest(BaseModel):
     # Refined regions; one slot is ALWAYS the exploration floor (E77: ranking must
     # not decide what is never inspected).
     n_patches: int = Field(4, ge=2)
+    # Run the full pipeline on every detected crossing (rebracket, bisection, coupled-seed B,
+    # patches), or stop after detection. The default is OFF: detection alone is ~6x cheaper per
+    # crossing, and leaves the run UNCERTIFIED -- positions at bracket precision (+-stride/2),
+    # no B, no patches, no walks. Turn it on for certified boundaries.
+    certify: bool = False
     # focused exploration: confine the survey to a ball around this recipe
     # (requires pinned prompts so the weights refer to a known basis)
     focus: list[float] | None = None
@@ -601,6 +606,11 @@ class CascadeStatus(BaseModel):
     chords_meta: list[CascadeChordMeta] = []
     # the chord probe spacing this run was started with (0.025 = protocol of record)
     stride: float = 0.025
+    # False = detection only: the crossings below were never bisected or scored, so their
+    # positions carry bracket precision (+-stride/2) and b/significant mean nothing. The
+    # default here is the back-compatible reading (a status without the field predates the
+    # flag, so it ran the full pipeline); the REQUEST's default is off.
+    certify: bool = True
     crossings: list[CascadeCrossing] = []
     bg_mean: float | None = None
     bg_p95: float | None = None

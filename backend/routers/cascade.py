@@ -28,6 +28,12 @@ from backend.cache.thumbnail_cache import ThumbnailStore
 
 router = APIRouter(prefix="/api/cascade", tags=["cascade"])
 
+# A run started with certify off stops after the chord phase: its crossings were never
+# bisected or scored, so everything that reads a pinned `mid` or a `b`/`significant` verdict
+# (walks, walk certification, the trace phase, the certified-only density map) has nothing to
+# stand on and says so rather than quietly answering from bracket-precision guesses.
+DETECTION_ONLY = "run was detection-only: no bisected crossings — re-run with certify on"
+
 
 def _runs(app):
     app.state.cascades = getattr(app.state, "cascades", {})
@@ -56,7 +62,7 @@ async def start(req: CascadeStartRequest, request: Request):
         seed=req.seed, steps=req.steps, height=req.height, width=req.width,
         guidance_scale=req.guidance_scale, n_chords=req.n_chords,
         n_patches=req.n_patches, focus=req.focus, focus_radius=req.focus_radius,
-        probe_steps=req.probe_steps, stride=req.stride,
+        probe_steps=req.probe_steps, stride=req.stride, certify=req.certify,
         branch=req.branch, depth=req.depth, chord_seed=req.chord_seed,
         trace=req.trace, trace_steps=req.trace_steps, trace_certify=req.trace_certify)
     run.thumbs = ThumbnailStore(app.state.cache)
@@ -118,6 +124,7 @@ async def status(run_id: str, request: Request):
                 for c in getattr(run, "chords_geo", [])],
         chords_meta=[CascadeChordMeta(**m) for m in getattr(run, "chords_meta", [])],
         stride=float(getattr(run, "stride", cs.STRIDE)),
+        certify=bool(getattr(run, "certify", True)),
         crossings=[CascadeCrossing(
             cid=x.cid, weights=[float(v) for v in x.mid] if x.mid is not None
             else [float(v) for v in (x.wa + x.wb) / 2],
@@ -163,6 +170,10 @@ async def local_sv_map(run_id: str, request: Request, h: float = lsv.H_DEFAULT,
         raise HTTPException(status_code=404, detail="no such run")
     if mode not in ("all", "certified"):
         raise HTTPException(status_code=400, detail="mode must be 'all' or 'certified'")
+    if mode == "certified" and not getattr(run, "certify", True):
+        # mode=all is the estimator of record and reads the same chords either way; the
+        # certified filter would silently return an all-zero numerator instead
+        raise HTTPException(status_code=400, detail=DETECTION_ONLY)
     if not (0.01 <= h <= 1.0):
         raise HTTPException(status_code=400, detail="h must lie in [0.01, 1.0]")
     chords, crossings, k = lsv.from_run(run)
@@ -203,6 +214,8 @@ async def walk_start(run_id: str, req: WalkStartRequest, request: Request):
     run = _runs(app).get(run_id)
     if run is None:
         return WalkStatus(walk_id="", status="error", error="no such run")
+    if not getattr(run, "certify", True):
+        raise HTTPException(status_code=409, detail=DETECTION_ONLY)
     if not any(x.cid == req.cid and x.mid is not None for x in run.crossings):
         return WalkStatus(walk_id="", status="error",
                           error="crossing not found (or run still bisecting)")
@@ -247,6 +260,10 @@ async def walk_certify(run_id: str, walk_id: str, request: Request):
     """Re-measure a finished walk's stations on held-out seeds (cs.certify_walk); poll the walk for `cert`."""
     app = request.app
     run = _runs(app).get(run_id)
+    if run is not None and not getattr(run, "certify", True):
+        # no walk can exist on such a run (walk_start refuses), and certification reads the
+        # run's measured background, which the score phase never produced
+        raise HTTPException(status_code=409, detail=DETECTION_ONLY)
     walk = getattr(run, "walks", {}).get(walk_id) if run is not None else None
     if walk is None:
         return WalkStatus(walk_id=walk_id, status="unknown", error="no such walk")

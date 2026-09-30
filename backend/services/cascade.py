@@ -79,6 +79,13 @@ class CascadeRun:
     # recall, 94% certified recall vs full steps, 1 spurious; bracket endpoints
     # are re-rendered at full fidelity before bisection). None = full steps.
     probe_steps: int | None = 4
+    # full pipeline per detected crossing (rebracket, bisection, coupled-seed B, patches), or
+    # detection alone. OFF by default: detection leaves every crossing on its cheap bracket --
+    # mid quoted at bracket precision (+-stride/2), b None, significant False -- and skips
+    # patches, walks and the trace phase. The chord geometry, the cheap side signatures and
+    # everything read off them (the coverage certificate, the local-density map) are the same
+    # objects a full run leaves.
+    certify: bool = False
     # chord probe spacing, in Euclidean weight-space units along the unit chord direction.
     # STRIDE (0.025, ~1 fine cell) is the protocol of record; finer resolves boundaries that
     # sit closer together than one stride and costs probes as 1/stride. Detection only: the
@@ -1059,7 +1066,10 @@ def run_cascade(app, run, pool):
                         cid=-1,
                         wa=np.clip(w0 + offs[i1] * u, 0, None),
                         wb=np.clip(w0 + offs[i2] * u, 0, None),
-                        ea=e1, eb=e2, gen=gen))
+                        ea=e1, eb=e2, gen=gen,
+                        # detection-only runs never render a mid image: show a bracket end
+                        # instead (both are one half-stride from the midpoint they quote)
+                        thumb=g1 if not run.certify else -1))
         for ci in sorted(found):
             for x in found[ci]:
                 x.cid = len(cand)
@@ -1160,7 +1170,7 @@ def run_cascade(app, run, pool):
             f"({n_rootx} on roots); the coverage certificate uses the roots only "
             "-- child rays are preferential samples"
             + (f"; chord cap {max_chords} reached" if len(chords) >= max_chords else ""))
-    if cand and run.probe_steps is not None and run.probe_steps != run.steps:
+    if cand and run.certify and run.probe_steps is not None and run.probe_steps != run.steps:
         # detection ran on the cheap field; hand bisection full-fidelity side images
         ws = []
         for x in cand:
@@ -1180,6 +1190,25 @@ def run_cascade(app, run, pool):
         run.status = "complete"
         run.phase = "done"
         run.notes.append("no boundary crossings found -- try more chords or other prompts")
+        return
+    if not run.certify:
+        # Detection only: every crossing is quoted at the centre of the cheap bracket that
+        # found it, with the chord direction as its normal. Nothing downstream of the chords
+        # runs, so b/significant stay unset -- but ea/eb are the probe embeddings the coverage
+        # certificate and the local-density map read either way, so both still work.
+        for x in cand:
+            x.mid = (x.wa + x.wb) / 2
+            d = x.wb - x.wa
+            nn = np.linalg.norm(d)
+            x.n = d / nn if nn > 1e-9 else _iso_dir(k, rng)
+            x.b, x.significant = None, False
+        run.notes.append("detection only: crossings uncertified, positions at bracket "
+                         "precision (±stride/2); no patches")
+        if run.trace:
+            run.notes.append("trace phase skipped: it walks certified crossings only")
+        run.phase = "done"
+        run.status = "complete"
+        run.notes.append(f"total images: {run.generated}")
         return
 
     # ---------------- phase 2: bisection (parallel rounds)
