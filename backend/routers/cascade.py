@@ -56,7 +56,7 @@ async def start(req: CascadeStartRequest, request: Request):
         seed=req.seed, steps=req.steps, height=req.height, width=req.width,
         guidance_scale=req.guidance_scale, n_chords=req.n_chords,
         n_patches=req.n_patches, focus=req.focus, focus_radius=req.focus_radius,
-        probe_steps=req.probe_steps, chord_seed=req.chord_seed,
+        probe_steps=req.probe_steps, stride=req.stride, chord_seed=req.chord_seed,
         trace=req.trace, trace_steps=req.trace_steps, trace_certify=req.trace_certify)
     run.thumbs = ThumbnailStore(app.state.cache)
     run._target_sim = req.target_sim
@@ -105,6 +105,7 @@ async def status(run_id: str, request: Request):
         point_divs=list(getattr(run, "probe_div", [])),
         chords=[CascadeChord(a=c[0], b=c[1])
                 for c in getattr(run, "chords_geo", [])],
+        stride=float(getattr(run, "stride", cs.STRIDE)),
         crossings=[CascadeCrossing(
             cid=x.cid, weights=[float(v) for v in x.mid] if x.mid is not None
             else [float(v) for v in (x.wa + x.wb) / 2],

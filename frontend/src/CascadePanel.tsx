@@ -27,6 +27,8 @@ const NUM: React.CSSProperties = {
 };
 const ACCENT = '#4ecca3';
 const WARN = '#e94560';
+const CELL = 0.0236;         // one fine patch cell -- the unit the stride slider reads out in
+const STRIDE_REF = 0.025;    // chord probe spacing of record; the cost model below is quoted at it
 const CERT_NO = '#8a93b8';   // the map's grey for "not significant", reused for stations that did not certify
 
 // Presets k=3..16 from the measured yield model: chords = max(12, ceil(12k/7)) keeps
@@ -167,6 +169,7 @@ export default function CascadePanel() {
   const [open, setOpen] = useState(false);
   const [k, setK] = useState(4);
   const [nChords, setNChords] = useState(24);
+  const [stride, setStride] = useState(STRIDE_REF);
   const [trace, setTrace] = useState(false);
   const [nPatches, setNPatches] = useState(4);
   const [seed, setSeed] = useState(42);
@@ -218,6 +221,7 @@ export default function CascadePanel() {
         prompts: status.prompts,
         n_chords: nChords,
         n_patches: nPatches,
+        stride,
         seed,
         focus: weights,
         trace,
@@ -287,6 +291,7 @@ export default function CascadePanel() {
         prompts: lines.length ? lines : null,
         n_chords: nChords,
         n_patches: nPatches,
+        stride,
         seed,
         trace,
       });
@@ -387,6 +392,16 @@ export default function CascadePanel() {
               chords <input style={NUM} type="number" min={4} value={nChords}
                             onChange={(e) => setNChords(Number(e.target.value))} />
             </label>
+            <label title="chord probe spacing (0.025 = protocol of record ≈ 1 fine cell); finer resolves close boundaries but costs ∝ 1/stride; coarser merges crossings closer than one stride"
+                   style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              stride
+              <input type="range" min={0.01} max={0.2} step={0.005} value={stride}
+                     onChange={(e) => setStride(Number(e.target.value))}
+                     style={{ width: 78 }} />
+              <span style={{ color: '#8a9' }}>
+                {stride.toFixed(3)} · ≈{(stride / CELL).toFixed(1)} cells
+              </span>
+            </label>
             <label title="how many boundary walks you want to see (25 images each); one slot is ALWAYS the exploration floor">
               patches <input style={NUM} type="number" min={2} value={nPatches}
                              onChange={(e) => setNPatches(Number(e.target.value))} />
@@ -417,7 +432,8 @@ export default function CascadePanel() {
           </div>
           {(() => {
             const cross = Math.max(1, Math.round((nChords * 7) / k));
-            const probeImgs = (nChords * 110) / k;
+            // 110/k probes per chord is measured AT the stride of record; the count is ~1/stride
+            const probeImgs = ((nChords * 110) / k) * (STRIDE_REF / stride);
             const imgs = Math.round(probeImgs + cross * 4
                                     + (cross + 12) * 8 + nPatches * 25);
             // probes run at 4 denoising steps (gated: 93%/94% recall) ~ half price
@@ -449,6 +465,9 @@ export default function CascadePanel() {
                   {status.status}
                 </span>
                 <span>{status.generated} images</span>
+                <span title="chord probe spacing this run was started with (0.025 = protocol of record ≈ 1 fine cell)">
+                  stride {(status.stride ?? STRIDE_REF).toFixed(3)}
+                </span>
                 {status.bg_p95 !== null && (
                   <span title="background = the run's own measured drift at the same step size; certified means B beats its 95th percentile">
                     background p95 {status.bg_p95.toFixed(2)}

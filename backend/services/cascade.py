@@ -76,6 +76,11 @@ class CascadeRun:
     # recall, 94% certified recall vs full steps, 1 spurious; bracket endpoints
     # are re-rendered at full fidelity before bisection). None = full steps.
     probe_steps: int | None = 4
+    # chord probe spacing, in Euclidean weight-space units along the unit chord direction.
+    # STRIDE (0.025, ~1 fine cell) is the protocol of record; finer resolves boundaries that
+    # sit closer together than one stride and costs probes as 1/stride. Detection only: the
+    # continuation walk's corrector spacing (PC_DS) stays at STRIDE whatever this says.
+    stride: float = STRIDE
     # survey randomness (chords, background pairs, patches) apart from the image seed; None = seed. Lets several
     # surveys of ONE image field be compared against a single dense ground truth.
     chord_seed: int | None = None
@@ -167,6 +172,21 @@ def _extent(w, u):
     tpos = min((w[i] / -u[i]) for i in range(len(w)) if u[i] < 0)
     tneg = max((-w[i] / u[i]) for i in range(len(w)) if u[i] > 0)
     return tneg, tpos
+
+
+def _chord_offsets(tneg, tpos, stride):
+    """Probe offsets along one chord: tneg, tneg+stride, ... while inside tpos.
+
+    One source for the probes and for the brackets a crossing is quoted at, so probe
+    index i means the same offset in both places.
+    """
+    return [tneg + i * stride for i in range(int((tpos - tneg) / stride) + 1)]
+
+
+def _min_chord_len(stride):
+    """Shortest chord worth probing. 0.15 is the 6*STRIDE of record; the 2*stride arm
+    takes over at coarse strides and keeps >= 3 probes (>= 2 neighbour pairs) per chord."""
+    return max(0.15, 2 * stride)
 
 
 def _cosd(a, b):
@@ -972,16 +992,17 @@ def run_cascade(app, run, pool):
             root = float(np.sqrt(disc))
             tneg = max(tneg, -b - root)
             tpos = min(tpos, -b + root)
-        if tpos - tneg < 6 * STRIDE:
+        if tpos - tneg < _min_chord_len(run.stride):
             continue
         ci = len(chords)
-        chords.append((w0, u, tneg))     # keep the PROBED offset: focus mode clips it,
+        offs = _chord_offsets(tneg, tpos, run.stride)
+        chords.append((w0, u, offs))     # keep the PROBED offsets: focus mode clips them,
         anchors.append(w0)               # so recomputing from walls would misplace brackets
         run.chords_geo.append((
             [float(v) for v in np.clip(w0 + tneg * u, 0, None)],
             [float(v) for v in np.clip(w0 + tpos * u, 0, None)]))
-        for i in range(int((tpos - tneg) / STRIDE) + 1):
-            chord_pts.append(np.clip(w0 + (tneg + i * STRIDE) * u, 0, None))
+        for i, off in enumerate(offs):
+            chord_pts.append(np.clip(w0 + off * u, 0, None))
             chord_meta.append((ci, i))
     if len(chords) < run.n_chords:
         run.notes.append(
@@ -1026,11 +1047,11 @@ def run_cascade(app, run, pool):
                 _set_div(run, g1, dd)
                 _set_div(run, g2, dd)
                 if dd > COS_T:
-                    w0, u, tneg = chords[ci]
+                    w0, u, offs = chords[ci]
                     cand.append(Crossing(
                         cid=len(cand),
-                        wa=np.clip(w0 + (tneg + i1 * STRIDE) * u, 0, None),
-                        wb=np.clip(w0 + (tneg + i2 * STRIDE) * u, 0, None),
+                        wa=np.clip(w0 + offs[i1] * u, 0, None),
+                        wb=np.clip(w0 + offs[i2] * u, 0, None),
                         ea=e1, eb=e2))
     run.notes.append(f"{len(chords)} chords, {len(cand)} crossings")
     if cand and run.probe_steps is not None and run.probe_steps != run.steps:
@@ -1057,7 +1078,9 @@ def run_cascade(app, run, pool):
 
     # ---------------- phase 2: bisection (parallel rounds)
     run.phase = "bisect"
-    est_rounds = max(1, math.ceil(math.log2(STRIDE / BRACKET)))
+    # progress denominator only: at a stride below BRACKET the brackets already arrive
+    # narrow enough and the loop below runs zero rounds (the bar jumps straight to done)
+    est_rounds = max(1, math.ceil(math.log2(run.stride / BRACKET)))
     run.phase_total = len(cand) * est_rounds
     run.phase_done = 0
     while run.status == "running":

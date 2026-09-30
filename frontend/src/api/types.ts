@@ -273,6 +273,8 @@ export interface CascadeStartRequest {
   focus_radius?: number;
   // tier-1 detection steps (default 4: gated at 93%/94% recall, ~2x faster probes)
   probe_steps?: number | null;
+  // chord probe spacing in weight space (default 0.025 = protocol of record, ~1 fine cell)
+  stride?: number;
   // survey randomness apart from the image seed (null = seed)
   chord_seed?: number | null;
   // trace phase: walk every significant crossing both ways, certify, link crossings the walks reach
@@ -350,6 +352,8 @@ export interface CascadeStatus {
   // local divergence per cloud point (aligned with points; null until measured)
   point_divs: (number | null)[];
   chords: CascadeChord[];
+  // the chord probe spacing this run was started with
+  stride?: number;
   crossings: CascadeCrossing[];
   bg_mean: number | null;
   bg_p95: number | null;

@@ -441,6 +441,10 @@ class CascadeStartRequest(BaseModel):
     # tier-1 detection steps (gated: 93%/94% recall at 4 vs 8; ~2x faster probes).
     # null = probe at full fidelity.
     probe_steps: int | None = Field(4, ge=1, le=50)
+    # chord probe spacing in weight space; 0.025 (~1 fine cell) is the protocol of record.
+    # Finer resolves boundaries closer together than one stride at a cost ~1/stride; coarser
+    # merges them. Detection only -- the continuation walk's corrector spacing is unaffected.
+    stride: float = Field(0.025, ge=0.01, le=0.2)
     seed: int = 42
     # survey randomness (chords, background, patches) apart from the image seed; null = seed
     chord_seed: int | None = None
@@ -575,6 +579,8 @@ class CascadeStatus(BaseModel):
     # local divergence per cloud point (aligned with points; null until measured)
     point_divs: list[float | None] = []
     chords: list[CascadeChord] = []
+    # the chord probe spacing this run was started with (0.025 = protocol of record)
+    stride: float = 0.025
     crossings: list[CascadeCrossing] = []
     bg_mean: float | None = None
     bg_p95: float | None = None
