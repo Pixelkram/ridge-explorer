@@ -445,6 +445,13 @@ class CascadeStartRequest(BaseModel):
     # Finer resolves boundaries closer together than one stride at a cost ~1/stride; coarser
     # merges them. Detection only -- the continuation walk's corrector spacing is unaffected.
     stride: float = Field(0.025, ge=0.01, le=0.2)
+    # recursive ("branching") chords: after each chord's strongest crossing, spawn this many
+    # rays out of it and repeat for `depth` generations. 0 = off (one fair generation, the
+    # protocol of record). Root chords stay fair area samples; child rays are exploratory
+    # (preferential), so the coverage certificate is quoted on the roots only. Total chords
+    # are capped at the geometric sum n_chords*(1 + branch + ... + branch^depth).
+    branch: int = Field(0, ge=0, le=6)
+    depth: int = Field(0, ge=0, le=4)
     seed: int = 42
     # survey randomness (chords, background, patches) apart from the image seed; null = seed
     chord_seed: int | None = None
@@ -477,6 +484,15 @@ class CascadeChord(BaseModel):
     b: list[float]
 
 
+class CascadeChordMeta(BaseModel):
+    """Branching provenance of one chord, aligned with `chords`."""
+    # 0 = root (fair isotropic-uniform sample); >= 1 = a child ray, one generation deeper
+    gen: int = 0
+    # chord index this ray was spawned from, and the crossing on it (-1 -1 for roots)
+    parent: int = -1
+    origin_cid: int = -1
+
+
 class CascadeCrossing(BaseModel):
     cid: int
     weights: list[float]
@@ -487,6 +503,8 @@ class CascadeCrossing(BaseModel):
     # thresholds, never a no-step null].
     significant: bool = False
     thumb: int = -1
+    # generation of the chord this crossing sits on (0 = root; >= 1 = a branching child ray)
+    gen: int = 0
     # crossings sharing a ridge_group portray the SAME ridge (side-signature match)
     ridge_group: int | None = None
     # current bisection bracket width (barycentric); ~0.012 = pinned. Drives the
@@ -579,6 +597,8 @@ class CascadeStatus(BaseModel):
     # local divergence per cloud point (aligned with points; null until measured)
     point_divs: list[float | None] = []
     chords: list[CascadeChord] = []
+    # branching provenance per chord, aligned with `chords` (all gen 0 without branching)
+    chords_meta: list[CascadeChordMeta] = []
     # the chord probe spacing this run was started with (0.025 = protocol of record)
     stride: float = 0.025
     crossings: list[CascadeCrossing] = []
@@ -590,6 +610,10 @@ class CascadeStatus(BaseModel):
     distinct_ridges: int | None = None
     singleton_ridges: int | None = None
     unexplored_share: float | None = None
+    # which crossings the certificate above was computed from: "all", or "roots" when
+    # branching was on -- a child ray starts on a boundary, so it is a preferential sample
+    # and would bias an estimate that reads chords as fair samples of boundary AREA.
+    stats_scope: str = "all"
     # trace phase: walked ridges ({cid, direction, walk_id, points, cert, end}), crossing pairs a walk joined, and
     # the coverage certificate recomputed with those links (None without a trace phase)
     traces: list[dict] = []

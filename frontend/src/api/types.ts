@@ -275,6 +275,10 @@ export interface CascadeStartRequest {
   probe_steps?: number | null;
   // chord probe spacing in weight space (default 0.025 = protocol of record, ~1 fine cell)
   stride?: number;
+  // recursive chords: rays spawned from each chord's strongest crossing (0-6, 0 = off) and
+  // how many generations of them (0-4). Roots stay fair area samples, children are exploratory
+  branch?: number;
+  depth?: number;
   // survey randomness apart from the image seed (null = seed)
   chord_seed?: number | null;
   // trace phase: walk every significant crossing both ways, certify, link crossings the walks reach
@@ -310,6 +314,15 @@ export interface CascadeChord {
   b: number[];
 }
 
+// branching provenance of one chord, aligned with `chords`
+export interface CascadeChordMeta {
+  // 0 = root (fair sample); >= 1 = a child ray, one generation deeper
+  gen: number;
+  // chord it was spawned from and the crossing on it (-1 -1 for roots)
+  parent: number;
+  origin_cid: number;
+}
+
 export interface CascadeCrossing {
   cid: number;
   weights: number[];
@@ -318,6 +331,8 @@ export interface CascadeCrossing {
   // true iff b beats the run's own background p95 (never a no-step null)
   significant: boolean;
   thumb: number;
+  // generation of the chord this crossing sits on (0 = root, >= 1 = a child ray)
+  gen?: number;
   // crossings sharing a ridge_group portray the same ridge (free, from tier-1)
   ridge_group: number | null;
   // current bisection bracket width; ~0.012 = pinned (drives the lock-on reticle)
@@ -352,6 +367,8 @@ export interface CascadeStatus {
   // local divergence per cloud point (aligned with points; null until measured)
   point_divs: (number | null)[];
   chords: CascadeChord[];
+  // branching provenance per chord, aligned with `chords` (all gen 0 without branching)
+  chords_meta?: CascadeChordMeta[];
   // the chord probe spacing this run was started with
   stride?: number;
   crossings: CascadeCrossing[];
@@ -362,6 +379,9 @@ export interface CascadeStatus {
   distinct_ridges: number | null;
   singleton_ridges: number | null;
   unexplored_share: number | null;
+  // "all", or "roots" when branching was on: child rays start on a boundary, so they are
+  // preferential samples and are left out of the fair-area certificate above
+  stats_scope?: string;
   // trace phase: walked ridges, crossing pairs a walk joined, and the certificate recomputed with those links
   traces?: CascadeTrace[];
   trace_links?: number[][];

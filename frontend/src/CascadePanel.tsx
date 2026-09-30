@@ -31,6 +31,12 @@ const CELL = 0.0236;         // one fine patch cell -- the unit the stride slide
 const STRIDE_REF = 0.025;    // chord probe spacing of record; the cost model below is quoted at it
 const CERT_NO = '#8a93b8';   // the map's grey for "not significant", reused for stations that did not certify
 
+// Total chords a branching survey may draw: the geometric sum n*(1 + b + ... + b^depth),
+// with branch=1 the ratio formula's removable singularity. A cap, not a target -- a
+// generation only fills from parents that actually crossed something.
+const chordCap = (n: number, b: number, d: number) =>
+  b <= 0 ? n : b === 1 ? n * (d + 1) : Math.round((n * (b ** (d + 1) - 1)) / (b - 1));
+
 // Presets k=3..16 from the measured yield model: chords = max(12, ceil(12k/7)) keeps
 // ~3 crossings per patch slot at 4 patches; k>9 is beyond the calibrated range (the
 // significance background still self-calibrates per run, so verdicts stay honest).
@@ -170,6 +176,8 @@ export default function CascadePanel() {
   const [k, setK] = useState(4);
   const [nChords, setNChords] = useState(24);
   const [stride, setStride] = useState(STRIDE_REF);
+  const [branch, setBranch] = useState(0);
+  const [depth, setDepth] = useState(0);
   const [trace, setTrace] = useState(false);
   const [nPatches, setNPatches] = useState(4);
   const [seed, setSeed] = useState(42);
@@ -222,6 +230,8 @@ export default function CascadePanel() {
         n_chords: nChords,
         n_patches: nPatches,
         stride,
+        branch,
+        depth,
         seed,
         focus: weights,
         trace,
@@ -292,6 +302,8 @@ export default function CascadePanel() {
         n_chords: nChords,
         n_patches: nPatches,
         stride,
+        branch,
+        depth,
         seed,
         trace,
       });
@@ -402,6 +414,28 @@ export default function CascadePanel() {
                 {stride.toFixed(3)} · ≈{(stride / CELL).toFixed(1)} cells
               </span>
             </label>
+            <label title="after each chord's strongest crossing, spawn this many rays from it and repeat `depth` times; root chords stay fair samples, child chords are exploratory">
+              branch <input style={NUM} type="number" min={0} max={6} value={branch}
+                            onChange={(e) => {
+                              const b = Math.max(0, Math.min(6, Number(e.target.value)));
+                              setBranch(b);
+                              // branch > 0 with depth 0 would spawn nothing; start at one generation
+                              if (b > 0 && depth === 0) setDepth(1);
+                            }} />
+            </label>
+            <label title="how many generations of child rays to spawn (each generation branches from the previous one's strongest crossings); 0 = none"
+                   style={{ color: branch > 0 ? undefined : '#667' }}>
+              depth <input style={NUM} type="number" min={0} max={4} value={depth}
+                           disabled={branch === 0}
+                           onChange={(e) => setDepth(
+                             Math.max(0, Math.min(4, Number(e.target.value))))} />
+            </label>
+            {branch > 0 && (
+              <span style={{ color: '#8a9', fontSize: 11 }}
+                    title="hard cap on the total chords: the geometric sum chords x (1 + branch + ... + branch^depth). Reached only where every chord keeps finding crossings.">
+                ≤ {chordCap(nChords, branch, depth)} chords
+              </span>
+            )}
             <label title="how many boundary walks you want to see (25 images each); one slot is ALWAYS the exploration floor">
               patches <input style={NUM} type="number" min={2} value={nPatches}
                              onChange={(e) => setNPatches(Number(e.target.value))} />
@@ -431,18 +465,24 @@ export default function CascadePanel() {
             )}
           </div>
           {(() => {
-            const cross = Math.max(1, Math.round((nChords * 7) / k));
+            // branching multiplies the chord budget by the geometric factor; an upper bound,
+            // since child rays are one-armed (half a root's length) and only spawn where a
+            // parent crossed something
+            const chordTotal = chordCap(nChords, branch, depth);
+            const cross = Math.max(1, Math.round((chordTotal * 7) / k));
             // 110/k probes per chord is measured AT the stride of record; the count is ~1/stride
-            const probeImgs = ((nChords * 110) / k) * (STRIDE_REF / stride);
+            const probeImgs = ((chordTotal * 110) / k) * (STRIDE_REF / stride);
             const imgs = Math.round(probeImgs + cross * 4
                                     + (cross + 12) * 8 + nPatches * 25);
             // probes run at 4 denoising steps (gated: 93%/94% recall) ~ half price
             const mins = Math.max(1, Math.round((imgs - probeImgs * 0.5) / 8 / 60));
             return (
               <div style={{ color: '#667', marginTop: 4, fontSize: 11 }}>
-                estimate: ~{imgs} images · ~{mins} min · ~{cross} crossings
+                estimate: ≤~{imgs} images · ≤~{mins} min · ~{cross} crossings
                 {cross < 3 * nPatches &&
                   ' — few crossings per patch; consider more chords'}
+                {branch > 0 && ' — upper bound: child rays are half-length and only spawn'
+                  + ' from chords that crossed something'}
                 {k > 9 && ' — k>9: beyond calibrated range (verdicts still self-calibrated)'}
               </div>
             );
@@ -479,16 +519,21 @@ export default function CascadePanel() {
                   </span>
                 )}
                 {status.unexplored_share !== null && status.distinct_ridges !== null && (
-                  <span title="Good-Turing certificate: the share of distinct ridges crossed exactly once estimates the boundary area this survey never crossed. Low = coverage saturated."
+                  <span title={'Good-Turing certificate: the share of distinct ridges crossed exactly once estimates the boundary area this survey never crossed. Low = coverage saturated.'
+                    + (status.stats_scope === 'roots'
+                       ? ' Computed from the ROOT chords alone: a child ray starts on a boundary, so it is a preferential sample and would bias an estimate that reads chords as fair samples of boundary area.'
+                       : '')}
                         style={{ color: status.unexplored_share <= 0.15
                                    ? ACCENT : '#c9a227' }}>
                     {status.distinct_ridges} ridges · ≈{Math.round(status.unexplored_share * 100)}% unexplored
+                    {status.stats_scope === 'roots' && ' (roots only)'}
                   </span>
                 )}
                 {status.traced_unexplored_share != null && status.traced_ridges != null && (
                   <span title={`EXPERIMENTAL -- recomputed after the trace phase: ${status.trace_links?.length ?? 0} crossing pairs were joined by a walk (${status.traces?.length ?? 0} walks). A development test against a dense ground truth showed no reliable improvement over the plain estimate, and walk links can merge different ridges; trust the map more than this number.`}
                         style={{ color: status.traced_unexplored_share <= 0.15 ? ACCENT : '#c9a227' }}>
                     → traced: {status.traced_ridges} ridges · ≈{Math.round(status.traced_unexplored_share * 100)}% unexplored
+                    {status.stats_scope === 'roots' && ' (roots only)'}
                   </span>
                 )}
                 {status.phase === 'trace' && running && (

@@ -19,7 +19,7 @@ from backend import config
 from backend.services.gpu_pool import ProbeTask
 from backend.models import (
     ProbeStartResponse, CascadeProbeRequest,CascadeStartRequest, CascadeStartResponse, CascadeStatus,
-                            CascadeCrossing, CascadePatch, CascadeChord,
+                            CascadeCrossing, CascadePatch, CascadeChord, CascadeChordMeta,
                             WalkStartRequest, WalkStep, WalkStatus, RenderRequest,
                             CascadePointInfo, LocalSvChord, LocalSvMap)
 from backend.services import cascade as cs
@@ -56,7 +56,8 @@ async def start(req: CascadeStartRequest, request: Request):
         seed=req.seed, steps=req.steps, height=req.height, width=req.width,
         guidance_scale=req.guidance_scale, n_chords=req.n_chords,
         n_patches=req.n_patches, focus=req.focus, focus_radius=req.focus_radius,
-        probe_steps=req.probe_steps, stride=req.stride, chord_seed=req.chord_seed,
+        probe_steps=req.probe_steps, stride=req.stride,
+        branch=req.branch, depth=req.depth, chord_seed=req.chord_seed,
         trace=req.trace, trace_steps=req.trace_steps, trace_certify=req.trace_certify)
     run.thumbs = ThumbnailStore(app.state.cache)
     run._target_sim = req.target_sim
@@ -93,9 +94,19 @@ async def status(run_id: str, request: Request):
     run = _runs(request.app).get(run_id)
     if run is None:
         return CascadeStatus(run_id=run_id, status="unknown", error="no such run")
-    cov = cs.coverage_stats(run.crossings)
     traced = bool(getattr(run, "traces", None))
-    cov_t = cs.coverage_stats(run.crossings, links=run.trace_links) if traced else (None, None, None, None)
+    # Ridge IDENTITIES (the map's grouping) come from every crossing; the Good-Turing
+    # CERTIFICATE is quoted on generation 0 alone when branching was on, because a child ray
+    # starts on a boundary -- a preferential sample, not a fair sample of boundary area.
+    roots_only = int(getattr(run, "branch", 0)) > 0
+    fair = ([x for x in run.crossings if getattr(x, "gen", 0) == 0] if roots_only
+            else run.crossings)
+    grp = cs.coverage_stats(run.crossings)
+    grp_t = (cs.coverage_stats(run.crossings, links=run.trace_links) if traced
+             else (None, None, None, None))
+    cov = cs.coverage_stats(fair) if roots_only else grp
+    cov_t = ((cs.coverage_stats(fair, links=run.trace_links) if roots_only else grp_t)
+             if traced else (None, None, None, None))
     return CascadeStatus(
         run_id=run.run_id, status=run.status, phase=run.phase,
         generated=run.generated, phase_done=run.phase_done,
@@ -105,19 +116,21 @@ async def status(run_id: str, request: Request):
         point_divs=list(getattr(run, "probe_div", [])),
         chords=[CascadeChord(a=c[0], b=c[1])
                 for c in getattr(run, "chords_geo", [])],
+        chords_meta=[CascadeChordMeta(**m) for m in getattr(run, "chords_meta", [])],
         stride=float(getattr(run, "stride", cs.STRIDE)),
         crossings=[CascadeCrossing(
             cid=x.cid, weights=[float(v) for v in x.mid] if x.mid is not None
             else [float(v) for v in (x.wa + x.wb) / 2],
             b=x.b, significant=x.significant, thumb=x.thumb,
-            ridge_group=(cov[3] or {}).get(x.cid),
-            traced_group=(cov_t[3] or {}).get(x.cid),
+            gen=int(getattr(x, "gen", 0)),
+            ridge_group=(grp[3] or {}).get(x.cid),
+            traced_group=(grp_t[3] or {}).get(x.cid),
             bracket_w=float(np.linalg.norm(x.wa - x.wb))
             if x.wa is not None and x.wb is not None else None)
             for x in run.crossings],
         bg_mean=run.bg_mean, bg_p95=run.bg_p95,
         distinct_ridges=cov[0], singleton_ridges=cov[1],
-        unexplored_share=cov[2],
+        unexplored_share=cov[2], stats_scope="roots" if roots_only else "all",
         traces=list(getattr(run, "traces", [])),
         trace_links=[list(l) for l in getattr(run, "trace_links", [])],
         traced_ridges=cov_t[0], traced_singletons=cov_t[1], traced_unexplored_share=cov_t[2],
@@ -138,6 +151,12 @@ async def local_sv_map(run_id: str, request: Request, h: float = lsv.H_DEFAULT,
     not a cleaner map. Ranking is trustworthy from ~20 chords; the values are calibrated
     only once `calibrated_ok` (>= 80 chords, and the calibration itself is k=4 only) --
     evidence in search_problem/outputs/h23_local_sv_kde.
+
+    Branching runs feed ALL chords in here, children included: the ratio estimator needs the
+    chord DIRECTIONS to be isotropic, not their positions to be uniform, and the children's
+    are (_iso_dir). Its `s_global` is the one number that does read as a global average, so
+    with branching on it is biased upward -- the fair-area figure is the status certificate,
+    which is quoted on the roots alone.
     """
     run = _runs(request.app).get(run_id)
     if run is None:

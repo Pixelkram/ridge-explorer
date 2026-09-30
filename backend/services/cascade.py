@@ -45,6 +45,9 @@ class Crossing:
     b: float | None = None
     significant: bool = False
     thumb: int = -1
+    # generation of the chord this crossing was found on: 0 = the fair root survey, >= 1 =
+    # a branching child ray. Only generation 0 may feed fair-area statistics.
+    gen: int = 0
 
 
 @dataclass
@@ -81,6 +84,14 @@ class CascadeRun:
     # sit closer together than one stride and costs probes as 1/stride. Detection only: the
     # continuation walk's corrector spacing (PC_DS) stays at STRIDE whatever this says.
     stride: float = STRIDE
+    # recursive ("branching") chord exploration: children per chord (0 = off) and how many
+    # generations of them to spawn. Generation 0 is the fair isotropic-uniform survey; a child
+    # is a RAY out of its parent's strongest crossing, so children are PREFERENTIAL samples --
+    # they land where a boundary already is. Fair-area statistics (the Good-Turing coverage
+    # certificate) are therefore quoted on generation 0 alone; the local-density map, whose
+    # ratio estimator only needs isotropic DIRECTIONS, uses every chord.
+    branch: int = 0
+    depth: int = 0
     # survey randomness (chords, background pairs, patches) apart from the image seed; None = seed. Lets several
     # surveys of ONE image field be compared against a single dense ground truth.
     chord_seed: int | None = None
@@ -93,6 +104,7 @@ class CascadeRun:
     status: str = "running"
     phase: str = "chords"
     chords_geo: list = field(default_factory=list)   # [(a_weights, b_weights)] for the map
+    chords_meta: list = field(default_factory=list)  # parallel to chords_geo: [{gen, parent, origin_cid}]
     probe_geo: list = field(default_factory=list)    # completed-point positions, live map cloud
     phase_done: int = 0
     phase_total: int = 0
@@ -187,6 +199,20 @@ def _min_chord_len(stride):
     """Shortest chord worth probing. 0.15 is the 6*STRIDE of record; the 2*stride arm
     takes over at coarse strides and keeps >= 3 probes (>= 2 neighbour pairs) per chord."""
     return max(0.15, 2 * stride)
+
+
+def _chord_cap(n_chords, branch, depth):
+    """Total chords a branching survey may draw: the geometric sum n*(1 + b + ... + b^depth).
+
+    branch = 0 is the single fair generation of record; branch = 1 is the ratio formula's
+    removable singularity, n*(depth+1). A hard cap, not a target: a generation only fills
+    from parents that actually crossed something.
+    """
+    if branch <= 0:
+        return n_chords
+    if branch == 1:
+        return n_chords * (depth + 1)
+    return n_chords * (branch ** (depth + 1) - 1) // (branch - 1)
 
 
 def _cosd(a, b):
@@ -949,14 +975,11 @@ def run_cascade(app, run, pool):
     rng = np.random.default_rng(run.seed if run.chord_seed is None else run.chord_seed)
     k = run.k
 
-    # ---------------- phase 1: chords (m=1, seed = run.seed)
+    # ---------------- phase 1: chords (m=1, seed = run.seed), depth+1 generations
     run.phase = "chords"
-    chords = []
-    chord_pts, chord_meta = [], []
-    tries = 0
-    max_tries = 200 * run.n_chords          # high k rejects many short chords; never spin
-    anchors = []
-    dirs = _dir_batch(k, rng, run.n_chords)
+    chords = []          # (w0, u, offs) per chord, indexed across ALL generations
+    cand = []            # crossings, likewise
+    max_chords = _chord_cap(run.n_chords, run.branch, run.depth)
     focus = np.asarray(run.focus, dtype=float) if run.focus else None
     if focus is not None:
         focus = np.clip(focus, 0, None)
@@ -976,84 +999,167 @@ def run_cascade(app, run, pool):
             if w.min() >= 0:
                 return w / w.sum()
         return focus.copy()
-    while len(chords) < run.n_chords and tries < max_tries:
-        tries += 1
-        w0 = _blue_anchor(k, rng, anchors, draw=_draw_anchor)
-        u = dirs[len(chords)] if len(chords) < len(dirs) else _iso_dir(k, rng)
-        tneg, tpos = _extent(w0, u)
-        if focus is not None:
-            # clip the chord to the focus ball so the budget stays in the region
-            d0 = w0 - focus
-            b = float(np.dot(u, d0))
-            cq = float(np.dot(d0, d0)) - R * R
-            disc = b * b - cq
-            if disc <= 0:
-                continue
-            root = float(np.sqrt(disc))
-            tneg = max(tneg, -b - root)
-            tpos = min(tpos, -b + root)
+
+    def _focus_clip(w0, u, tneg, tpos):
+        """Clip [tneg, tpos] to the focus ball so the budget stays in the region;
+        None when the line misses the ball entirely."""
+        d0 = w0 - focus
+        b = float(np.dot(u, d0))
+        cq = float(np.dot(d0, d0)) - R * R
+        disc = b * b - cq
+        if disc <= 0:
+            return None
+        root = float(np.sqrt(disc))
+        return max(tneg, -b - root), min(tpos, -b + root)
+
+    def _add_chord(w0, u, tneg, tpos, gen, parent, origin_cid, pts, meta):
+        """Register one chord and queue its probes; -1 if it is too short to be worth probing.
+
+        Keeps the PROBED offsets: focus mode and ray origins clip them, so recomputing from
+        the simplex walls would misplace the bracket a crossing is quoted at.
+        """
         if tpos - tneg < _min_chord_len(run.stride):
-            continue
+            return -1
         ci = len(chords)
         offs = _chord_offsets(tneg, tpos, run.stride)
-        chords.append((w0, u, offs))     # keep the PROBED offsets: focus mode clips them,
-        anchors.append(w0)               # so recomputing from walls would misplace brackets
+        chords.append((w0, u, offs))
         run.chords_geo.append((
             [float(v) for v in np.clip(w0 + tneg * u, 0, None)],
             [float(v) for v in np.clip(w0 + tpos * u, 0, None)]))
+        run.chords_meta.append({"gen": gen, "parent": parent, "origin_cid": origin_cid})
         for i, off in enumerate(offs):
-            chord_pts.append(np.clip(w0 + off * u, 0, None))
-            chord_meta.append((ci, i))
-    if len(chords) < run.n_chords:
-        run.notes.append(
-            f"only {len(chords)}/{run.n_chords} chords long enough at k={k}; continuing")
-    run.phase_total = len(chord_pts)
-    run.phase_done = 0
-    # live colouring: the moment a probe AND its chord-neighbour both exist,
-    # their pairwise divergence lands on the map -- no waiting for phase end
-    arrived = {}
+            pts.append(np.clip(w0 + off * u, 0, None))
+            meta.append((ci, i))
+        return ci
 
-    def _live_div(li, gi):
-        arrived[li] = gi
-        ci, ii = chord_meta[li]
-        for nb in (li - 1, li + 1):
-            gj = arrived.get(nb)
-            if gj is None:
-                continue
-            cj, jj = chord_meta[nb]
-            if cj != ci or abs(jj - ii) != 1:
-                continue
-            e1, e2 = run.embeddings.get(gi), run.embeddings.get(gj)
-            if e1 is not None and e2 is not None:
-                dd = _cosd(e1, e2)
-                _set_div(run, gi, dd)
-                _set_div(run, gj, dd)
+    def _detect(gidx, meta, gen, skip_first):
+        """Neighbour-pair crossing detection over ONE generation's probes; numbers the new
+        crossings into `cand` and returns {chord index: [Crossing]} for the next generation.
 
-    gidx = evaluate(app, run, pool, chord_pts, run.seed, "chords",
-                    on_arrival=_live_div, steps=run.probe_steps)
-    if run.status != "running":
-        return
-    per = {}
-    for (ci, i), gi in zip(chord_meta, gidx):
-        if gi is not None and gi in run.embeddings:
-            per.setdefault(ci, []).append((i, gi))
-    cand = []
-    for ci, seq in per.items():
-        seq.sort()
-        for (i1, g1), (i2, g2) in zip(seq, seq[1:]):
-            if i2 == i1 + 1:
+        skip_first drops every chord's probe0-probe1 bracket: a child ray starts ON the
+        crossing it was spawned from, so that bracket would re-count the parent's sheet.
+        """
+        per = {}
+        for (ci, i), gi in zip(meta, gidx):
+            if gi is not None and gi in run.embeddings:
+                per.setdefault(ci, []).append((i, gi))
+        found = {}
+        for ci in sorted(per):
+            seq = sorted(per[ci])
+            for (i1, g1), (i2, g2) in zip(seq, seq[1:]):
+                if i2 != i1 + 1 or (skip_first and i1 == 0):
+                    continue
                 e1, e2 = run.embeddings[g1], run.embeddings[g2]
                 dd = _cosd(e1, e2)
                 _set_div(run, g1, dd)
                 _set_div(run, g2, dd)
                 if dd > COS_T:
                     w0, u, offs = chords[ci]
-                    cand.append(Crossing(
-                        cid=len(cand),
+                    found.setdefault(ci, []).append(Crossing(
+                        cid=-1,
                         wa=np.clip(w0 + offs[i1] * u, 0, None),
                         wb=np.clip(w0 + offs[i2] * u, 0, None),
-                        ea=e1, eb=e2))
-    run.notes.append(f"{len(chords)} chords, {len(cand)} crossings")
+                        ea=e1, eb=e2, gen=gen))
+        for ci in sorted(found):
+            for x in found[ci]:
+                x.cid = len(cand)
+                cand.append(x)
+        return found
+
+    run.phase_total = 0
+    run.phase_done = 0
+    found_prev = {}
+    for g in range(run.depth + 1 if run.branch > 0 else 1):
+        if run.status != "running" or len(chords) >= max_chords:
+            break
+        chord_pts, chord_meta = [], []
+        if g == 0:
+            tries = 0
+            max_tries = 200 * run.n_chords   # high k rejects many short chords; never spin
+            anchors = []
+            dirs = _dir_batch(k, rng, run.n_chords)
+            while len(chords) < run.n_chords and tries < max_tries:
+                tries += 1
+                w0 = _blue_anchor(k, rng, anchors, draw=_draw_anchor)
+                u = dirs[len(chords)] if len(chords) < len(dirs) else _iso_dir(k, rng)
+                tneg, tpos = _extent(w0, u)
+                if focus is not None:
+                    cl = _focus_clip(w0, u, tneg, tpos)
+                    if cl is None:
+                        continue
+                    tneg, tpos = cl
+                if _add_chord(w0, u, tneg, tpos, 0, -1, -1,
+                              chord_pts, chord_meta) < 0:
+                    continue
+                anchors.append(w0)
+            if len(chords) < run.n_chords:
+                run.notes.append(
+                    f"only {len(chords)}/{run.n_chords} chords long enough at k={k}; "
+                    "continuing")
+        else:
+            # A fan of RAYS out of every chord that crossed something, from the midpoint of
+            # its STRONGEST bracket and forward only (t >= 0), so the sheet it was spawned
+            # from sits at the origin and _detect's first-bracket skip drops it.
+            for ci in sorted(found_prev):
+                if len(chords) >= max_chords:
+                    break
+                x = max(found_prev[ci], key=lambda c: _cosd(c.ea, c.eb))
+                w0 = np.clip((x.wa + x.wb) / 2, 0, None)
+                for _ in range(run.branch):
+                    if len(chords) >= max_chords:
+                        break
+                    u = _iso_dir(k, rng)
+                    _t, tpos = _extent(w0, u)
+                    lo, hi = 0.0, tpos
+                    if focus is not None:
+                        cl = _focus_clip(w0, u, lo, hi)
+                        if cl is None:
+                            continue
+                        lo, hi = cl
+                    _add_chord(w0, u, lo, hi, g, ci, x.cid, chord_pts, chord_meta)
+            if not chord_pts:
+                break
+        run.phase_total += len(chord_pts)
+        # live colouring: the moment a probe AND its chord-neighbour both exist,
+        # their pairwise divergence lands on the map -- no waiting for phase end
+        arrived = {}
+
+        def _live_div(li, gi, _meta=chord_meta, _arrived=arrived):
+            _arrived[li] = gi
+            ci, ii = _meta[li]
+            for nb in (li - 1, li + 1):
+                gj = _arrived.get(nb)
+                if gj is None:
+                    continue
+                cj, jj = _meta[nb]
+                if cj != ci or abs(jj - ii) != 1:
+                    continue
+                e1, e2 = run.embeddings.get(gi), run.embeddings.get(gj)
+                if e1 is not None and e2 is not None:
+                    dd = _cosd(e1, e2)
+                    _set_div(run, gi, dd)
+                    _set_div(run, gj, dd)
+
+        gidx = evaluate(app, run, pool, chord_pts, run.seed,
+                        "chords" if g == 0 else f"chords{g}",
+                        on_arrival=_live_div, steps=run.probe_steps)
+        if run.status != "running":
+            return
+        found_prev = _detect(gidx, chord_meta, g, skip_first=g > 0)
+        if run.branch > 0:
+            n_gen = sum(1 for m in run.chords_meta if m["gen"] == g)
+            n_new = sum(len(v) for v in found_prev.values())
+            run.notes.append(f"gen {g}: {n_gen} chords, {n_new} crossings")
+        else:
+            run.notes.append(f"{len(chords)} chords, {len(cand)} crossings")
+    if run.branch > 0:
+        n_root = sum(1 for m in run.chords_meta if m["gen"] == 0)
+        n_rootx = sum(1 for x in cand if x.gen == 0)
+        run.notes.append(
+            f"{len(chords)} chords ({n_root} roots), {len(cand)} crossings "
+            f"({n_rootx} on roots); the coverage certificate uses the roots only "
+            "-- child rays are preferential samples"
+            + (f"; chord cap {max_chords} reached" if len(chords) >= max_chords else ""))
     if cand and run.probe_steps is not None and run.probe_steps != run.steps:
         # detection ran on the cheap field; hand bisection full-fidelity side images
         ws = []

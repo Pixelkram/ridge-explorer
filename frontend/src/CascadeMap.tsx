@@ -325,8 +325,13 @@ function MapSvg({
           invent structure that is pure projection artefact, so only the 1-D objects the
           survey actually measured along get coloured. Striding keeps a long survey's
           segment count bounded, and segments stay contiguous because each one ends where
-          the next begins. */}
+          the next begins. Branching runs fade the child generations back, so the fair root
+          survey stays the figure and the exploratory rays the ground; no connector is drawn
+          to the parent crossing, because a ray STARTS at it (up to the bisection shift of
+          half a bracket) and the line would be sub-pixel. */}
       {status.chords.map((c, i) => {
+        const gen = status.chords_meta?.[i]?.gen ?? 0;
+        const op = gen === 0 ? 1 : gen === 1 ? 0.7 : 0.5;
         const lane = sv?.map.chords[i];
         if (sv && lane && lane.points.length > 1) {
           const out = [];
@@ -338,6 +343,7 @@ function MapSvg({
               <line key={`${i}.${j}`} x1={ax} y1={ay} x2={bx} y2={by}
                     stroke={svColor(sv.read(lane.values[j], lane.ranks[j],
                                             lane.uncovered[j]))}
+                    strokeOpacity={op}
                     strokeWidth={compact ? 2 : 2.8} strokeLinecap="butt" />);
           }
           return <g key={i}>{out}</g>;
@@ -346,7 +352,8 @@ function MapSvg({
         const [x2, y2] = proj.project(c.b);
         return (
           <line key={i} className="cs-draw" x1={x1} y1={y1} x2={x2} y2={y2}
-                stroke="#4a4f8f" strokeWidth={compact ? 1.4 : 2} pathLength={1}
+                stroke="#4a4f8f" strokeOpacity={op}
+                strokeWidth={compact ? (gen ? 1.1 : 1.4) : (gen ? 1.5 : 2)} pathLength={1}
                 style={{ animationDelay: `${(i % 8) * 0.12}s` }} />
         );
       })}
@@ -748,6 +755,13 @@ export default function CascadeMap({
           {sv ? ' — coloured by the density above; crossing dots share that scale and'
                 + ' keep certification in their ring'
               : ' (drawn as laid)'}
+          {(status.chords_meta ?? []).some((m) => m.gen > 0) && (
+            <>
+              <br /><span style={{ color: '#4a4f8f', opacity: 0.6 }}>―</span> faded = child
+              rays, spawned from a parent chord's strongest crossing — exploratory, so they
+              are left out of the coverage certificate
+            </>
+          )}
           <br /><span style={{ color: '#7d84c8' }}>●</span> boundary found (pulsing =
           still being worked on)
           <br /><span style={{ color: ACCENT }}>●</span> certified — beats the run's own
