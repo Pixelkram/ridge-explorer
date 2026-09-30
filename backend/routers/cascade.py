@@ -12,7 +12,7 @@ import uuid
 
 import numpy as np
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 
 from backend import config
@@ -21,8 +21,9 @@ from backend.models import (
     ProbeStartResponse, CascadeProbeRequest,CascadeStartRequest, CascadeStartResponse, CascadeStatus,
                             CascadeCrossing, CascadePatch, CascadeChord,
                             WalkStartRequest, WalkStep, WalkStatus, RenderRequest,
-                            CascadePointInfo)
+                            CascadePointInfo, LocalSvChord, LocalSvMap)
 from backend.services import cascade as cs
+from backend.services import local_sv as lsv
 from backend.cache.thumbnail_cache import ThumbnailStore
 
 router = APIRouter(prefix="/api/cascade", tags=["cascade"])
@@ -124,6 +125,56 @@ async def status(run_id: str, request: Request):
             exploration=p.exploration, grid=p.grid,
             cols_with_crossing=p.cols_with_crossing) for p in run.patches],
         notes=list(run.notes), error=run.error)
+
+
+@router.get("/{run_id}/local-sv", response_model=LocalSvMap)
+async def local_sv_map(run_id: str, request: Request, h: float = lsv.H_DEFAULT,
+                       mode: str = "all", cloud: int = 0):
+    """Local boundary density over this run's own chords (services/local_sv.py).
+
+    Reads a finished survey's geometry -- no images, no GPU. `mode=all` (the default) is the
+    estimator of record; `mode=certified` filters the numerator only and is a diagnostic,
+    not a cleaner map. Ranking is trustworthy from ~20 chords; the values are calibrated
+    only once `calibrated_ok` (>= 80 chords, and the calibration itself is k=4 only) --
+    evidence in search_problem/outputs/h23_local_sv_kde.
+    """
+    run = _runs(request.app).get(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="no such run")
+    if mode not in ("all", "certified"):
+        raise HTTPException(status_code=400, detail="mode must be 'all' or 'certified'")
+    if not (0.01 <= h <= 1.0):
+        raise HTTPException(status_code=400, detail="h must lie in [0.01, 1.0]")
+    chords, crossings, k = lsv.from_run(run)
+    if not chords or k < 3:
+        # nothing laid down yet -- the survey has not reached a map
+        raise HTTPException(status_code=404, detail="run has no chords yet")
+    if not crossings:
+        # a finished survey CAN find nothing (run_cascade says so in its notes); that is a
+        # real, empty answer about the space, not a server error
+        return LocalSvMap(run_id=run_id, k=k, h=h, mode=mode, n_chords=len(chords),
+                          calibrated_ok=len(chords) >= lsv.N_CALIBRATED,
+                          error="no boundary crossings in this run")
+    m = lsv.local_sv(chords, crossings, k, h=h, mode=mode, cloud=max(0, min(cloud, 20000)))
+    st, xs, cl = m["stations"], m["crossings"], m["cloud"]
+    sel = [st["chord"] == ci for ci in range(len(chords))]
+    by_chord = [LocalSvChord(
+        points=[[float(v) for v in w] for w in st["weights"][s]],
+        values=[float(v) for v in st["values"][s]],
+        ranks=[float(v) for v in st["ranks"][s]],
+        uncovered=[bool(v) for v in st["uncovered"][s]]) for s in sel]
+    return LocalSvMap(
+        run_id=run_id, k=k, h=m["h"], mode=m["mode"], delta=m["delta"], c_d=m["c_d"],
+        n_chords=m["n_chords"], n_crossings=m["n_crossings"],
+        calibrated_ok=m["calibrated_ok"], s_global=m["s_global"], chords=by_chord,
+        crossing_cids=[int(x.cid) for x in run.crossings],
+        crossing_values=[float(v) for v in xs["values"]],
+        crossing_ranks=[float(v) for v in xs["ranks"]],
+        crossing_uncovered=[bool(v) for v in xs["uncovered"]],
+        cloud=[[float(v) for v in w] for w in cl["weights"]],
+        cloud_values=[float(v) for v in cl["values"]],
+        cloud_ranks=[float(v) for v in cl["ranks"]],
+        cloud_uncovered=[bool(v) for v in cl["uncovered"]])
 
 
 @router.post("/{run_id}/walk", response_model=WalkStatus)

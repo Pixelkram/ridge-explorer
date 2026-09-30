@@ -596,6 +596,59 @@ class CascadeStatus(BaseModel):
     error: str | None = None
 
 
+class LocalSvChord(BaseModel):
+    """One chord's sample stations and the local boundary density read at each.
+
+    Parallel arrays (as points/point_divs above): the map colours the polyline segment by
+    segment, so it wants the positions and the readings in the same order, not objects.
+    """
+    # station positions in weight space, from chord endpoint a toward b
+    points: list[list[float]] = []
+    # local S_V at each station (units only meaningful when calibrated_ok)
+    values: list[float] = []
+    # percentile rank of each station within the covered part of this map
+    ranks: list[float] = []
+    # no local evidence here: kernel mass below 5% of its median (drawn grey, never coloured)
+    uncovered: list[bool] = []
+
+
+class LocalSvMap(BaseModel):
+    """Kernel-smoothed local Crofton S_V over a finished cascade's own chords.
+
+    Two products of one estimator, and the caller must not confuse them
+    (search_problem/outputs/h23_local_sv_kde, replicated in verify/VERIFY.md): the RANKING
+    is reliable from ~20 single-seed chords (Spearman 0.78-0.90 vs the converged map), while
+    the VALUES in S_V units need >= 80 -- `calibrated_ok`. Calibrated at k=4 only.
+    """
+    run_id: str
+    k: int = 0
+    h: float = 0.0                  # kernel width in orthonormal tangent coords (simplex edge = sqrt(2))
+    mode: str = "all"               # "all" | "certified" (numerator-only filter; a diagnostic)
+    delta: float = 0.0              # chord sampling step; absolute S_V is Delta-dependent
+    c_d: float = 0.0                # Crofton constant at d = k-1 (2 exactly at k=4)
+    n_chords: int = 0
+    n_crossings: int = 0
+    # True iff n_chords >= 80: below that the values are worse than the global constant
+    calibrated_ok: bool = False
+    # the global mean-of-ratios S_V from the same chords -- the constant the map has to beat
+    s_global: float | None = None
+    # per chord, in the run's own chord order (aligned with CascadeStatus.chords)
+    chords: list[LocalSvChord] = []
+    # the map read at every crossing, aligned by index with CascadeStatus.crossings
+    crossing_cids: list[int] = []
+    crossing_values: list[float] = []
+    crossing_ranks: list[float] = []
+    crossing_uncovered: list[bool] = []
+    # optional Dirichlet(1,...,1) sample of the space (?cloud=N). A research read-out only:
+    # the map view deliberately draws no heat raster, because a 2-D shadow of a (k-1)-
+    # dimensional field invents structure that is pure projection artefact.
+    cloud: list[list[float]] = []
+    cloud_values: list[float] = []
+    cloud_ranks: list[float] = []
+    cloud_uncovered: list[bool] = []
+    error: str | None = None
+
+
 # ---- exact-JVP probes (services/jvp_probe.py) ----
 class JvpProbeRequest(BaseModel):
     alpha: float = Field(..., ge=0.0, le=1.0)

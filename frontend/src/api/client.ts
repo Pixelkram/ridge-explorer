@@ -341,3 +341,12 @@ export async function cascadePointInfo(
   const r = await fetch(`${BASE}/api/cascade/${runId}/point/${index}`);
   return r.json();
 }
+
+// Local boundary density over the run's own chords -- geometry only, no images, so it is
+// cheap enough to ask for on a toggle. 404 while the survey has laid down no chords yet.
+export async function cascadeLocalSv(
+  runId: string, mode: 'all' | 'certified' = 'all',
+): Promise<import('./types').LocalSvMap> {
+  const r = await fetchRetry(`${BASE}/api/cascade/${runId}/local-sv?mode=${mode}`);
+  return jsonOrThrow(r, 'cascadeLocalSv');
+}

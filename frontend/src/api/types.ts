@@ -369,6 +369,50 @@ export interface CascadeStatus {
   error?: string | null;
 }
 
+// ---- Local boundary density: kernel-smoothed Crofton S_V over the run's own chords ----
+// The survey's chords already sample boundary AREA fairly, so crossings per unit chord
+// length convert to boundary area per unit volume; smoothing that ratio locally turns one
+// global number into a map of WHERE the boundaries are dense. Calibration of record:
+// search_problem/outputs/h23_local_sv_kde (verified independently). Two products, one
+// estimator: the RANKING is reliable from ~20 chords, the VALUES need >= 80.
+
+export interface LocalSvChord {
+  // station positions in weight space, from chord endpoint a toward b
+  points: number[][];
+  // local S_V at each station (units only meaningful when calibrated_ok)
+  values: number[];
+  // percentile rank within the covered part of this map
+  ranks: number[];
+  // no local evidence here: kernel mass below 5% of its median (drawn grey, never coloured)
+  uncovered: boolean[];
+}
+
+export interface LocalSvMap {
+  run_id: string;
+  k: number;
+  h: number;                  // kernel width in orthonormal tangent coords (simplex edge = sqrt(2))
+  mode: string;               // "all" | "certified" (numerator-only filter; a diagnostic)
+  delta: number;
+  c_d: number;
+  n_chords: number;
+  n_crossings: number;
+  // false below 80 chords: the values are then worse than the global constant, ranking only
+  calibrated_ok: boolean;
+  // the global mean-of-ratios S_V from the same chords -- the constant the map has to beat
+  s_global: number | null;
+  chords: LocalSvChord[];
+  // aligned by index with CascadeStatus.crossings
+  crossing_cids: number[];
+  crossing_values: number[];
+  crossing_ranks: number[];
+  crossing_uncovered: boolean[];
+  cloud: number[][];
+  cloud_values: number[];
+  cloud_ranks: number[];
+  cloud_uncovered: boolean[];
+  error?: string | null;
+}
+
 // ---- JVP probe: the local crossing direction at one point of the simplex ----
 // `normal_theta` is a unit direction in (alpha, beta[, gamma]) — the direction across
 // prompt space along which the image changes fastest here. It is SIGN-FREE: a line,

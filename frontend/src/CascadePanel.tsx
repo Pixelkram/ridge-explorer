@@ -15,6 +15,7 @@ import {
 } from './api/client';
 import type { CascadeStatus, CascadePatch, WalkStatus } from './api/types';
 import CascadeMap from './CascadeMap';
+import { useProbeStore } from './stores/probeStore';
 
 const BOX: React.CSSProperties = {
   background: '#16213e', border: '1px solid #333', borderRadius: 4,
@@ -326,6 +327,23 @@ export default function CascadePanel() {
   const certOk = (i: number): boolean | null =>
     walk?.cert?.status === 'done' ? !!walk.cert.significant?.[i] : null;
 
+  // Boundary-density overlay. The toggle and the read mode live here; the map draws them.
+  // Off by default, and one fetch covers both read modes (they are views of one response).
+  const svOn = useProbeStore((s) => s.localSvOn);
+  const svView = useProbeStore((s) => s.localSvView);
+  const svStatus = useProbeStore((s) => s.localSvStatus);
+  const svError = useProbeStore((s) => s.localSvError);
+  const setSvOn = useProbeStore((s) => s.setLocalSvOn);
+  const setSvView = useProbeStore((s) => s.setLocalSvView);
+  const sv = useProbeStore((s) => (runId ? s.localSv[runId] : undefined));
+  const svCal = !!sv?.calibrated_ok;
+  // A run that finishes after the overlay was switched on has new chords and crossings, so
+  // the map it was read from is stale: re-read it once the survey stops.
+  const fetchSv = useProbeStore((s) => s.fetchLocalSv);
+  useEffect(() => {
+    if (svOn && runId && status?.status === 'complete') void fetchSv(runId);
+  }, [svOn, runId, status?.status, fetchSv]);
+
   const running = status?.status === 'running';
   const sigCount = status?.crossings.filter((c) => c.significant).length ?? 0;
   const scored = status?.crossings.filter((c) => c.b !== null) ?? [];
@@ -483,7 +501,47 @@ export default function CascadePanel() {
               )}
 
               {status.chords.length > 0 && runId && (
-                <div style={{ marginTop: 10 }}>
+                <div style={{ marginTop: 10, display: 'flex', gap: 10, fontSize: 11,
+                              alignItems: 'center', flexWrap: 'wrap' }}>
+                  <label className="rx-focus"
+                         title="Re-read this run's own chords as a local boundary-density map: crossings per unit chord length, kernel-smoothed, converted to boundary area per unit volume (Crofton). Costs no images — the survey already paid for the geometry. Calibration of record: search_problem/outputs/h23_local_sv_kde."
+                         style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                    <input type="checkbox" checked={svOn}
+                           onChange={(e) => setSvOn(runId, e.target.checked)} />
+                    boundary density
+                  </label>
+                  <label className="rx-focus"
+                         title="ranking = colour by percentile, reliable from about 20 chords; calibrated = colour by S_V units, which only mean something once the survey has 80+ chords"
+                         style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                    read as
+                    <select value={svCal ? svView : 'ranking'} disabled={!svOn}
+                            onChange={(e) => setSvView(e.target.value as 'ranking' | 'calibrated')}
+                            style={{ fontSize: 11 }}>
+                      <option value="ranking">ranking (percentile)</option>
+                      <option value="calibrated" disabled={!svCal}
+                              title="needs ≥ 80 chords (calibrated at k = 4)">
+                        calibrated (S_V units)
+                      </option>
+                    </select>
+                  </label>
+                  {svOn && sv && (
+                    <span style={{ color: svCal ? '#889' : '#c9a227' }}
+                          title={svCal ? undefined : 'needs ≥ 80 chords (calibrated at k = 4)'}>
+                      {sv.n_chords} chords · h={sv.h.toFixed(2)}
+                      {svCal ? '' : ' · ranking only: needs ≥ 80 chords (calibrated at k = 4)'}
+                    </span>
+                  )}
+                  {svOn && svStatus === 'running' && (
+                    <span style={{ color: '#667' }}>reading the chords…</span>
+                  )}
+                  {svOn && svStatus === 'error' && svError && (
+                    <span style={{ color: '#c9a227' }}>{svError}</span>
+                  )}
+                </div>
+              )}
+
+              {status.chords.length > 0 && runId && (
+                <div style={{ marginTop: 6 }}>
                   <CascadeMap status={status} runId={runId}
                               imageUrl={cascadeImageUrl} size={640}
                               selectedCid={selCid}

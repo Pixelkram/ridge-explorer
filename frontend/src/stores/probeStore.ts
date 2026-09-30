@@ -6,6 +6,11 @@
  *    so it is a line, not an arrow, and the viewport draws it as a segment.
  *  - token probe (~3 min): which words of one prompt the generation leans on here.
  *
+ * Plus one cascade overlay that measures nothing new: the boundary-density map is a
+ * re-reading of the survey's own chords (no GPU, one GET), so it lives here for the same
+ * reason the cascade probes do — it is per-run state with a lifecycle of its own, and
+ * `syncCascadeRun` must drop it when the run changes.
+ *
  * Kept out of ridgeStore because its poller owns the grid job's lifecycle and runs on
  * its own clock; a probe is a side measurement that outlives neither the job nor the
  * page. `syncJob` is the one coupling: probe coordinates mean nothing once the job
@@ -13,8 +18,8 @@
  */
 import { create } from 'zustand';
 import { startJvpProbe, getJvpProbe, startTokenProbe, getTokenProbe,
-         startCascadeJvpProbe } from '../api/client';
-import type { CascadeJvpProbeResult, JvpProbeCore, JvpProbeResult,
+         startCascadeJvpProbe, cascadeLocalSv } from '../api/client';
+import type { CascadeJvpProbeResult, JvpProbeCore, JvpProbeResult, LocalSvMap,
               TokenProbeResult, TokenProbeWhich } from '../api/types';
 
 export interface JvpProbeEntry {
@@ -33,6 +38,15 @@ export type CascadeProbeMap = Record<number, CascadeJvpProbeResult>;
 
 export type ProbePhase = 'idle' | 'running' | 'done' | 'error';
 
+/**
+ * How the boundary-density overlay is READ, which is not the same question as how it was
+ * computed. One response carries both: `ranking` colours by percentile and is trustworthy
+ * from ~20 chords; `calibrated` colours by S_V units and is only honest once the map says
+ * `calibrated_ok` (>= 80 chords, and the calibration itself was established at k = 4).
+ * Switching between them costs nothing -- no refetch.
+ */
+export type LocalSvView = 'ranking' | 'calibrated';
+
 const POLL_MS = 1500;
 // Bound both pollers. A probe whose GPU task was drained (cancel, restart) never
 // reports done, and an unbounded interval then polls a dead id for the rest of the
@@ -48,6 +62,7 @@ const CASCADE_MAX_POLLS = 400;   // ~10 min, same budget as the grid JVP probe
 let jvpSeq = 0;
 let tokenSeq = 0;
 let cascadeSeq = 0;
+let localSvSeq = 0;
 
 interface TokenState {
   which: TokenProbeWhich | null;
@@ -79,6 +94,13 @@ interface ProbeState {
   cascadeError: string | null;
   cascadePoll: ReturnType<typeof setInterval> | null;
 
+  /** Boundary-density overlay: off by default, filed per run like the probes above. */
+  localSvOn: boolean;
+  localSvView: LocalSvView;
+  localSv: Record<string, LocalSvMap>;
+  localSvStatus: ProbePhase;
+  localSvError: string | null;
+
   syncJob: (jobId: string | null) => void;
   startJvp: (jobId: string, alpha: number, beta: number, seed?: number) => Promise<void>;
   clearProbes: () => void;
@@ -89,6 +111,10 @@ interface ProbeState {
   syncCascadeRun: (runId: string | null) => void;
   startCascadeJvp: (runId: string, cid: number, seed?: number) => Promise<void>;
   clearCascadeProbes: () => void;
+
+  setLocalSvOn: (runId: string | null, on: boolean) => void;
+  setLocalSvView: (view: LocalSvView) => void;
+  fetchLocalSv: (runId: string) => Promise<void>;
 }
 
 const IDLE_TOKEN: TokenState = { which: null, status: 'idle', result: null, error: null };
@@ -110,6 +136,11 @@ export const useProbeStore = create<ProbeState>((set, get) => ({
   cascadeStatus: 'idle',
   cascadeError: null,
   cascadePoll: null,
+  localSvOn: false,
+  localSvView: 'ranking',
+  localSv: {},
+  localSvStatus: 'idle',
+  localSvError: null,
 
   // Deliberately does NOT touch cascadePoll: this is called on every grid job change,
   // and a cascade probe is not part of that lifecycle.
@@ -278,10 +309,14 @@ export const useProbeStore = create<ProbeState>((set, get) => ({
   syncCascadeRun: (runId) => {
     if (get().cascadeRunId === runId) return;
     cascadeSeq++;
+    localSvSeq++;
     const { cascadePoll } = get();
     if (cascadePoll) clearInterval(cascadePoll);
+    // The density map is keyed by chord, and chords belong to one survey -- carrying it
+    // over would paint this run's lines with the last one's readings.
     set({ cascadeRunId: runId, cascadeProbes: {}, cascadePendingCid: null,
-          cascadeStatus: 'idle', cascadeError: null, cascadePoll: null });
+          cascadeStatus: 'idle', cascadeError: null, cascadePoll: null,
+          localSv: {}, localSvStatus: 'idle', localSvError: null });
   },
 
   clearCascadeProbes: () => {
@@ -354,6 +389,37 @@ export const useProbeStore = create<ProbeState>((set, get) => ({
       set({ cascadePoll: poll });
     } catch (err) {
       fail(String(err));
+    }
+  },
+
+  // ---- boundary density ---------------------------------------------------
+  // One GET, no GPU: the endpoint re-reads geometry the survey already paid for. Turning
+  // the overlay on fetches it once; the read mode (ranking vs calibrated) is a view of the
+  // SAME response, so switching it never refetches.
+  setLocalSvOn: (runId, on) => {
+    set({ localSvOn: on });
+    if (on && runId && !get().localSv[runId]) void get().fetchLocalSv(runId);
+  },
+
+  setLocalSvView: (view) => set({ localSvView: view }),
+
+  fetchLocalSv: async (runId) => {
+    const launch = ++localSvSeq;
+    set({ localSvStatus: 'running', localSvError: null });
+    try {
+      const m = await cascadeLocalSv(runId);
+      if (localSvSeq !== launch) return;      // superseded (run changed, or a second toggle)
+      set((s) => ({ localSv: { ...s.localSv, [runId]: m },
+                    localSvStatus: 'done', localSvError: null }));
+    } catch (err: any) {
+      if (localSvSeq !== launch) return;
+      // 404 while the survey is still laying down chords is the normal early answer, not a
+      // fault: say so rather than showing a raw HTTP line.
+      const msg = String(err?.message ?? err);
+      set({ localSvStatus: 'error',
+            localSvError: msg.includes('404')
+              ? 'no chords yet — the density map appears once the survey has laid some down'
+              : msg });
     }
   },
 }));

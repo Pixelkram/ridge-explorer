@@ -19,10 +19,10 @@
  * or SPLIT VIEW -- every axis-pair anchor rendered side by side, synchronised in
  * angle, rotation, and selection.
  */
-import { useEffect, useRef, useState } from 'react';
-import type { CascadeStatus } from './api/types';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { CascadeStatus, LocalSvMap } from './api/types';
 import { useProbeStore, probeLabel, probeCodim } from './stores/probeStore';
-import type { CascadeProbeMap } from './stores/probeStore';
+import type { CascadeProbeMap, LocalSvView } from './stores/probeStore';
 
 const ACCENT = '#4ecca3';
 const WARN = '#e94560';
@@ -40,6 +40,36 @@ function divColor(d: number | null): string {
   const t = Math.min(1, Math.max(0, d / 0.5));
   const lerp = (a: number, b: number) => Math.round(a + (b - a) * t);
   return `rgb(${lerp(75, 233)},${lerp(90, 69)},${lerp(160, 96)})`;
+}
+
+/**
+ * Boundary-density ramp: ONE hue, low -> high, anchored on the documented orange/yellow
+ * family (OKLCH hue 75 deg, mid step beside the documented #eda100).
+ *
+ * The map already spends blue -> red on local divergence, so this second sequential
+ * context takes the next hue rather than re-using a ramp that already means something
+ * else. Checked, not eyeballed, against this map's own surface (#0d0d20): monotone
+ * lightness, adjacent dL >= 0.06, single hue (spread 10 deg), darkest step 2.76:1. The
+ * hue is the next one along on purpose -- plain orange's mid step sits dE 9.8 from WARN
+ * under normal vision (below the 15 floor: confusable with the walk polylines), while
+ * this one clears both floors against the map's other marks (dE 17.0 normal, 8.6 deutan).
+ */
+const SV_RAMP = ['#814e00', '#b06a00', '#d38500', '#eeac44', '#fed191'];
+// no local evidence: the cloud's own "not measured" grey, which means the same thing there
+const SV_NONE = '#565e93';
+
+function mixHex(a: string, b: string, t: number): string {
+  const p = (h: string, i: number) => parseInt(h.slice(1 + 2 * i, 3 + 2 * i), 16);
+  const c = (i: number) => Math.round(p(a, i) + (p(b, i) - p(a, i)) * t);
+  return `rgb(${c(0)},${c(1)},${c(2)})`;
+}
+
+/** Ramp colour for a normalised reading in [0, 1]; null (or uncovered) reads as grey. */
+function svColor(t: number | null): string {
+  if (t === null || !Number.isFinite(t)) return SV_NONE;
+  const x = Math.min(1, Math.max(0, t)) * (SV_RAMP.length - 1);
+  const i = Math.min(SV_RAMP.length - 2, Math.floor(x));
+  return mixHex(SV_RAMP[i], SV_RAMP[i + 1], x - i);
 }
 
 function vertexPositions(k: number, r: number, cx: number, cy: number) {
@@ -119,6 +149,22 @@ function short(p: string, n = 26) {
 }
 
 /**
+ * Everything a tile needs to colour by boundary density. `vmax` and `read` are built once
+ * in CascadeMap so every split-view tile shares ONE scale -- per-tile scales would make
+ * the same chord a different colour in two views of the same space.
+ */
+interface SvOverlay {
+  map: LocalSvMap;
+  view: LocalSvView;
+  /** one reading -> [0, 1] for the ramp; null = uncovered, i.e. no local evidence */
+  read: (value: number, rank: number, uncovered: boolean) => number | null;
+  /** crossing id -> its index in the map's crossing arrays */
+  byCid: Map<number, number>;
+  /** top of the scale in S_V units (calibrated view only) */
+  vmax: number;
+}
+
+/**
  * Endpoints of one probed direction, drawn as a sign-free segment through its crossing.
  *
  * ε is not a fixed number of barycentric units. The map's scale changes with k, with the
@@ -186,7 +232,7 @@ const KEYFRAMES = `
 /** One rendered shadow of the space; used once in single view, per-anchor in split. */
 function MapSvg({
   status, size, theta, base, sel, onPick, walkPath, walkSegs, walkColors,
-  caption, showBadge, showBeat, spin, compact, probes, pendingCid,
+  caption, showBadge, showBeat, spin, compact, probes, pendingCid, sv,
 }: {
   status: CascadeStatus;
   size: number;
@@ -207,6 +253,8 @@ function MapSvg({
   probes?: CascadeProbeMap;
   /** crossing whose probe is in flight, if any */
   pendingCid?: number | null;
+  /** boundary-density overlay, or null when it is off */
+  sv?: SvOverlay | null;
 }) {
   const prevLen = useRef(0);
   const newFrom = prevLen.current;
@@ -232,6 +280,14 @@ function MapSvg({
     ? Math.hypot(vs[0][0] - vs[1][0], vs[0][1] - vs[1][1]) / Math.SQRT2 : size / 2;
   const walking = !!walkPath && walkPath.length > 0;
   const maxPts = compact ? 900 : 1800;
+  // bound the overlay's segment count the way maxPts bounds the cloud's dots: a 200-chord
+  // survey samples ~24k stations, which is far more SVG nodes than the eye gains from
+  const svStride = (() => {
+    if (!sv) return 1;
+    const n = sv.map.chords.reduce((a, l) => a + l.points.length, 0);
+    const cap = compact ? 700 : 1600;
+    return n > cap ? Math.ceil(n / cap) : 1;
+  })();
 
   return (
     <svg width={size} height={size} style={{ background: '#0d0d20', borderRadius: 8,
@@ -261,7 +317,31 @@ function MapSvg({
                   r={2.4} fill="none" stroke="#9aa3e0" strokeWidth={1.5} />
         );
       })}
+      {/* Search chords. With the density overlay on, each one is drawn as its own station
+          polyline instead of a single line, every segment coloured by the local reading —
+          re-projected through `project` on every render, like the probe segments, so the
+          colours follow the rotating shadow plane rather than freezing. No heat raster is
+          painted into the projection: a 2-D shadow of a (k-1)-dimensional field would
+          invent structure that is pure projection artefact, so only the 1-D objects the
+          survey actually measured along get coloured. Striding keeps a long survey's
+          segment count bounded, and segments stay contiguous because each one ends where
+          the next begins. */}
       {status.chords.map((c, i) => {
+        const lane = sv?.map.chords[i];
+        if (sv && lane && lane.points.length > 1) {
+          const out = [];
+          for (let j = 0; j + 1 < lane.points.length; j += svStride) {
+            const j2 = Math.min(lane.points.length - 1, j + svStride);
+            const [ax, ay] = proj.project(lane.points[j]);
+            const [bx, by] = proj.project(lane.points[j2]);
+            out.push(
+              <line key={`${i}.${j}`} x1={ax} y1={ay} x2={bx} y2={by}
+                    stroke={svColor(sv.read(lane.values[j], lane.ranks[j],
+                                            lane.uncovered[j]))}
+                    strokeWidth={compact ? 2 : 2.8} strokeLinecap="butt" />);
+          }
+          return <g key={i}>{out}</g>;
+        }
         const [x1, y1] = proj.project(c.a);
         const [x2, y2] = proj.project(c.b);
         return (
@@ -311,6 +391,14 @@ function MapSvg({
           * (compact ? 0.75 : 1);
         const open_ = running && !scored && c.bracket_w !== null
           && c.bracket_w > 0.014;
+        // density overlay: the dot joins the chords on the SAME scale, and certification
+        // moves to the ring so the overlay does not spend the map's only certified/not
+        // channel on a second meaning
+        const svi = sv?.byCid.get(c.cid);
+        const svFill = sv && svi !== undefined
+          ? svColor(sv.read(sv.map.crossing_values[svi], sv.map.crossing_ranks[svi],
+                            sv.map.crossing_uncovered[svi]))
+          : null;
         return (
           <g key={c.cid}>
             {open_ && (
@@ -324,11 +412,13 @@ function MapSvg({
                       r={rad + 2} fill="none" stroke={ACCENT} strokeWidth={2} />
             )}
             <circle cx={x} cy={y} r={rad}
-                    fill={!scored ? '#7d84c8' : c.significant ? ACCENT : '#8a93b8'}
+                    fill={svFill ?? (!scored ? '#7d84c8'
+                                     : c.significant ? ACCENT : '#8a93b8')}
                     fillOpacity={scored ? 0.95 : 0.7}
                     stroke={sel === c.cid ? '#fff'
                             : (selGroup !== null && c.ridge_group === selGroup)
-                              ? WARN : '#0d0d20'}
+                              ? WARN
+                              : svFill && c.significant ? ACCENT : '#0d0d20'}
                     strokeWidth={sel === c.cid ? 2.2 : 1.2}
                     className={!scored && running ? 'cs-pulse' : undefined}
                     style={{ cursor: 'pointer' }}
@@ -551,6 +641,32 @@ export default function CascadeMap({
   const probePending = useProbeStore(
     (s) => (s.cascadeStatus === 'running' ? s.cascadePendingCid : null));
 
+  // Boundary density: a re-reading of this run's own chords (no new measurement), filed per
+  // run beside the probes and dropped with them. The panel owns the toggle and the view.
+  const svOn = useProbeStore((s) => s.localSvOn);
+  const svViewSel = useProbeStore((s) => s.localSvView);
+  const svMap = useProbeStore((s) => s.localSv[runId]);
+  const sv = useMemo<SvOverlay | null>(() => {
+    if (!svOn || !svMap || svMap.chords.length === 0) return null;
+    // an uncalibrated survey may only be READ as a ranking, whatever the selector holds
+    const view: LocalSvView = svViewSel === 'calibrated' && svMap.calibrated_ok
+      ? 'calibrated' : 'ranking';
+    let vmax = 0;
+    for (const l of svMap.chords) {
+      for (let i = 0; i < l.values.length; i++) {
+        if (!l.uncovered[i] && l.values[i] > vmax) vmax = l.values[i];
+      }
+    }
+    svMap.crossing_values.forEach((v, i) => {
+      if (!svMap.crossing_uncovered[i] && v > vmax) vmax = v;
+    });
+    const byCid = new Map(svMap.crossing_cids.map((cid, i) => [cid, i] as const));
+    const read = (value: number, rank: number, uncovered: boolean) =>
+      uncovered ? null
+        : view === 'calibrated' ? (vmax > 0 ? value / vmax : 0) : rank / 100;
+    return { map: svMap, view, read, byCid, vmax };
+  }, [svOn, svMap, svViewSel]);
+
   if (k < 3) return null;
 
   const pick = (cid: number | null) => {
@@ -577,7 +693,7 @@ export default function CascadeMap({
                     walkColors={walkColors}
                     caption={`view ${b + 1}·${(b % nViews) + 2 > nViews ? 1 : b + 2}`}
                     showBeat={b === 0} compact
-                    probes={probes} pendingCid={probePending} />
+                    probes={probes} pendingCid={probePending} sv={sv} />
           ))}
         </div>
       ) : (
@@ -585,14 +701,53 @@ export default function CascadeMap({
                 sel={sel} onPick={pick} walkPath={walkPath} walkSegs={walkSegs}
                 walkColors={walkColors}
                 showBadge showBeat spin={spin}
-                probes={probes} pendingCid={probePending} />
+                probes={probes} pendingCid={probePending} sv={sv} />
       )}
       <div style={{ fontSize: 11, color: '#889', maxWidth: 190 }}>
+        {sv && (
+          <div style={{ marginBottom: 8, paddingBottom: 8,
+                        borderBottom: '1px solid #23234d' }}>
+            <div style={{ color: '#aeb6dd' }}>
+              boundary density{' '}
+              <span style={{ color: '#667' }}>
+                · {sv.view === 'calibrated' ? 'S_V units' : 'percentile'}
+              </span>
+            </div>
+            {/* the ramp itself, with a hairline ring so the lightest step stays bounded
+                rather than bleeding into whatever surface the panel is drawn on */}
+            <div style={{ height: 8, borderRadius: 2, marginTop: 4,
+                          border: '1px solid rgba(255,255,255,0.10)',
+                          background: `linear-gradient(90deg, ${SV_RAMP.join(', ')})` }} />
+            <div style={{ display: 'flex', justifyContent: 'space-between',
+                          fontVariantNumeric: 'tabular-nums', color: '#889' }}>
+              <span>{sv.view === 'calibrated' ? '0' : '0%'}</span>
+              <span>{sv.view === 'calibrated'
+                ? sv.vmax.toFixed(sv.vmax >= 10 ? 0 : 1) : '100%'}</span>
+            </div>
+            <div style={{ color: '#667' }}>
+              <span style={{ color: SV_NONE }}>―</span> no local evidence (kernel mass
+              under 5% of median)
+            </div>
+            <div style={{ color: '#667', marginTop: 2 }}>
+              {sv.map.n_chords} chords · h={sv.map.h.toFixed(2)}
+              {sv.map.s_global !== null
+                && ` · global S_V ${sv.map.s_global.toFixed(1)}`}
+            </div>
+            {!sv.map.calibrated_ok && (
+              <div style={{ color: '#c9a227', marginTop: 2 }}>
+                ranking only — values need ≥ 80 chords
+              </div>
+            )}
+          </div>
+        )}
         <div style={{ marginBottom: 6 }}>
           <span style={{ color: '#7d84c8' }}>·</span> generated images — colour = local
           divergence (<span style={{ color: '#5a64b0' }}>quiet</span> → <span
           style={{ color: WARN }}>hot</span>), pings mark fresh ones
-          <br /><span style={{ color: '#4a4f8f' }}>―</span> search chords (drawn as laid)
+          <br /><span style={{ color: sv ? SV_RAMP[2] : '#4a4f8f' }}>―</span> search chords
+          {sv ? ' — coloured by the density above; crossing dots share that scale and'
+                + ' keep certification in their ring'
+              : ' (drawn as laid)'}
           <br /><span style={{ color: '#7d84c8' }}>●</span> boundary found (pulsing =
           still being worked on)
           <br /><span style={{ color: ACCENT }}>●</span> certified — beats the run's own
