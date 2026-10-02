@@ -500,6 +500,10 @@ class CascadeChordMeta(BaseModel):
     # chord index this ray was spawned from, and the crossing on it (-1 -1 for roots)
     parent: int = -1
     origin_cid: int = -1
+    # angle spreading of a child ray: the line angle it achieved against the nearby chords it was
+    # spread away from, and how many of those there were (None/0 for roots, which are not spread)
+    min_angle_deg: float | None = None
+    n_near: int = 0
 
 
 class CascadeCrossing(BaseModel):

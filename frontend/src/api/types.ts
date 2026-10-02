@@ -328,6 +328,10 @@ export interface CascadeChordMeta {
   // chord it was spawned from and the crossing on it (-1 -1 for roots)
   parent: number;
   origin_cid: number;
+  // angle spreading of a child ray: the line angle it achieved against the nearby chords it was
+  // spread away from, and how many of those there were (null/0 for roots, which are not spread)
+  min_angle_deg?: number | null;
+  n_near?: number;
 }
 
 export interface CascadeCrossing {

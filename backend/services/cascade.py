@@ -114,7 +114,8 @@ class CascadeRun:
     status: str = "running"
     phase: str = "chords"
     chords_geo: list = field(default_factory=list)   # [(a_weights, b_weights)] for the map
-    chords_meta: list = field(default_factory=list)  # parallel to chords_geo: [{gen, parent, origin_cid}]
+    # parallel to chords_geo: [{gen, parent, origin_cid}], children also [+ min_angle_deg, n_near]
+    chords_meta: list = field(default_factory=list)
     probe_geo: list = field(default_factory=list)    # completed-point positions, live map cloud
     phase_done: int = 0
     phase_total: int = 0
@@ -188,6 +189,48 @@ def _iso_dir(k, rng):
     u = rng.standard_normal(k)
     u -= u.mean()
     return u / np.linalg.norm(u)
+
+
+BRANCH_NEAR_R = 0.15     # a chord passing this close to an origin (tangent units, ~6 fine cells) is its neighbour
+BRANCH_N_CAND = 64       # isotropic candidates one child direction is picked from (best-candidate, as _blue_anchor)
+
+
+def _near_dirs(origin_w, geo, r=BRANCH_NEAR_R):
+    """Unit directions of the stored chords whose SEGMENT passes within r of origin_w.
+
+    The parent always qualifies: the origin is the midpoint of one of its brackets, so its
+    distance is 0. Chords further than r are left out on purpose -- a parallel chord elsewhere
+    samples different territory, and only the local neighbours can shadow this fan.
+    """
+    p = np.asarray(origin_w, dtype=float)
+    out = []
+    for a, b in geo:
+        a = np.asarray(a, dtype=float)
+        b = np.asarray(b, dtype=float)
+        d = b - a
+        nn = np.linalg.norm(d)
+        if nn < 1e-12 or _seg_dist(p, a, b) > r:
+            continue
+        out.append(d / nn)
+    return out
+
+
+def _spread_dir(existing, rng, k, n_cand=BRANCH_N_CAND):
+    """Mitchell best-candidate over ANGLES: draw n_cand isotropic directions and keep the one
+    whose smallest LINE angle to `existing` is largest. Returns (direction, that angle in deg).
+
+    Chords are undirected lines, so the angle is arccos(|u.v|) -- parallel and anti-parallel both
+    count as parallel. Candidates come from the run's rng, so the survey stays reproducible.
+    With the parent alone and k=4 the first child comes out near-orthogonal to it; the caller
+    feeds each chosen direction back in, so the next sibling spreads away from both.
+    """
+    cands = [_iso_dir(k, rng) for _ in range(n_cand)]
+    if not existing:
+        return cands[0], 90.0        # nothing to spread away from
+    # per candidate: the most parallel neighbour, i.e. the one that bounds its minimum angle
+    worst = np.abs(np.stack(cands) @ np.stack(existing).T).max(axis=1)
+    i = int(np.argmin(worst))
+    return cands[i], float(np.degrees(np.arccos(min(1.0, worst[i]))))
 
 
 def _extent(w, u):
@@ -1140,10 +1183,14 @@ def run_cascade(app, run, pool):
                 if len(chords) >= max_chords:
                     break
                 w0 = np.clip((x.wa + x.wb) / 2, 0, None)
+                # the fan maximises its angle to the chords ALREADY passing this origin (the
+                # parent first of all) and, greedily, to the siblings drawn before it: near-parallel
+                # rays would re-probe the sheet their neighbour already resolved
+                near = _near_dirs(w0, run.chords_geo)
                 for _ in range(run.branch):
                     if len(chords) >= max_chords:
                         break
-                    u = _iso_dir(k, rng)
+                    u, ang = _spread_dir(near, rng, k)
                     _t, tpos = _extent(w0, u)
                     lo, hi = 0.0, tpos
                     if focus is not None:
@@ -1151,8 +1198,12 @@ def run_cascade(app, run, pool):
                         if cl is None:
                             continue
                         lo, hi = cl
-                    _add_chord(w0, u, lo, hi, g, parent_of[x.cid], x.cid,
-                               chord_pts, chord_meta)
+                    ci = _add_chord(w0, u, lo, hi, g, parent_of[x.cid], x.cid,
+                                    chord_pts, chord_meta)
+                    if ci < 0:
+                        continue      # too short to probe: not a chord, so not a neighbour either
+                    run.chords_meta[ci].update(min_angle_deg=ang, n_near=len(near))
+                    near.append(u)
             if not chord_pts:
                 break
         run.phase_total += len(chord_pts)
@@ -1185,12 +1236,15 @@ def run_cascade(app, run, pool):
         if run.branch > 0:
             n_gen = sum(1 for m in run.chords_meta if m["gen"] == g)
             n_new = sum(len(v) for v in found_prev.values())
+            spread = [m["min_angle_deg"] for m in run.chords_meta
+                      if m["gen"] == g and m.get("min_angle_deg") is not None]
             run.notes.append(
                 f"gen {g}: {n_gen} chords"
                 + ("" if g == 0 else
                    f" from {len(origins)} origins "
                    f"(top {run.branch_top_pct} % of {len(prev_x)} crossings)")
-                + f", {n_new} crossings")
+                + f", {n_new} crossings"
+                + (f", median spread {np.median(spread):.0f}°" if spread else ""))
         else:
             run.notes.append(f"{len(chords)} chords, {len(cand)} crossings")
     if run.branch > 0:

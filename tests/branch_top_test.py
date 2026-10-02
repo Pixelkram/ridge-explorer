@@ -140,8 +140,11 @@ def _fans(run, cap, branch, pct, label):
               f"{label} gen {g}: each selected origin spawns {branch} rays until the cap",
               f"fans {[cnt.get(x.cid, 0) for x in origins]}")
         n_new = sum(1 for x in run.crossings if x.gen == g)
+        # the angle-spreading suffix (tests/branch_spread_test.py covers the spreading itself)
+        spread = [m["min_angle_deg"] for m in run.chords_meta if m["gen"] == g]
         note = (f"gen {g}: {got} chords from {len(origins)} origins "
-                f"(top {pct} % of {len(prev)} crossings), {n_new} crossings")
+                f"(top {pct} % of {len(prev)} crossings), {n_new} crossings"
+                + (f", median spread {np.median(spread):.0f}°" if spread else ""))
         check(note in run.notes, f"{label} gen {g}: the note names origins and the percentile",
               note)
 
