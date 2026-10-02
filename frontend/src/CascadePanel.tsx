@@ -16,6 +16,8 @@ import {
 import type { CascadeStatus, CascadePatch, WalkStatus } from './api/types';
 import CascadeMap from './CascadeMap';
 import { useProbeStore } from './stores/probeStore';
+import { useHandoff } from './stores/handoffStore';
+import { feature } from './featureFlags';
 
 const BOX: React.CSSProperties = {
   background: '#16213e', border: '1px solid #333', borderRadius: 4,
@@ -443,6 +445,16 @@ export default function CascadePanel() {
     if (svOn && runId && status?.status === 'complete') void fetchSv(runId);
   }, [svOn, runId, status?.status, fetchSv]);
 
+  // "open in microscope": hand the selected crossing to the Ridge microscope panel, which
+  // reads the run itself (crossing mode: its prompts, seed and steps, the cloud normal if any)
+  const openInMicroscope = useHandoff((st) => st.openInMicroscope);
+  const scopeCrossing = (cid: number) => {
+    const c = status?.crossings.find((x) => x.cid === cid);
+    if (!c || !runId || !status) return;
+    openInMicroscope({ from: 'cascade', prompts: status.prompts, weights: c.weights,
+                       cascadeRunId: runId, cid });
+  };
+
   const running = status?.status === 'running';
   // this RUN was started with certify off, whatever the checkbox says now
   const uncert = status?.certify === false;
@@ -850,6 +862,25 @@ export default function CascadePanel() {
                               walkPath={walkPath}
                               walkSegs={walk?.segs ?? null}
                               walkColors={walkColors} />
+                </div>
+              )}
+
+              {selCid !== null && status.status === 'complete' && runId
+                && feature('microscope') && (
+                <div style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'center',
+                              flexWrap: 'wrap' }}>
+                  <button className="rx-focus" onClick={() => scopeCrossing(selCid)}
+                          title="a G × G lattice of full-fidelity images on a plane through this crossing: e1 across the boundary (its hi-res cloud normal if the run measured one, else its chord), e2 from the cloud's balanced principal direction or random. Costs G² images at any k; click a cell to zoom 2×."
+                          style={{ background: '#0f3460', color: '#fff',
+                                   border: `1px solid ${ACCENT}`, borderRadius: 3,
+                                   padding: '2px 10px', cursor: 'pointer' }}>
+                    ⊞ open crossing {selCid} in the microscope
+                  </button>
+                  <span style={{ color: '#667', fontSize: 11 }}>
+                    an image lattice on a plane through it ({status.crossings.find(
+                      (x) => x.cid === selCid)?.cloud?.normal ? 'e1 = its cloud normal'
+                      : 'e1 = its chord'})
+                  </span>
                 </div>
               )}
 

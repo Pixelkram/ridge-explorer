@@ -112,8 +112,9 @@ VITE_RIDGE_HIDE=og npm run dev        # every tab opens on the original surface
 | `?hide=og&show=itinerary` | preset minus one |
 | `?hide=none` | everything back, even if `VITE_RIDGE_HIDE` hid it |
 
-Individually gateable: `hikers`, `cascade`, `amr`, `metro`, `discovery`, `itinerary`,
-`mfscan`, `surprise`, `explore`, `fastscan`, `refine`, `seeds`, `threed`. The `og` preset keeps
+Individually gateable: `hikers`, `cascade`, `amr`, `metro`, `microscope` (aliases `scope`,
+`plane`), `discovery`, `itinerary`, `mfscan`, `surprise`, `explore`, `fastscan`, `refine`,
+`seeds`, `threed`. The `og` preset keeps
 Explore, Fast Scan, Refine, the seed controls and the 2D/3D selector — add them by name
 (`?hide=og,explore`) to strip further. Names are case- and separator-insensitive
 (`MF-Scan` = `mfscan`) and a few aliases work (`hike`, `discover`, `3d`); an unrecognised
@@ -240,6 +241,27 @@ generation is bit-identical afterwards (`tests/probe_e2e.py`). Routes: `POST /ap
 - Fixed 2026-09-26: a walk from crossing 0 errored ("no tangent direction") whenever that crossing lay on chord 0 —
   the walk's tangent seed and chord 0's direction came from the same random stream. It now redraws; all other
   walks keep their exact plane.
+
+## Looking closely at one place (any k)
+
+The surveys above cover the simplex; these views look at one recipe in it, at a cost that does
+not grow with k.
+
+- **Ridge microscope** (`microscope` flag; `backend/services/microscope.py`) — a G × G lattice
+  (G ∈ {3, 5, 7}) of full-fidelity images on a 2-D plane through one recipe,
+  w = w0 + s·(a·e1 + b·e2), a, b ∈ [−1, 1]: G² images at every k, cells outside the simplex
+  shown empty and never rendered. The plane is the crossing's (open it from a selected Cascade
+  crossing: e1 = its hi-res cloud normal, else its chord; e2 = the first principal direction of
+  a balanced set of its cloud points, as Sohns et al. 2023, else random), a prompt swap
+  (e1 = Pᵢ up / Pⱼ down, e2 another pair) or random. Neighbouring cells further apart than the
+  Cascade's COS_T = 0.35 get a boundary bar (single seed); a grey biplot shows which prompt grows
+  in which screen direction. Clicking a cell zooms 2× around it (Sequential Gallery, Koyama et
+  al. 2020) into a new level of the same plane; levels are cached and a zoom reuses the parent's
+  coinciding cells. Refused past 400 images per run. Routes: `POST /api/microscope/plan` (the
+  plane, lattice and cost, nothing rendered), `POST /api/microscope/start`,
+  `GET /api/microscope/{run}/status`, `POST /api/microscope/{run}/zoom {level, ia, ib}`,
+  `POST /api/microscope/{run}/cancel`, `GET /api/microscope/{run}/image/{index}`;
+  `tests/microscope_test.py`.
 
 ## Architecture
 

@@ -1252,3 +1252,146 @@ class GenericProbeRequest(BaseModel):
     height: int = Field(config.DEFAULT_HEIGHT, ge=64, le=1024)
     width: int = Field(config.DEFAULT_WIDTH, ge=64, le=1024)
     use_slerp: bool = False
+
+
+# ---- Ridge microscope (services/microscope.py) ---------------------------------------------
+
+class MicroscopeRequest(BaseModel):
+    """One plane through one point, and the lattice on it. /plan and /start take the same body.
+
+    `mode` picks the plane (see services/microscope.py): "crossing" reads a finished Cascade
+    run's crossing (`cascade_run_id` + `cid`) and takes that run's prompts and image settings,
+    so the lattice is drawn from the very field the crossing was found in; "prompt-swap" needs
+    `swap_a` = [i, j] and `swap_b` = [p, q]; "random" needs nothing. `centre` defaults to the
+    crossing's midpoint (crossing mode) or the barycentre.
+    """
+    mode: Literal["crossing", "prompt-swap", "random"] = "random"
+    prompts: list[str] | None = Field(None, min_length=3, max_length=12)
+    centre: list[float] | None = None
+    cascade_run_id: str | None = None
+    cid: int | None = None
+    swap_a: list[int] | None = Field(None, min_length=2, max_length=2)
+    swap_b: list[int] | None = Field(None, min_length=2, max_length=2)
+    # G x G lattice: Sequential Gallery's 3 x 3 / 5 x 5, plus 7 x 7
+    grid: Literal[3, 5, 7] = 5
+    # half-width of the lattice in tangent units (a, b in [-1, 1] times s)
+    s: float = Field(0.10, gt=0.0, le=0.5)
+    # the random directions' seed (None = `seed`) and how many times e2 was re-drawn
+    plane_seed: int | None = None
+    e2_redraw: int = Field(0, ge=0, le=100000)
+    seed: int = 42
+    steps: int = Field(config.DEFAULT_NUM_INFERENCE_STEPS, ge=1, le=50)
+    height: int = Field(config.DEFAULT_HEIGHT, ge=64, le=1024)
+    width: int = Field(config.DEFAULT_WIDTH, ge=64, le=1024)
+    guidance_scale: float = Field(config.DEFAULT_GUIDANCE_SCALE, ge=0.0, le=20.0)
+
+
+class MicroCell(BaseModel):
+    """One lattice cell. ia/ib index a (along e1, screen x) and b (along e2, screen y up);
+    `image` is -1 until rendered and stays -1 for an outside cell, which is never rendered.
+    `zoom_cost` = new images a click here would render (0 once that level exists; null where
+    the zoom would pass the smallest half-width)."""
+    ia: int
+    ib: int
+    a: float
+    b: float
+    w: list[float]
+    inside: bool
+    image: int = -1
+    zoom_cost: int | None = None
+
+
+class MicroEdge(BaseModel):
+    """Two 4-neighbour cells, both rendered: their cosine distance, and whether it passes the
+    Cascade's crossing threshold COS_T (a boundary between them)."""
+    a: list[int]
+    b: list[int]
+    div: float
+    boundary: bool
+
+
+class MicroPlan(BaseModel):
+    """What /start would do, before anything is rendered: the plane, the lattice with its
+    outside cells, the biplot and the cost."""
+    k: int
+    prompts: list[str]
+    mode: str
+    centre: list[float]
+    s: float
+    grid: int
+    e1: list[float]
+    e2: list[float]
+    plane_note: str
+    biplot: list[list[float]]
+    cells: list[MicroCell]
+    n_inside: int
+    cost_image_eq: float
+    max_image_eq: float
+    seed: int
+    steps: int
+    source_run: str | None = None
+    source_cid: int | None = None
+    notes: list[str] = []
+
+
+class MicroStartResponse(BaseModel):
+    run_id: str
+    status: str
+    level: int = 0
+    cost_image_eq: float = 0.0
+
+
+class MicroLevel(BaseModel):
+    level: int
+    parent: int | None = None
+    parent_cell: list[int] | None = None
+    centre: list[float]
+    s: float
+    grid: int
+    status: str
+    cells: list[MicroCell]
+    edges: list[MicroEdge] = []
+    n_inside: int = 0
+    n_new: int = 0
+    n_reused: int = 0
+    notes: list[str] = []
+    error: str | None = None
+
+
+class MicroStatus(BaseModel):
+    run_id: str
+    status: str
+    k: int = 0
+    prompts: list[str] = []
+    mode: str = ""
+    e1: list[float] = []
+    e2: list[float] = []
+    plane_note: str = ""
+    biplot: list[list[float]] = []
+    grid: int = 5
+    seed: int = 0
+    steps: int = 0
+    source_run: str | None = None
+    source_cid: int | None = None
+    levels: list[MicroLevel] = []
+    cost_image_eq: float = 0.0
+    max_image_eq: float = 0.0
+    s_min: float = 0.0
+    cos_t: float = 0.35
+    generated: int = 0
+    notes: list[str] = []
+    error: str | None = None
+
+
+class MicroZoomRequest(BaseModel):
+    level: int = Field(..., ge=0)
+    ia: int = Field(..., ge=0)
+    ib: int = Field(..., ge=0)
+
+
+class MicroZoomResponse(BaseModel):
+    level: int
+    cached: bool
+    status: str
+    cost_image_eq: float = 0.0
+

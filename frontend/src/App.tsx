@@ -8,6 +8,7 @@ import DiscoverPanel from './DiscoverPanel';
 import CascadePanel from './CascadePanel';
 import AmrPanel from './AmrPanel';
 import MetroPanel from './MetroPanel';
+import MicroscopePanel from './MicroscopePanel';
 import SurpriseSlider from './components/SurpriseSlider';
 import { feature } from './featureFlags';
 
@@ -2525,6 +2526,10 @@ export default function App() {
           proportion to the sharpness of the field, so its gallery is a fair sample of the
           ridges rather than a tour of the ones a survey happened to find (h25a). */}
       {feature('metro') && <MetroPanel />}
+      {/* k-independent views: instead of covering the simplex, look closely at one place in
+          it. The microscope lays a G x G image lattice on a plane through a recipe -- G^2
+          images at any k -- and zooms 2x per click (Sequential Gallery). */}
+      {feature('microscope') && <MicroscopePanel />}
       <MainViewport />
       <ExportOverlay />
     </div>

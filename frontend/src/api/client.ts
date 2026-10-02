@@ -498,3 +498,63 @@ export async function cascadeLocalSv(
   const r = await fetchRetry(`${BASE}/api/cascade/${runId}/local-sv?mode=${mode}`);
   return jsonOrThrow(r, 'cascadeLocalSv');
 }
+
+// ---- Ridge microscope ----
+// /plan is geometry only (the plane, the lattice, the cost) and is called while the form is
+// edited; /start and /zoom can be refused with a 4xx whose detail is the useful answer (a cost
+// past the ceiling, an outside cell, a crossing that cannot be honoured), so it is lifted out.
+async function microPost<T>(path: string, body?: unknown): Promise<T> {
+  const r = await fetchRetry(`${BASE}/api/microscope/${path}`, {
+    method: 'POST',
+    ...(body === undefined ? {} : {
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  });
+  if (!r.ok) {
+    let detail = `microscope ${path} failed: HTTP ${r.status}`;
+    try {
+      const j = await r.json();
+      if (typeof j?.detail === 'string') detail = j.detail;
+      else if (Array.isArray(j?.detail) && j.detail[0]?.msg) detail = j.detail[0].msg;
+    } catch { /* keep the HTTP line */ }
+    throw new Error(detail);
+  }
+  return r.json();
+}
+
+export function microscopePlan(
+  req: import('./types').MicroscopeRequest,
+): Promise<import('./types').MicroPlan> {
+  return microPost('plan', req);
+}
+
+export function microscopeStart(
+  req: import('./types').MicroscopeRequest,
+): Promise<import('./types').MicroStartResponse> {
+  return microPost('start', req);
+}
+
+/** `level` = the level on screen: only its cells get a zoom cost quoted. */
+export async function microscopeStatus(
+  runId: string, level?: number,
+): Promise<import('./types').MicroStatus> {
+  // bare fetch on purpose: retrying a poll just delays the next one
+  const r = await fetch(`${BASE}/api/microscope/${runId}/status`
+                        + (level === undefined ? '' : `?level=${level}`));
+  return r.json();
+}
+
+export function microscopeZoom(
+  runId: string, level: number, ia: number, ib: number,
+): Promise<import('./types').MicroZoomResponse> {
+  return microPost(`${runId}/zoom`, { level, ia, ib });
+}
+
+export async function microscopeCancel(runId: string): Promise<void> {
+  await fetch(`${BASE}/api/microscope/${runId}/cancel`, { method: 'POST' });
+}
+
+export function microscopeImageUrl(runId: string, index: number): string {
+  return `${BASE}/api/microscope/${runId}/image/${index}`;
+}

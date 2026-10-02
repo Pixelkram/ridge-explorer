@@ -944,3 +944,120 @@ export interface WalkStatus {
   cert?: { status: string; b?: (number | null)[]; significant?: boolean[]; threshold?: number | null; error?: string } | null;
   jvp?: { rank1_share: number; participation_ratio: number; cos_with_bracket?: number; wall_s: number } | null;
 }
+
+// ---- Ridge microscope: an image lattice on a 2-D plane through a point (any k) ----
+
+export type MicroMode = 'crossing' | 'prompt-swap' | 'random';
+
+/** One body for /plan and /start (backend MicroscopeRequest). */
+export interface MicroscopeRequest {
+  mode: MicroMode;
+  prompts?: string[] | null;          // crossing mode: taken from the cascade run
+  centre?: number[] | null;           // default: the crossing midpoint / the barycentre
+  cascade_run_id?: string | null;
+  cid?: number | null;
+  swap_a?: number[] | null;           // [i, j]: e1 = P_i up / P_j down
+  swap_b?: number[] | null;           // [p, q]: e2 likewise, orthogonalised
+  grid?: 3 | 5 | 7;
+  s?: number;                         // half-width in tangent units
+  plane_seed?: number | null;
+  e2_redraw?: number;
+  seed?: number;
+  steps?: number;
+}
+
+export interface MicroCell {
+  ia: number;                         // index along e1 (screen x)
+  ib: number;                         // index along e2 (screen y, up)
+  a: number;
+  b: number;
+  w: number[];
+  inside: boolean;
+  image: number;                      // -1 until rendered; outside cells are never rendered
+  zoom_cost?: number | null;          // new images a click here renders (0 = level exists)
+}
+
+export interface MicroEdge {
+  a: number[];                        // [ia, ib]
+  b: number[];
+  div: number;                        // 1 - cos between the two cells
+  boundary: boolean;                  // div > COS_T
+}
+
+export interface MicroPlan {
+  k: number;
+  prompts: string[];
+  mode: MicroMode;
+  centre: number[];
+  s: number;
+  grid: number;
+  e1: number[];
+  e2: number[];
+  plane_note: string;
+  biplot: number[][];                 // per prompt: [e1[i], e2[i]]
+  cells: MicroCell[];
+  n_inside: number;
+  cost_image_eq: number;
+  max_image_eq: number;
+  seed: number;
+  steps: number;
+  source_run?: string | null;
+  source_cid?: number | null;
+  notes: string[];
+}
+
+export interface MicroStartResponse {
+  run_id: string;
+  status: string;
+  level: number;
+  cost_image_eq: number;
+}
+
+export interface MicroLevel {
+  level: number;
+  parent: number | null;
+  parent_cell: number[] | null;
+  centre: number[];
+  s: number;
+  grid: number;
+  status: string;
+  cells: MicroCell[];
+  edges: MicroEdge[];
+  n_inside: number;
+  n_new: number;
+  n_reused: number;
+  notes: string[];
+  error?: string | null;
+}
+
+export interface MicroStatus {
+  run_id: string;
+  status: string;
+  k: number;
+  prompts: string[];
+  mode: string;
+  e1: number[];
+  e2: number[];
+  plane_note: string;
+  biplot: number[][];
+  grid: number;
+  seed: number;
+  steps: number;
+  source_run?: string | null;
+  source_cid?: number | null;
+  levels: MicroLevel[];
+  cost_image_eq: number;
+  max_image_eq: number;
+  s_min: number;
+  cos_t: number;
+  generated: number;
+  notes: string[];
+  error?: string | null;
+}
+
+export interface MicroZoomResponse {
+  level: number;
+  cached: boolean;
+  status: string;
+  cost_image_eq: number;
+}
