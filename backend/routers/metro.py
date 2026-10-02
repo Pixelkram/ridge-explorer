@@ -1,4 +1,6 @@
-"""Metropolis sampler endpoints: start / status / cancel / images / samples.json.
+"""Metropolis sampler endpoints: start / status / cancel / images / samples.json, plus the
+live controls that drive a chain while it runs: params, chains, chains/{id}/stop,
+pause, resume.
 
 Mirrors the AMR run pattern (routers/amr.py), which mirrors the Cascade's: a plain sync
 worker on a thread via asyncio.to_thread, cooperative cancel through run.status, state in
@@ -17,6 +19,14 @@ Two things this router does beyond that:
 
 `GET /api/metro/cascade-runs` lists the runs that mode can use, so the panel can offer a
 selector instead of asking the user to remember an 8-hex id.
+
+The five live controls share one shape: they only make sense while the loop is still going
+round, so each answers 409 on a run that has finished, cancelled or errored rather than
+accepting a change nothing will ever read. Every one of them is applied at the START of the
+next round, never inside the batch in flight -- the semantics, and the reason, are in
+services/metro.py's header. The only one that can be refused for a reason other than the
+run's state is adding a chain: a chain is `chain_steps` more rounds of (1 + m) probes, so it
+is projected against the same `MAX_IMAGE_EQ` ceiling the start form is refused on.
 """
 import asyncio
 import uuid
@@ -25,9 +35,11 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 
 from backend.models import (MetroStartRequest, MetroStartResponse, MetroStatus, MetroSample,
-                            MetroChainStat, MetroSummary, MetroExport, MetroCascadeRun)
+                            MetroChainStat, MetroSummary, MetroExport, MetroCascadeRun,
+                            MetroRoundLog, MetroEvent, MetroRoundEvents, MetroParams,
+                            MetroParamsRequest, MetroAddChainRequest)
 from backend.services import metro
-from backend.services.cascade import COS_T
+from backend.services.cascade import COS_T, _clipn
 from backend.cache.thumbnail_cache import ThumbnailStore
 
 router = APIRouter(prefix="/api/metro", tags=["metro"])
@@ -159,7 +171,41 @@ def _samples(run):
 
 
 def _chain_stats(run):
-    return [MetroChainStat(**c) for c in run.chains_state]
+    """The per-chain record, with the acceptance rate filled in from the counters."""
+    out = []
+    for c in run.chains_state:
+        p = int(c.get("n_propose", 0))
+        out.append(MetroChainStat(
+            **c, acc_rate=(float(c.get("n_accept", 0)) / p) if p else None))
+    return out
+
+
+def _live(run):
+    """The live-view half of /status: the round log, the events to animate, the kernel."""
+    return {
+        "rounds": [MetroRoundLog(**r) for r in run.rounds],
+        "last_events": [MetroEvent(**e) for e in getattr(run, "last_events", [])],
+        "recent_events": [
+            MetroRoundEvents(round=b["round"],
+                             events=[MetroEvent(**e) for e in b["events"]])
+            for b in getattr(run, "recent_events", [])],
+        "paused": bool(getattr(run, "paused", False)),
+        "params": MetroParams(sigma=run.sigma, beta=run.beta),
+        "params_changed": bool(getattr(run, "params_changed", False)),
+    }
+
+
+def _live_run(app, run_id):
+    """The run, or the reason it cannot be driven: 404 unknown, 409 no longer running."""
+    run = _runs(app).get(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"no metro run {run_id}")
+    if run.status != "running":
+        raise HTTPException(
+            status_code=409,
+            detail=f"metro run {run_id} is {run.status}: its round loop has stopped, so a "
+                   f"live control would never be read. Start a new run.")
+    return run
 
 
 @router.get("/{run_id}/status", response_model=MetroStatus)
@@ -181,7 +227,7 @@ async def status(run_id: str, request: Request):
         seed_divs=[x["divergence"] for x in run.seed_crossings],
         chains_stats=_chain_stats(run), samples=_samples(run),
         summary=MetroSummary(**run.summary()),
-        notes=list(run.notes), error=run.error)
+        notes=list(run.notes), error=run.error, **_live(run))
 
 
 @router.post("/{run_id}/cancel")
@@ -190,6 +236,95 @@ async def cancel(run_id: str, request: Request):
     if run is not None and run.status == "running":
         run.status = "cancelled"
     return {"ok": True}
+
+
+# ---- live controls -------------------------------------------------------------------
+
+@router.post("/{run_id}/params")
+async def set_params(run_id: str, req: MetroParamsRequest, request: Request):
+    """Change sigma and/or beta from the panel; the next round runs under the new kernel.
+
+    The bounds are the start form's (the schema's), so nothing reachable here would have been
+    refused there. What this DOES cost is stationarity -- the chain is no longer sampling one
+    law -- which is why the run sets `params_changed` and writes the round into its notes
+    rather than letting the change pass silently.
+    """
+    run = _live_run(request.app, run_id)
+    if req.sigma is None and req.beta is None:
+        raise HTTPException(status_code=400,
+                            detail="give sigma, beta or both; neither was sent")
+    metro.request_params(run, sigma=req.sigma, beta=req.beta)
+    return {"ok": True, "queued": {"sigma": req.sigma, "beta": req.beta},
+            "applies_at_round": int(run.round_done) + 1,
+            "params": {"sigma": run.sigma, "beta": run.beta}}
+
+
+@router.post("/{run_id}/chains")
+async def add_chain(run_id: str, req: MetroAddChainRequest, request: Request):
+    """Start one more chain at a recipe, joining at the next round.
+
+    Two refusals. The recipe must be a legal one over THIS run's prompts -- right length,
+    non-negative, summing to 1 to 1e-3 (renormalised exactly after that, so a slider's
+    round-off is forgiven and a vector that is simply not a recipe is not). And the chain is
+    `chain_steps` more rounds of (1 + m) probes, so the run is re-projected with it against
+    the same ceiling the start form is refused on: adding chains one click at a time must not
+    get past a limit that typing the same number into the form would have hit.
+    """
+    run = _live_run(request.app, run_id)
+    w = [float(v) for v in req.w]
+    if len(w) != run.k:
+        raise HTTPException(
+            status_code=400,
+            detail=f"this run has k={run.k} prompts but the recipe has {len(w)} weights")
+    if any(v != v or v in (float("inf"), float("-inf")) for v in w):
+        raise HTTPException(status_code=400, detail="the recipe has a non-finite weight")
+    if min(w) < -1e-9 or abs(sum(w) - 1.0) > 1e-3:
+        raise HTTPException(
+            status_code=400,
+            detail=f"not a legal recipe: weights must be non-negative and sum to 1 "
+                   f"(got min {min(w):.4g}, sum {sum(w):.6g})")
+    total, rows = metro.projected_with_chains(run, 1)
+    if total > metro.MAX_IMAGE_EQ:
+        parts = "; ".join(f"{r['what']} = {r['image_eq']:.0f} image-eq" for r in rows)
+        raise HTTPException(
+            status_code=400,
+            detail=f"one more chain would project {total:.0f} image-eq for this run, past "
+                   f"the {metro.MAX_IMAGE_EQ} ceiling: {parts}. A chain costs "
+                   f"{run.chain_steps} more rounds of (1 + {run.m}) probes, so the whole run "
+                   f"is re-projected with it -- the same number the start form is refused "
+                   f"on. Stop some chains, or run a second, shorter run.")
+    cid = metro.queue_chain(run, [float(v) for v in _clipn(w, run.k)])
+    return {"ok": True, "chain": cid, "queued": True,
+            "joins_at_round": int(run.round_done) + 1,
+            "projected_image_eq": float(total)}
+
+
+@router.post("/{run_id}/chains/{chain}/stop")
+async def stop_chain(run_id: str, chain: int, request: Request):
+    """Freeze one chain: it proposes no more, and every state it already accepted is kept."""
+    run = _live_run(request.app, run_id)
+    if not metro.stop_chain(run, chain):
+        raise HTTPException(
+            status_code=404,
+            detail=f"metro run {run_id} has no chain {chain} (it has "
+                   f"{len(run.chains_state)}; a chain added by hand only exists from the "
+                   f"round it joins at)")
+    return {"ok": True, "chain": int(chain), "stopped": True}
+
+
+@router.post("/{run_id}/pause")
+async def pause(run_id: str, request: Request):
+    """Stop dispatching between rounds. Holds no GPU worker: it just stops asking."""
+    run = _live_run(request.app, run_id)
+    run.paused = True
+    return {"ok": True, "paused": True, "round_done": int(run.round_done)}
+
+
+@router.post("/{run_id}/resume")
+async def resume(run_id: str, request: Request):
+    run = _live_run(request.app, run_id)
+    run.paused = False
+    return {"ok": True, "paused": False, "round_done": int(run.round_done)}
 
 
 @router.get("/{run_id}/samples.json", response_model=MetroExport)
@@ -206,6 +341,8 @@ async def samples_export(run_id: str, request: Request):
         probe_steps=run.probe_steps, cos_t=COS_T,
         seeds=[list(x["weights"]) for x in run.seed_crossings],
         samples=_samples(run), chains_stats=_chain_stats(run),
+        rounds=[MetroRoundLog(**r) for r in run.rounds],
+        params_changed=bool(getattr(run, "params_changed", False)),
         summary=MetroSummary(**run.summary()), notes=list(run.notes))
 
 

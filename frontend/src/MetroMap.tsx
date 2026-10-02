@@ -1,13 +1,13 @@
 /**
- * MetroMap -- the Metropolis chains drawn on the space they sample.
+ * MetroMap -- the Metropolis chains drawn on the space they sample, moving while they sample it.
  *
  * Same picture as CascadeMap and AmrMap, by the same arithmetic (`makeProjector`,
  * `viewTransform`): prompt vertices around the hull, the k=3 triangle exact, k>=4 a 2-D
- * shadow of the (k-1)-dimensional space that left-drag turns. Three layers:
+ * shadow of the (k-1)-dimensional space that left-drag turns. Five layers:
  *
  *   * the SEED crossings as hollow rings -- where the survey (or this run's own chords)
  *     handed the chains their starting sheets;
- *   * each chain's accepted states joined in order as a faint POLYLINE -- the path is
+ *   * each chain's accepted states joined in order as a faint TRACE polyline -- the path is
  *     structure, not data, so it takes the map's existing chord token at low opacity and
  *     stays recessive under the dots. (This is deliberately below the 3:1 contrast a data
  *     mark needs: nothing is encoded by it alone, the legend names it, and the sample's own
@@ -15,37 +15,112 @@
  *   * the accepted STATES as dots filled by `divColor(S)` -- the same exported blue->red
  *     ramp, the same 0..0.50 top of scale, that the Cascade colours a probe's divergence
  *     with and the AMR map a cell's. S is that quantity, averaged over m directions instead
- *     of read across one lattice edge, so it belongs on the same ramp and gets no new one.
+ *     of read across one lattice edge, so it belongs on the same ramp and gets no new one;
+ *   * each chain's current state as a HEAD: the same ramp fill, larger, ringed in the path
+ *     token, so "where the chains are now" reads apart from "where they have been";
+ *   * the last round's PROPOSALS, for as long as they take to resolve.
  *
- * No auto-rotation, for AmrMap's reason: these are hundreds of static dots hovered one at a
- * time, and a drifting projection would move the target under the pointer.
+ * Motion is information, as it is on the cascade map. Every poll that brings a new round
+ * animates that round's events: a proposal flashes where it was made, an accepted one bursts
+ * in the accent while its chain's head glides to it over ~400 ms (a CSS transition on cx/cy,
+ * so the browser interpolates and no JS runs per frame), and a rejected one fades out where
+ * it was. The head LEAVING a position is what turns that position into a plain sample dot --
+ * no extra mark is drawn for it, because the sample list already has it. Rotating the shadow
+ * plane moves every projected point at once, which would read as all 60 chains gliding, so
+ * the glide is switched off for the duration of a rotate drag. All animation is CSS keyframes
+ * (reliable start-on-insert, unlike SMIL in SPAs) and off under prefers-reduced-motion.
+ *
+ * Identity is deliberately NOT a colour. 60 chains cannot have 60 distinguishable hues, and a
+ * cycled palette would make two unrelated chains read as the same one, so every chain's trace
+ * and head ring take ONE path token and a chain is picked out by FOLLOWING it (click a head,
+ * or a row in the panel's chain table): the followed chain keeps full strength and everything
+ * else dims. The two ramps on screen keep their jobs -- energy on the fill, nothing else.
+ *
+ * No auto-rotation, for AmrMap's reason: these are hundreds of dots hovered one at a time,
+ * and a drifting projection would move the target under the pointer.
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { MetroStatus } from './api/types';
+import type { MetroEvent, MetroStatus } from './api/types';
 import { divColor, makeProjector } from './CascadeMap';
 import {
   HOME, dragFactor, isDrag, isHome, pan, reset, rotationDelta, svgTransform, toScreen,
-  wheelFactor, wrapAngle, zoomAbout,
+  toWorld, wheelFactor, wrapAngle, zoomAbout,
 } from './viewTransform';
 import type { View } from './viewTransform';
 
-/** the map's existing search-line token: a chain's path is a path, like a chord */
+/** the map's existing search-line token: a chain's trace is a path, like a chord */
 const PATH = '#4a4f8f';
-/** the crossing-dot neutral, reused for the seeds a chain started from */
+/** the crossing-dot neutral: the seeds a chain started from, and a proposal not taken */
 const SEED = '#8a93b8';
+const ACCENT = '#4ecca3';
 const WARN = '#e94560';
+
+const REDUCED = typeof window !== 'undefined'
+  && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+
+/**
+ * One burst per accepted proposal, one fade per rejected one, and the head glide.
+ *
+ * The glide is a transition rather than a keyframe because its endpoints are data: the head's
+ * cx/cy are wherever the chain's state now projects to, and the browser interpolates from
+ * whatever they were. 400 ms is long enough to be a move rather than a jump and short enough
+ * to finish well inside the 1.2 s poll, so a head is never still travelling when the next
+ * round's position arrives.
+ */
+const KEYFRAMES = `
+  .mx-head { transition: cx 400ms ease-out, cy 400ms ease-out; }
+  .mx-burst { transform-box: fill-box; transform-origin: center;
+              animation: mxBurst .9s ease-out forwards; }
+  @keyframes mxBurst { from { transform: scale(1); opacity: .95; }
+                       to { transform: scale(3); opacity: 0; } }
+  .mx-fade { animation: mxFade 1.1s ease-out forwards; }
+  @keyframes mxFade { from { opacity: .85; } to { opacity: 0; } }
+  .mx-flash { transform-box: fill-box; transform-origin: center;
+              animation: mxFlash .5s ease-out forwards; }
+  @keyframes mxFlash { from { transform: scale(2.2); opacity: 1; }
+                       to { transform: scale(1); opacity: .9; } }
+  @media (prefers-reduced-motion: reduce) {
+    .mx-head { transition: none; }
+    .mx-burst, .mx-flash { display: none; }
+    .mx-fade { animation: none; opacity: .5; }
+  }
+`;
 
 function short(p: string, n = 26) {
   return p.length > n ? p.slice(0, n - 1) + '…' : p;
 }
 
 // A 60 x 50 run accepts at most 3,000 states, which is well inside what SVG draws happily,
-// so the only cap here is on the polylines: 200 chains x 50 segments is more line than the
+// so the only cap here is on the traces: 200 chains x 50 segments is more line than the
 // eye gains from, and the chains with the most accepted states are the ones worth drawing.
 const MAX_PATHS = 80;
 
+/**
+ * Barycentric coordinates of a point in the k=3 triangle, or null if the triangle is
+ * degenerate. `vs` must be the vertices in PROMPT order, which is how the caller builds them,
+ * so the result is a recipe over the same prompts and not a permutation of one.
+ *
+ * k=3 only on purpose. For k>=4 the map is a 2-D shadow of a (k-1)-dimensional space: a pixel
+ * is a whole fibre of recipes, so there is no inverse to compute and a click cannot mean one
+ * recipe. The panel offers the two unambiguous seeds instead (an existing sample, or an
+ * existing crossing), which is the honest version of the same gesture.
+ */
+export function baryFromPoint(
+  vs: readonly (readonly [number, number])[], x: number, y: number,
+): number[] | null {
+  if (vs.length < 3) return null;
+  const [[x1, y1], [x2, y2], [x3, y3]] = vs;
+  const det = (y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3);
+  if (!Number.isFinite(det) || Math.abs(det) < 1e-9) return null;
+  const a = ((y2 - y3) * (x - x3) + (x3 - x2) * (y - y3)) / det;
+  const b = ((y3 - y1) * (x - x3) + (x1 - x3) * (y - y3)) / det;
+  const w = [a, b, 1 - a - b];
+  return w.every((v) => Number.isFinite(v)) ? w : null;
+}
+
 export default function MetroMap({
-  status, runId, size = 560, imageUrl, onImage,
+  status, runId, size = 560, imageUrl, onImage, followed = null, onFollow, onSeed,
+  live = false,
 }: {
   status: MetroStatus;
   runId: string;
@@ -54,13 +129,27 @@ export default function MetroMap({
   /** click a sample: hand its thumbnail and recipe to the panel's large view */
   onImage?: (thumb: number, title: string, rows: [string, string][],
              weights?: number[] | null) => void;
+  /** the chain being followed (others dim), owned by the panel so its table agrees */
+  followed?: number | null;
+  onFollow?: (chain: number | null) => void;
+  /** start a new chain at this recipe; absent = the map offers no seeding */
+  onSeed?: (w: number[], why: string) => void;
+  /** the run is still going round, so seeding and following a moving head mean something */
+  live?: boolean;
 }) {
   const k = status.k || status.prompts.length;
   const [showPaths, setShowPaths] = useState(true);
   const [showSeeds, setShowSeeds] = useState(true);
+  const [showHeads, setShowHeads] = useState(true);
+  const [showSamples, setShowSamples] = useState(true);
+  const [showRejected, setShowRejected] = useState(true);
+  const [addMode, setAddMode] = useState(false);
   const [theta, setTheta] = useState(0);
   const [view, setView] = useState<View>(HOME);
   const [hover, setHover] = useState<number | null>(null);
+  const [sel, setSel] = useState<number | null>(null);
+  const [rotating, setRotating] = useState(false);
+  const [hint, setHint] = useState<string | null>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const hovering = useRef(false);
   const gesture = useRef<{
@@ -69,6 +158,26 @@ export default function MetroMap({
   } | null>(null);
   const dragged = useRef(false);
   const canRotate = k > 3;
+  const canSeed = live && !!onSeed;
+
+  // The round being animated. Only ever ONE: the heads are already at their final positions
+  // in `chains_stats`, so a poll that fell two rounds behind replays the newest round's
+  // proposals rather than queueing a backlog that would lie about where the chains are.
+  const shownRound = useRef(0);
+  const [anim, setAnim] = useState<{ round: number; events: MetroEvent[] } | null>(null);
+  useEffect(() => {
+    const ring = status.recent_events ?? [];
+    const newest = ring.length ? ring[ring.length - 1] : null;
+    if (!newest || newest.round <= shownRound.current) return;
+    shownRound.current = newest.round;
+    setAnim({ round: newest.round, events: newest.events });
+  }, [status.recent_events]);
+  // a fresh run reuses this component, so the "already shown" mark has to go back with it
+  useEffect(() => {
+    shownRound.current = 0;
+    setAnim(null);
+    setSel(null);
+  }, [runId]);
 
   const at = (e: { clientX: number; clientY: number }) => {
     const r = svgRef.current?.getBoundingClientRect();
@@ -129,7 +238,12 @@ export default function MetroMap({
     if (!g.moved) {
       if (!isDrag(dx, dy)) return;
       g.moved = true;
-      if (g.kind === 'rotate') svgRef.current?.setPointerCapture(g.pid);
+      if (g.kind === 'rotate') {
+        svgRef.current?.setPointerCapture(g.pid);
+        // turning the plane re-projects every point; without this the whole chain set would
+        // read as gliding, which is the one motion on this map that means something
+        setRotating(true);
+      }
     }
     if (g.kind === 'pan') setView(pan(g.view, dx, dy));
     else if (g.kind === 'zoom') setView(zoomAbout(g.view, dragFactor(dy), g.x, g.y));
@@ -141,6 +255,7 @@ export default function MetroMap({
     if (!g || e.pointerId !== g.pid) return;
     dragged.current = g.moved;
     gesture.current = null;
+    setRotating(false);
   };
 
   // Screen px -> user units inside the drawn group, so marks keep their size at any zoom
@@ -155,9 +270,11 @@ export default function MetroMap({
   });
   const hullOrder = [...vs].sort(
     (a, b) => Math.atan2(a[1] - cy, a[0] - cx) - Math.atan2(b[1] - cy, b[0] - cx));
+  const glide = !REDUCED && !rotating;
 
   // One polyline per chain: its seed, then its accepted states in the order they were
-  // accepted. The chains that accepted most are the ones kept when the cap bites.
+  // accepted. The chains that accepted most are the ones kept when the cap bites; a FOLLOWED
+  // chain is always kept, or following it would hide the very thing being looked at.
   const paths = useMemo(() => {
     const by = new Map<number, number[]>();
     status.samples.forEach((s, i) => {
@@ -166,17 +283,23 @@ export default function MetroMap({
     });
     const seedOf = new Map<number, number[]>();
     for (const c of status.chains_stats) seedOf.set(c.chain, c.seed_weights);
-    return [...by.entries()]
-      .sort((a, b) => b[1].length - a[1].length)
-      .slice(0, MAX_PATHS)
-      .map(([chain, idx]) => ({ chain, idx, seed: seedOf.get(chain) ?? null }));
-  }, [status.samples.length, status.chains_stats.length]);
+    const ranked = [...by.entries()].sort((a, b) => b[1].length - a[1].length);
+    const keep = ranked.slice(0, MAX_PATHS);
+    if (followed !== null && !keep.some(([ch]) => ch === followed)) {
+      const extra = ranked.find(([ch]) => ch === followed);
+      if (extra) keep.push(extra);
+    }
+    return keep.map(([chain, idx]) => ({ chain, idx, seed: seedOf.get(chain) ?? null }));
+  }, [status.samples.length, status.chains_stats.length, followed]);
 
+  const dim = (chain: number) => (followed === null || followed === chain ? 1 : 0.16);
   const hoverPt = hover !== null && hover < status.samples.length ? hover : null;
+
   const select = (i: number) => {
-    if (dragged.current) return;
+    if (dragged.current || addMode) return;    // in add-mode every click means "seed here"
     const s = status.samples[i];
     if (!s || s.image < 0) return;
+    setSel(i);
     onImage?.(s.full_image ?? s.image,
               `sample ${i} · chain ${s.chain} · round ${s.step}`, [
                 ['energy S', s.s.toFixed(3)],
@@ -187,7 +310,55 @@ export default function MetroMap({
               ], s.weights);
   };
 
+  /** A click on the hull in add-mode: only k=3 has an inverse to use (see baryFromPoint). */
+  const seedAtClick = (e: React.MouseEvent<SVGSVGElement>) => {
+    if (!addMode || !canSeed || dragged.current) return;
+    if (k !== 3) {
+      setHint('clicking cannot name a recipe at k ≥ 4 — use the two buttons below');
+      return;
+    }
+    const [sx, sy] = at(e);
+    const [wx, wy] = toWorld(view, sx, sy);
+    const w = baryFromPoint(vs, wx, wy);
+    if (!w) return;
+    if (w.some((v) => v < 0)) {
+      setHint('that point is outside the triangle — a recipe has no negative weights');
+      return;
+    }
+    setHint(null);
+    onSeed?.(w, 'clicked on the map');
+  };
+
+  const seedAtSample = () => {
+    const i = sel ?? hoverPt;
+    if (i === null || !status.samples[i]) {
+      setHint('select a sample first (click one on the map)');
+      return;
+    }
+    setHint(null);
+    onSeed?.(status.samples[i].weights, `sample ${i}`);
+  };
+
+  const seedAtCrossing = () => {
+    if (!status.seeds.length) {
+      setHint('this run found no seed crossings to start from');
+      return;
+    }
+    const i = Math.floor(Math.random() * status.seeds.length);
+    setHint(null);
+    onSeed?.(status.seeds[i], `seed crossing ${i}`);
+  };
+
   if (k < 3) return null;
+
+  const toggle = (on: boolean, set: (v: boolean) => void, label: string, tip: string) => (
+    <label className="rx-focus" title={tip}
+           style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 3,
+                    color: '#aeb6dd', cursor: 'pointer' }}>
+      <input type="checkbox" checked={on} onChange={(e) => set(e.target.checked)} />
+      {label}
+    </label>
+  );
 
   return (
     <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'flex-start' }}>
@@ -201,13 +372,17 @@ export default function MetroMap({
              if (dragged.current) e.stopPropagation();   // a drag is never a selection
              dragged.current = false;
            }}
+           onClick={seedAtClick}
            onContextMenu={(e) => e.preventDefault()}
            style={{ background: '#0d0d20', borderRadius: 8,
-                    touchAction: 'manipulation', userSelect: 'none' }}>
+                    touchAction: 'manipulation', userSelect: 'none',
+                    cursor: addMode && canSeed && k === 3 ? 'crosshair' : undefined,
+                    outline: addMode && canSeed ? `1px solid ${ACCENT}` : undefined }}>
+        <style>{KEYFRAMES}</style>
         <g transform={svgTransform(view)}>
           <polygon points={hullOrder.map(([x, y]) => `${x},${y}`).join(' ')}
                    fill="#151538" stroke="#34346a" strokeWidth={q(1.5)} />
-          {/* chain paths UNDER everything: structure, not data */}
+          {/* chain traces UNDER everything: structure, not data */}
           {showPaths && (
             <g style={{ pointerEvents: 'none' }}>
               {paths.map(({ chain, idx, seed }) => {
@@ -216,8 +391,11 @@ export default function MetroMap({
                   .map((w) => proj.project(w))
                   .filter(([x, y]) => Number.isFinite(x) && Number.isFinite(y));
                 if (pts.length < 2) return null;
-                return <polyline key={`c${chain}`} fill="none" stroke={PATH}
-                                 strokeWidth={q(1.2)} strokeOpacity={0.45}
+                const on = followed === chain;
+                return <polyline key={`c${chain}`} fill="none"
+                                 stroke={on ? ACCENT : PATH}
+                                 strokeWidth={q(on ? 1.8 : 1.2)}
+                                 strokeOpacity={(on ? 0.9 : 0.45) * dim(chain)}
                                  strokeLinejoin="round"
                                  points={pts.map(([x, y]) => `${x},${y}`).join(' ')} />;
               })}
@@ -234,16 +412,73 @@ export default function MetroMap({
               })}
             </g>
           )}
-          {status.samples.map((s, i) => {
+          {showSamples && status.samples.map((s, i) => {
             const [x, y] = proj.project(s.weights);
             if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
             return (
-              <circle key={`p${i}`} cx={x} cy={y} r={q(3)} fill={divColor(s.s)}
-                      fillOpacity={0.95}
-                      stroke={hover === i ? '#fff' : 'none'} strokeWidth={q(1.4)}
+              <circle key={`p${i}`} cx={x} cy={y} r={q(sel === i ? 3.8 : 3)}
+                      fill={divColor(s.s)}
+                      fillOpacity={0.95 * dim(s.chain)}
+                      stroke={hover === i || sel === i ? '#fff' : 'none'}
+                      strokeWidth={q(1.4)} strokeOpacity={dim(s.chain)}
                       style={{ cursor: 'pointer' }}
                       onPointerEnter={() => setHover(i)}
                       onClick={() => select(i)} />
+            );
+          })}
+          {/* the last round's proposals, resolving: a burst where one was accepted (the head
+              is on its way there), a fading dot where one was not */}
+          {anim && !REDUCED && (
+            <g style={{ pointerEvents: 'none' }}>
+              {anim.events.map((e, i) => {
+                const [x, y] = proj.project(e.w_prop);
+                if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+                if (followed !== null && followed !== e.chain) return null;
+                if (e.accepted) {
+                  return (
+                    <g key={`a${anim.round}.${i}`}>
+                      <circle className="mx-burst" cx={x} cy={y} r={q(5)} fill="none"
+                              stroke={ACCENT} strokeWidth={q(1.8)} />
+                      <circle className="mx-flash" cx={x} cy={y} r={q(2.2)}
+                              fill={ACCENT} />
+                    </g>
+                  );
+                }
+                if (!showRejected) return null;
+                return (
+                  <circle key={`r${anim.round}.${i}`} className="mx-fade" cx={x} cy={y}
+                          r={q(2.6)} fill={SEED} stroke={SEED} strokeWidth={q(0.8)}
+                          fillOpacity={0.35} />
+                );
+              })}
+            </g>
+          )}
+          {/* the heads: where every chain is NOW */}
+          {showHeads && status.chains_stats.map((c) => {
+            if (c.s === null || c.s === undefined) return null;
+            const [x, y] = proj.project(c.weights);
+            if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+            const on = followed === c.chain;
+            return (
+              <circle key={`h${c.chain}`} className={glide ? 'mx-head' : undefined}
+                      cx={x} cy={y} r={q(on ? 5.6 : 4.6)} fill={divColor(c.s)}
+                      fillOpacity={0.98 * dim(c.chain)}
+                      stroke={on ? '#fff' : c.stopped ? SEED : PATH}
+                      strokeWidth={q(on ? 2.2 : 1.8)}
+                      strokeOpacity={(c.stopped ? 0.7 : 1) * dim(c.chain)}
+                      strokeDasharray={c.stopped ? `${q(2)},${q(2)}` : undefined}
+                      style={{ cursor: addMode ? 'crosshair' : 'pointer' }}
+                      onClick={() => {
+                        if (dragged.current || addMode) return;
+                        onFollow?.(on ? null : c.chain);
+                      }}>
+                <title>
+                  {`chain ${c.chain} · S ${(c.s ?? 0).toFixed(3)} · `
+                   + `${c.n_accept}/${c.n_propose} accepted`
+                   + (c.stopped ? ' · frozen' : '')
+                   + (c.joined_round ? ` · added at round ${c.joined_round}` : '')}
+                </title>
+              </circle>
             );
           })}
         </g>
@@ -272,6 +507,11 @@ export default function MetroMap({
           <text x={10} y={20} fill="#7d84c8" fontSize={10}
                 style={{ fontVariantNumeric: 'tabular-nums' }}>
             {view.s.toFixed(2)}× · h: home
+          </text>
+        )}
+        {followed !== null && (
+          <text x={10} y={size - 24} fill={ACCENT} fontSize={10}>
+            following chain {followed} — click its head again to release
           </text>
         )}
         {paths.length < status.summary.n_chains && showPaths && (
@@ -311,28 +551,75 @@ export default function MetroMap({
             same stride ({status.delta.toFixed(3)})
           </div>
         </div>
-        <label className="rx-focus"
-               title="each chain's accepted states joined in the order it accepted them, starting at its seed crossing. The path is structure, so it is drawn recessively — nothing is encoded by it alone."
-               style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 4,
-                        color: '#aeb6dd', cursor: 'pointer' }}>
-          <input type="checkbox" checked={showPaths}
-                 onChange={(e) => setShowPaths(e.target.checked)} />
-          chain paths
-        </label>
-        <label className="rx-focus"
-               title="the crossings the chains were seeded at: either this run's own IUR chords or a finished Cascade's. Hollow, so a seed never reads as a sample."
-               style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 8,
-                        color: '#aeb6dd', cursor: 'pointer' }}>
-          <input type="checkbox" checked={showSeeds}
-                 onChange={(e) => setShowSeeds(e.target.checked)} />
-          seed crossings
-        </label>
-        <div style={{ marginBottom: 6 }}>
+        {toggle(showHeads, setShowHeads, 'chain heads',
+                'where every chain is NOW: one larger dot per chain, ringed in the trace '
+                + 'colour, filled by its own energy on the ramp above. It glides to each '
+                + 'accepted proposal, and a frozen chain\'s ring goes dashed.')}
+        {toggle(showSamples, setShowSamples, 'accepted states',
+                'every state any chain has accepted, filled by its energy. This is the '
+                + 'sample set — the gallery below shows the same states as images.')}
+        {toggle(showPaths, setShowPaths, 'chain traces',
+                'each chain\'s accepted states joined in the order it accepted them, '
+                + 'starting at its seed crossing. The trace is structure, so it is drawn '
+                + 'recessively — nothing is encoded by it alone.')}
+        {toggle(showRejected, setShowRejected, 'show rejected',
+                'proposals the chain did not take, fading where they were made. Includes '
+                + 'the ones that left the simplex (drawn outside the hull, which is where '
+                + 'they are), so the acceptance rate on screen is explainable from the '
+                + 'picture rather than only from the counter.')}
+        {toggle(showSeeds, setShowSeeds, 'seed crossings',
+                'the crossings the chains were seeded at: either this run\'s own IUR chords '
+                + 'or a finished Cascade\'s. Hollow, so a seed never reads as a sample.')}
+        <div style={{ margin: '6px 0' }}>
           <span style={{ color: divColor(0.5) }}>●</span> accepted state — colour = its
-          energy S on the ramp above
-          <br /><span style={{ color: PATH }}>―</span> one chain's path, seed first
+          energy S
+          <br /><span style={{ color: divColor(0.35) }}>◉</span> a chain's head, where it is
+          now
+          <br /><span style={{ color: ACCENT }}>◌</span> proposal accepted (the head is on
+          its way)
+          <br /><span style={{ color: SEED }}>•</span> proposal rejected, fading out
+          <br /><span style={{ color: PATH }}>―</span> one chain's trace, seed first
           <br /><span style={{ color: SEED }}>◦</span> seed crossing
         </div>
+        {canSeed && (
+          <div style={{ borderTop: '1px solid #2a2a4a', paddingTop: 5, marginBottom: 6 }}>
+            {toggle(addMode, setAddMode, 'add chain here',
+                    k === 3
+                      ? 'on: a click inside the triangle starts a new chain at that recipe. '
+                        + 'Its head appears at the next round, once its energy has been '
+                        + 'measured in that round\'s batch.'
+                      : 'at k ≥ 4 the map is a 2-D shadow of a (k−1)-dimensional space, so '
+                        + 'one pixel is a whole fibre of recipes and a click cannot name '
+                        + 'one. Use the two buttons below, which name a recipe exactly.')}
+            {k !== 3 && (
+              <div style={{ color: '#667', marginBottom: 4 }}>
+                k ≥ 4: a click is ambiguous under the projection, so seed at a recipe that
+                already exists.
+              </div>
+            )}
+            <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+              <button onClick={seedAtSample}
+                      title="start a chain at the sample selected on the map — a state this
+run already drew, so the recipe is exact at any k"
+                      style={{ background: '#0a0a1a', color: '#8a9',
+                               border: '1px solid #444', borderRadius: 3, fontSize: 10,
+                               padding: '2px 5px', cursor: 'pointer' }}>
+                seed at selected sample
+              </button>
+              <button onClick={seedAtCrossing}
+                      title="start a chain at one of this run's seed crossings, picked at
+random — the same kind of start the run's own chains were given"
+                      style={{ background: '#0a0a1a', color: '#8a9',
+                               border: '1px solid #444', borderRadius: 3, fontSize: 10,
+                               padding: '2px 5px', cursor: 'pointer' }}>
+                seed at a random crossing
+              </button>
+            </div>
+            {hint && (
+              <div style={{ color: '#c9a227', marginTop: 3 }}>{hint}</div>
+            )}
+          </div>
+        )}
         {hoverPt !== null && status.samples[hoverPt].image >= 0 ? (
           <div>
             <img src={imageUrl(runId, status.samples[hoverPt].full_image
@@ -347,7 +634,9 @@ export default function MetroMap({
             </div>
           </div>
         ) : (
-          <div style={{ color: '#667' }}>hover a state to see its image</div>
+          <div style={{ color: '#667' }}>
+            hover a state to see its image · click a head to follow its chain
+          </div>
         )}
       </div>
     </div>

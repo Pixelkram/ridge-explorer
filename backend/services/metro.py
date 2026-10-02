@@ -54,9 +54,40 @@ Caveats carried from the study, and what is NOT claimed here:
     5): only STATES are. Mixing is affine in the worker, so a probe just past a face is an
     extrapolation that renders fine, and clipping it would shorten delta exactly where a
     boundary runs along a face.
+
+Driving the chain while it runs
+------------------------------
+The round loop is also the panel's instrument, so four things can change between rounds:
+sigma/beta (`request_params`), a new chain (`queue_chain`), a frozen chain (`stop_chain`)
+and pause/resume (`run.paused`). Every one of them is read at the START of a round and
+applies to the WHOLE of it, never inside a batch -- the chain is never half under one
+kernel. What that costs is stated once, here and in the note the run carries:
+
+  * CHANGING sigma or beta mid-run breaks stationarity. The samples before the change and
+    the samples after are draws from two different chains, so the pooled set is not a draw
+    from one law and the h25a calibration (which is a statement about ONE kernel) does not
+    transfer to it. That is a fine thing to do while exploring -- it is how you find the
+    sigma that mixes -- and a wrong thing to do for a stimulus set you will quote a law
+    for. `run.params_changed` and a note naming the round record it either way.
+  * ADDING a chain adds a sample path that started later and from somewhere a person
+    picked, so it carries that choice's bias rather than the seed survey's. Its initial
+    energy is measured in the next round's batch (a crossing midpoint has no rendered
+    image), which is why it appears one round late.
+  * STOPPING a chain freezes it where it is: it proposes no more and its samples are kept.
+    A chain stopped because it looked unproductive is a selection ON the sample, so the
+    same caveat as above applies to the pooled set.
+  * PAUSING waits between rounds. No GPU worker is held and no batch is in flight while
+    paused -- the loop simply does not ask for the next one -- so a paused run costs the
+    shared pool nothing.
+
+`run.rounds` is the per-round log those controls are read against (acceptance, mean energy,
+cost and wall time per round, plus the sigma/beta the round actually ran under), and
+`run.last_events` the last round's per-chain proposals, which is what lets the map animate
+proposal -> accept/reject instead of only showing where the chains ended up.
 """
 from dataclasses import dataclass, field
 import threading
+import time
 
 import numpy as np
 
@@ -88,8 +119,17 @@ S_FLOOR = 1e-6
 MEAN_CHORD_LEN = 0.573
 # Ceiling on a projected run, in image-eq. The h25 programme's own bar; the default
 # 60 x 50 design projects ~4.8e3, so this refuses the configurations that would hold the
-# shared pool for days rather than hours.
+# shared pool for days rather than hours. A chain added mid-run is projected against the
+# same ceiling, so "add 140 chains to a 60 x 50 run" is refused exactly as typing 200
+# chains into the start form would have been.
 MAX_IMAGE_EQ = 20000
+# How long the paused loop sleeps between looks at `run.paused`. Short enough that resume
+# feels immediate against a 1.2 s poll, long enough that a pause left on overnight is free.
+PAUSE_POLL = 0.1
+# Rounds of per-chain events kept. The panel polls every 1.2 s and a cheap round can finish
+# faster than that, so one round's worth would drop the animation for the rounds in between;
+# five is what a poll can fall behind by and still replay every proposal in order.
+EVENTS_RING = 5
 
 
 # ---- pure helpers ---------------------------------------------------------------------
@@ -244,12 +284,31 @@ class MetroRun:
     seed_crossings: list = field(default_factory=list)
     n_chords: int = 0
     # one per chain: {chain, weights, s, image, seed_weights, seed_s, seed_image,
-    #                 n_propose, n_accept, n_outside, moved}
+    #                 n_propose, n_accept, n_outside, moved, stopped, joined_round}
     chains_state: list = field(default_factory=list)
     # every ACCEPTED state: {chain, step, weights, s, image, full_image}
     samples: list = field(default_factory=list)
+    # one row per completed round, appended by `_log_round`. `sigma`/`beta` are the kernel
+    # that round actually ran under, which is both the honest record of a run whose kernel
+    # was driven mid-flight and what the panel marks the change on.
+    rounds: list = field(default_factory=list)
+    # the last round's per-chain proposals: {chain, w_from, w_prop, S_from, S_prop,
+    # accepted, image_idx_prop}. Out-of-simplex and no-evidence proposals are in here too,
+    # with S_prop None -- they are real rejections and the map draws them as such.
+    last_events: list = field(default_factory=list)
+    # ring of the last EVENTS_RING rounds: [{round, events}], newest last
+    recent_events: list = field(default_factory=list)
     n_probes: int = 0                 # cheap probes rendered (what the cost is charged on)
     n_full: int = 0                   # full-fidelity renders of accepted states
+    # --- live controls, all read at the START of a round (see the module header)
+    paused: bool = False
+    # True once sigma or beta was changed mid-run: the pooled sample is then NOT a draw
+    # from one stationary law, and `notes` says at which round it stopped being one
+    params_changed: bool = False
+    pending_params: dict | None = None
+    # weight vectors queued by POST /chains, each joining at the next round
+    pending_chains: list = field(default_factory=list)
+    t_start: float = 0.0              # time.monotonic() at the top of run_metro
     notes: list = field(default_factory=list)
     error: str | None = None
     generated: int = 0
@@ -292,6 +351,10 @@ class MetroRun:
             "n_outside": int(sum(c["n_outside"] for c in self.chains_state)),
             "chains_never_moved": int(sum(1 for c in self.chains_state if not c["moved"])),
             "n_chains": len(self.chains_state),
+            "n_chains_stopped": int(sum(1 for c in self.chains_state
+                                        if c.get("stopped"))),
+            "n_chains_moving": int(sum(1 for c in self.chains_state
+                                       if c["s"] is not None and not c.get("stopped"))),
             "n_seed_crossings": len(self.seed_crossings),
             "n_chords": int(self.n_chords),
             "n_probes": int(self.n_probes),
@@ -299,6 +362,170 @@ class MetroRun:
             "rounds_done": int(self.round_done),
             "cost_image_eq": self.cost_image_eq,
         }
+
+
+# ---- live controls -------------------------------------------------------------------
+# All four are called from the request thread while the round loop runs in another, so
+# anything that is read-and-cleared by the loop (the two pending slots) is touched under
+# `run._lock`. The plain booleans (`paused`, a chain's `stopped`) are single attribute
+# writes, which CPython makes atomic, and a round that is already dispatched finishing
+# under the old value is exactly the documented semantics: a control applies to the NEXT
+# round, never to the one in flight.
+
+def request_params(run, sigma=None, beta=None):
+    """Queue a kernel change for the start of the next round. Returns what was queued.
+
+    Nothing is validated here -- the router owns the bounds, which are the start form's --
+    and nothing is applied here either, so a slider dragged across ten values between two
+    rounds costs one change, not ten.
+    """
+    pend = {"sigma": None if sigma is None else float(sigma),
+            "beta": None if beta is None else float(beta)}
+    with run._lock:
+        run.pending_params = pend
+    return pend
+
+
+def _apply_params(run, r):
+    """Take the queued kernel change, if any, and make it this round's kernel.
+
+    The note is the point of this function as much as the assignment is: a run whose sigma
+    or beta moved is no longer sampling one stationary law, and the round it stopped doing
+    so is the only thing that lets anyone reading the sample set afterwards cut it back
+    into pieces that are.
+    """
+    with run._lock:
+        pend = run.pending_params
+        run.pending_params = None
+    if not pend:
+        return
+    bits = []
+    if pend.get("sigma") is not None and float(pend["sigma"]) != float(run.sigma):
+        bits.append(f"sigma {run.sigma:.4g} -> {float(pend['sigma']):.4g}")
+        run.sigma = float(pend["sigma"])
+    if pend.get("beta") is not None and float(pend["beta"]) != float(run.beta):
+        bits.append(f"beta {run.beta:.4g} -> {float(pend['beta']):.4g}")
+        run.beta = float(pend["beta"])
+    if not bits:
+        return
+    run.params_changed = True
+    run.notes.append(
+        f"round {r}: {', '.join(bits)} -- the kernel changed BETWEEN rounds, which is fine "
+        f"for an exploratory sampler (it is how you find a sigma that mixes) but breaks the "
+        f"stationarity guarantee: the states accepted before round {r} and the states "
+        f"accepted from round {r} on are draws from two different chains, so the pooled set "
+        f"is not a draw from one law and the h25a calibration does not describe it")
+
+
+def param_change_rounds(rounds):
+    """Rounds at which the kernel differs from the round before it, from the log alone.
+
+    One source of truth: every row carries the sigma/beta it ran under, so the changes are
+    a property of the log rather than a second list that could disagree with it.
+    """
+    out = []
+    for prev, cur in zip(rounds, rounds[1:]):
+        if (cur.get("sigma") != prev.get("sigma")
+                or cur.get("beta") != prev.get("beta")):
+            out.append(int(cur["round"]))
+    return out
+
+
+def n_chains_total(run):
+    """Chains this run will have once everything queued has joined."""
+    return len(run.chains_state) + len(run.pending_chains)
+
+
+def projected_with_chains(run, extra=1):
+    """(image-eq, rows) the run would project with `extra` more chains than it has queued.
+
+    Deliberately the WHOLE run's projection and not the remaining rounds': it is the same
+    number the start form was refused on, so "would this have been allowed as a start
+    configuration" and "may I add this chain" answer the same question. Already-spent
+    probes are sunk cost, and a ceiling that crept up as a run progressed would let any
+    chain count through one click at a time.
+    """
+    return projected_cost(run.k, run.m, n_chains_total(run) + int(extra), run.chain_steps,
+                          run.n_seed_chords, run.seed_mode, run.probe_steps,
+                          run.render_full)
+
+
+def queue_chain(run, w):
+    """Queue a new chain at recipe `w`; returns the chain id it will be given.
+
+    The id is positional (`chains_state` is indexed by it, as the seeded chains are), and
+    the loop is the only thing that ever appends, in queue order, so the id predicted here
+    is the id the chain gets. Its initial energy is measured in the next round's batch --
+    a hand-picked recipe has no rendered image any more than a crossing midpoint does.
+    """
+    w = [float(v) for v in w]
+    with run._lock:
+        cid = n_chains_total(run)
+        run.pending_chains.append(w)
+    return cid
+
+
+def _take_joining(run):
+    """Everything queued since the last round, cleared in one step."""
+    with run._lock:
+        out = list(run.pending_chains)
+        run.pending_chains.clear()
+    return out
+
+
+def stop_chain(run, chain):
+    """Freeze one chain: no more proposals, its samples kept. True when it existed.
+
+    Not a deletion. The chain stays in `chains_state` with its record, stays on the map as
+    a head that no longer moves, and its accepted states stay in the sample -- which is
+    also why stopping chains by eye is a selection on the sample, as the header says.
+    """
+    for c in run.chains_state:
+        if int(c["chain"]) == int(chain):
+            c["stopped"] = True
+            return True
+    return False
+
+
+def _wait_while_paused(run):
+    """Block between rounds while the run is paused (and still alive).
+
+    Called before anything is dispatched, so a paused run holds no GPU worker and has no
+    batch in flight. Cancel still works: it moves `status` off "running" and this returns.
+    """
+    while run.paused and run.status == "running":
+        time.sleep(PAUSE_POLL)
+
+
+def _log_round(run, r, events):
+    """Close one round: append its log row and publish its events.
+
+    `n_proposed` counts every chain that proposed, INCLUDING the ones whose proposal left
+    the simplex and was rejected without rendering anything, so `acc_rate` here is the same
+    ratio `summary()["acceptance"]` reports over the whole run. `mean_S_states` is over the
+    chain set as it stands at the end of the round (stopped chains included: they still
+    have a state), `mean_S_accepted` over just this round's accepted proposals.
+    """
+    n_prop = len(events)
+    acc = [e for e in events if e["accepted"]]
+    acc_s = [e["S_prop"] for e in acc if e["S_prop"] is not None]
+    st = [c["s"] for c in run.chains_state if c["s"] is not None]
+    run.rounds.append({
+        "round": int(r),
+        "n_proposed": int(n_prop),
+        "n_accepted": len(acc),
+        "acc_rate": (float(len(acc)) / n_prop) if n_prop else None,
+        "mean_S_states": float(np.mean(st)) if st else None,
+        "mean_S_accepted": float(np.mean(acc_s)) if acc_s else None,
+        "cost_so_far": run.cost_image_eq,
+        "t_wall": float(time.monotonic() - run.t_start),
+        "sigma": float(run.sigma),
+        "beta": float(run.beta)})
+    # one assignment, so a poll either sees the previous round's events or this round's --
+    # never a list being appended to
+    run.last_events = events
+    run.recent_events = (run.recent_events + [{"round": int(r), "events": events}]
+                         )[-EVENTS_RING:]
 
 
 # ---- seeding -------------------------------------------------------------------------
@@ -441,10 +668,15 @@ def run_metro(app, run, pool):
     energies -> L batched rounds, one per MCMC step across all chains -> an optional
     full-fidelity pass over the accepted states. Cancellation is the Cascade's: `run.status`
     stops the run between rounds and inside `evaluate`.
+
+    Each round is also where the live controls land (module header): pause, the queued
+    kernel change, and the chains queued to join -- all read before anything is dispatched,
+    so the round runs under one kernel and one chain set from end to end.
     """
     k = run.k
     rng = np.random.default_rng(run.seed)
     basis = tangent_basis(k)
+    run.t_start = time.monotonic()
 
     # ---- seeds
     if run.seed_mode == "cascade":
@@ -478,7 +710,8 @@ def run_metro(app, run, pool):
             "image": int(gi) if gi is not None else -1,
             "seed_weights": [float(v) for v in starts[i]], "seed_s": s,
             "seed_image": int(gi) if gi is not None else -1,
-            "n_propose": 0, "n_accept": 0, "n_outside": 0, "moved": False})
+            "n_propose": 0, "n_accept": 0, "n_outside": 0, "moved": False,
+            "stopped": False, "joined_round": 0})
     dead = [c["chain"] for c in run.chains_state if c["s"] is None]
     if dead:
         run.notes.append(f"{len(dead)} chains never got a starting energy (missing probes) "
@@ -488,25 +721,44 @@ def run_metro(app, run, pool):
     for r in range(1, int(run.chain_steps) + 1):
         if run.status != "running":
             break
+        # pause, then the kernel, then the chain set -- all before any dispatch, so the
+        # round is run entirely under what the panel asked for before it started
+        _wait_while_paused(run)
+        if run.status != "running":
+            break
+        _apply_params(run, r)
+        joining = _take_joining(run)
         run.phase = f"round {r}/{int(run.chain_steps)}"
-        live, props = [], []
+        live, props, events = [], [], []
         for c in run.chains_state:
-            if c["s"] is None:
-                continue
+            if c["s"] is None or c.get("stopped"):
+                continue                     # no starting energy, or frozen by the panel
             c["n_propose"] += 1
             wp = propose(c["weights"], run.sigma, rng, basis)
+            # recorded whatever happens next: an out-of-simplex proposal is a rejection the
+            # map should be able to draw, not an invisible non-event
+            ev = {"chain": int(c["chain"]), "w_from": list(c["weights"]),
+                  "w_prop": [float(v) for v in wp], "S_from": c["s"], "S_prop": None,
+                  "accepted": False, "image_idx_prop": None}
+            events.append(ev)
             if not in_simplex(wp):
                 c["n_outside"] += 1          # rejected for free: nothing is rendered
                 continue
-            live.append(c)
+            live.append((c, ev))
             props.append(wp)
-        if not props:
+        # the proposals AND the joining chains' initial energies go in ONE batch: a chain
+        # added mid-run costs the round it joins nothing beyond its own (1 + m) probes
+        batch = list(props) + list(joining)
+        if not batch:
+            _log_round(run, r, events)
             run.round_done = r
             continue
-        got = energy_batch(app, run, pool, rng, props, f"metro{r}")
+        got = energy_batch(app, run, pool, rng, batch, f"metro{r}")
         if run.status != "running":
-            break
-        for c, wp, (gi, s) in zip(live, props, got):
+            break                            # the round never finished: it is not logged
+        for (c, ev), wp, (gi, s) in zip(live, props, got):
+            ev["S_prop"] = s
+            ev["image_idx_prop"] = int(gi) if gi is not None else None
             if s is None:
                 continue                     # no evidence -> the state stays where it is
             if accept(c["s"], s, run.beta, rng.random()):
@@ -515,9 +767,26 @@ def run_metro(app, run, pool):
                 c["image"] = int(gi) if gi is not None else -1
                 c["n_accept"] += 1
                 c["moved"] = True
+                ev["accepted"] = True
                 run.samples.append({
                     "chain": c["chain"], "step": r, "weights": c["weights"], "s": float(s),
                     "image": c["image"], "full_image": None})
+        # the chains that joined: their START state, so not a sample and not an event -- the
+        # panel simply sees one more head next time it polls
+        for w, (gi, s) in zip(joining, got[len(props):]):
+            run.chains_state.append({
+                "chain": len(run.chains_state), "weights": [float(v) for v in w], "s": s,
+                "image": int(gi) if gi is not None else -1,
+                "seed_weights": [float(v) for v in w], "seed_s": s,
+                "seed_image": int(gi) if gi is not None else -1,
+                "n_propose": 0, "n_accept": 0, "n_outside": 0, "moved": False,
+                "stopped": False, "joined_round": int(r)})
+        if joining:
+            run.notes.append(
+                f"round {r}: {len(joining)} chain(s) added by hand joined the run. A chain "
+                f"someone placed carries that choice's bias rather than the seed survey's, "
+                f"so the pooled sample is no longer the survey-seeded draw h25a calibrated")
+        _log_round(run, r, events)
         run.round_done = r
 
     # ---- optional: re-render the accepted states at full denoising steps
@@ -543,6 +812,13 @@ def run_metro(app, run, pool):
     s = run.summary()
     ratio = ("n/a" if not s["mean_s"] or not s["seed_mean_s"]
              else f"{s['mean_s'] / s['seed_mean_s']:.2f}x")
+    if run.params_changed:
+        run.notes.append(
+            f"this run's kernel was driven mid-flight (changes at round(s) "
+            f"{param_change_rounds(run.rounds)}), so the summary below is a statistic of a "
+            f"sample pooled across several chains and NOT an estimate of one stationary "
+            f"law -- quote it as an exploration, and re-run at fixed sigma/beta for a "
+            f"stimulus set")
     run.notes.append(
         f"done: {s['n_samples']} accepted states from {s['n_chains']} chains x "
         f"{run.round_done} rounds, acceptance "

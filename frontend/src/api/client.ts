@@ -431,6 +431,57 @@ export async function metroCascadeRuns(
   return jsonOrThrow(r, 'metroCascadeRuns');
 }
 
+// ---- driving a run while it goes round ----
+// All five land at the START of the next round, never inside the batch in flight, and all
+// five answer 409 once the loop has stopped (there would be no round left to read them).
+// The reason each can be refused is the useful answer -- a cost ceiling, a recipe that is not
+// one, a chain that does not exist -- so they go through the same detail-lifting `post` the
+// start call uses rather than being fired and forgotten.
+async function metroPost(path: string, body?: unknown): Promise<any> {
+  const r = await fetch(`${BASE}/api/metro/${path}`, {
+    method: 'POST',
+    ...(body === undefined ? {} : {
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  });
+  if (!r.ok) {
+    let detail = `metro ${path} failed: HTTP ${r.status}`;
+    try {
+      const j = await r.json();
+      if (typeof j?.detail === 'string') detail = j.detail;
+      else if (Array.isArray(j?.detail) && j.detail[0]?.msg) detail = j.detail[0].msg;
+    } catch { /* keep the HTTP line */ }
+    throw new Error(detail);
+  }
+  return r.json();
+}
+
+/** Change sigma and/or beta; the next round runs under the new kernel (and the run says so). */
+export function metroSetParams(
+  runId: string, req: import('./types').MetroParamsRequest,
+): Promise<any> {
+  return metroPost(`${runId}/params`, req);
+}
+
+/** Start one more chain at a recipe. Refused (400) if it would pass the image-eq ceiling. */
+export function metroAddChain(runId: string, w: number[]): Promise<any> {
+  return metroPost(`${runId}/chains`, { w });
+}
+
+/** Freeze one chain: no more proposals, every state it accepted kept. */
+export function metroStopChain(runId: string, chain: number): Promise<any> {
+  return metroPost(`${runId}/chains/${chain}/stop`);
+}
+
+export function metroPause(runId: string): Promise<any> {
+  return metroPost(`${runId}/pause`);
+}
+
+export function metroResume(runId: string): Promise<any> {
+  return metroPost(`${runId}/resume`);
+}
+
 export function metroImageUrl(runId: string, index: number): string {
   return `${BASE}/api/metro/${runId}/image/${index}`;
 }

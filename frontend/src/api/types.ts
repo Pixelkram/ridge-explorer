@@ -594,6 +594,8 @@ export interface MetroSample {
   full_image?: number | null;        // its full-fidelity re-render, when that pass ran
 }
 
+// Also the per-chain summary the live panel's chain table reads (id, steps done, current S,
+// acceptance rate, stopped, moved) -- one list rather than a second one beside it.
 export interface MetroChainStat {
   chain: number;
   weights: number[];
@@ -606,6 +608,55 @@ export interface MetroChainStat {
   n_accept: number;
   n_outside: number;                 // proposals that left the simplex (rejected for free)
   moved: boolean;
+  stopped: boolean;                  // frozen from the panel: no more proposals, samples kept
+  acc_rate?: number | null;          // n_accept / n_propose, served so the two cannot drift
+  joined_round: number;              // 0 = seeded at the start; else the round it was added at
+}
+
+// One completed MCMC round. `n_proposed` counts every chain that proposed, out-of-simplex
+// ones included, so `acc_rate` is the same ratio the summary's `acceptance` reports.
+// `sigma`/`beta` are the kernel THIS round ran under: a run whose kernel was driven mid-flight
+// has rows that differ, and that difference is where the law changed.
+export interface MetroRoundLog {
+  round: number;
+  n_proposed: number;
+  n_accepted: number;
+  acc_rate?: number | null;
+  mean_S_states?: number | null;     // over the chain set at the end of the round
+  mean_S_accepted?: number | null;   // over just this round's accepted proposals
+  cost_so_far: number;
+  t_wall: number;
+  sigma: number;
+  beta: number;
+}
+
+// One proposal, which is what lets the map animate the chain rather than only show where it
+// ended up. A proposal that left the simplex, and one whose probes never arrived, are both
+// here with S_prop null and accepted false -- real rejections, drawn as such.
+export interface MetroEvent {
+  chain: number;
+  w_from: number[];
+  w_prop: number[];
+  S_from?: number | null;
+  S_prop?: number | null;
+  accepted: boolean;
+  image_idx_prop?: number | null;    // the image rendered AT the proposal, if any
+}
+
+export interface MetroRoundEvents {
+  round: number;
+  events: MetroEvent[];
+}
+
+/** The kernel in force right now -- what the NEXT round will run under. */
+export interface MetroParams {
+  sigma: number;
+  beta: number;
+}
+
+export interface MetroParamsRequest {
+  sigma?: number;                    // 0 < sigma <= 0.2, the start form's bound
+  beta?: number;                     // 0.5..1.5, likewise
 }
 
 // Every field here is quoted over the ACCEPTED states (what the gallery shows), not over the
@@ -621,6 +672,8 @@ export interface MetroSummary {
   n_outside: number;
   chains_never_moved: number;        // seed sheets the run kept (h25a: 1-5 % of chains)
   n_chains: number;
+  n_chains_stopped: number;          // frozen by hand
+  n_chains_moving: number;           // a starting energy and not stopped
   n_seed_crossings: number;
   n_chords: number;
   n_probes: number;
@@ -657,6 +710,17 @@ export interface MetroStatus {
   seed_divs: (number | null)[];      // divergence ACROSS each bracket (reported, not an S)
   chains_stats: MetroChainStat[];
   samples: MetroSample[];
+  // --- the live view
+  rounds: MetroRoundLog[];
+  last_events: MetroEvent[];
+  recent_events: MetroRoundEvents[]; // ring of the last 5 rounds, so a slow poll misses none
+  // waiting between rounds. NOT a status: the run is still "running", it just is not
+  // dispatching, so cancel (and every other status check) still means what it meant
+  paused: boolean;
+  // the kernel in force NOW, which is not necessarily `sigma`/`beta` above -- those are what
+  // the run was STARTED with
+  params: MetroParams;
+  params_changed: boolean;
   summary: MetroSummary;
   notes: string[];
   error?: string | null;

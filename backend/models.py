@@ -963,7 +963,12 @@ class MetroSample(BaseModel):
 
 
 class MetroChainStat(BaseModel):
-    """One chain: where it started, where it is, and how it behaved."""
+    """One chain: where it started, where it is, and how it behaved.
+
+    This IS the per-chain summary the live panel reads (id, steps done, current S, acceptance
+    rate, stopped, moved) -- one list rather than a second one beside it, because two lists
+    of the same chains are two things that can disagree about them.
+    """
     chain: int
     weights: list[float]
     s: float | None = None
@@ -976,6 +981,13 @@ class MetroChainStat(BaseModel):
     # proposals that left the simplex and were rejected without rendering anything
     n_outside: int = 0
     moved: bool = False
+    # frozen by POST /chains/{id}/stop: proposes no more, its samples kept
+    stopped: bool = False
+    # n_accept / n_propose, served rather than left to the client so the panel's number and
+    # the run's own record cannot drift apart
+    acc_rate: float | None = None
+    # 0 for a chain seeded at the start, otherwise the round it was added by hand at
+    joined_round: int = 0
 
 
 class MetroSummary(BaseModel):
@@ -995,12 +1007,89 @@ class MetroSummary(BaseModel):
     # chains that never left their start: the seed sheets the run kept (h25a: 1-5 %)
     chains_never_moved: int = 0
     n_chains: int = 0
+    # chains frozen by hand, and chains still proposing (a starting energy and not stopped)
+    n_chains_stopped: int = 0
+    n_chains_moving: int = 0
     n_seed_crossings: int = 0
     n_chords: int = 0
     n_probes: int = 0
     n_full: int = 0
     rounds_done: int = 0
     cost_image_eq: float = 0.0
+
+
+class MetroRoundLog(BaseModel):
+    """One completed MCMC round, as the run recorded it.
+
+    `n_proposed` counts every chain that proposed, including the ones whose proposal left the
+    simplex and was rejected without rendering anything, so `acc_rate` is the same ratio the
+    summary's `acceptance` reports over the whole run. `sigma`/`beta` are the kernel this
+    round actually ran under -- a run whose kernel was driven mid-flight has rows that
+    differ, and that difference is the only record of where the law changed.
+    """
+    round: int
+    n_proposed: int = 0
+    n_accepted: int = 0
+    acc_rate: float | None = None
+    # mean energy over the chain SET at the end of the round (stopped chains included: they
+    # still have a state), and over just the proposals this round accepted
+    mean_S_states: float | None = None
+    mean_S_accepted: float | None = None
+    cost_so_far: float = 0.0
+    t_wall: float = 0.0
+    sigma: float = 0.0
+    beta: float = 0.0
+
+
+class MetroEvent(BaseModel):
+    """One proposal: where from, where to, and what happened to it.
+
+    What lets the map animate the chain instead of only showing where it ended up. A proposal
+    that left the simplex, and one whose probes never arrived, are both in here with `S_prop`
+    null and `accepted` false -- they are real rejections, and hiding them would make the
+    acceptance rate on screen unexplainable from the picture.
+    """
+    chain: int
+    w_from: list[float] = []
+    w_prop: list[float] = []
+    S_from: float | None = None
+    S_prop: float | None = None
+    accepted: bool = False
+    # thumbnail index of the image rendered AT the proposal (null when nothing was rendered)
+    image_idx_prop: int | None = None
+
+
+class MetroRoundEvents(BaseModel):
+    """One round's events, for the ring the panel replays rounds it polled past from."""
+    round: int
+    events: list[MetroEvent] = []
+
+
+class MetroParams(BaseModel):
+    """The kernel in force right now -- what the next round will run under."""
+    sigma: float = 0.03
+    beta: float = 1.0
+
+
+class MetroParamsRequest(BaseModel):
+    """Change sigma and/or beta from the panel, applied at the start of the next round.
+
+    Same bounds as the start form, because it is the same kernel. Omitted fields are left
+    alone. Changing either breaks stationarity -- see services/metro.py's header; the run
+    records the round it happened at and says so in its notes.
+    """
+    sigma: float | None = Field(None, gt=0.0, le=0.2)
+    beta: float | None = Field(None, ge=0.5, le=1.5)
+
+
+class MetroAddChainRequest(BaseModel):
+    """Start one more chain at a recipe the user picked; it joins at the next round.
+
+    `w` must be a legal recipe over the run's own prompts: k non-negative weights summing to
+    1 (to 1e-3, so a value read off a slider need not be exact -- it is renormalised, not
+    rejected for round-off).
+    """
+    w: list[float] = Field(..., min_length=3, max_length=12)
 
 
 class MetroStatus(BaseModel):
@@ -1033,6 +1122,17 @@ class MetroStatus(BaseModel):
     seed_divs: list[float | None] = []
     chains_stats: list[MetroChainStat] = []
     samples: list[MetroSample] = []
+    # --- the live view
+    rounds: list[MetroRoundLog] = []
+    last_events: list[MetroEvent] = []
+    recent_events: list[MetroRoundEvents] = []
+    # waiting between rounds. NOT a `status`: the run is still "running" (cancel, and every
+    # other `status == "running"` check, means what it meant), it just is not dispatching
+    paused: bool = False
+    # the kernel in force now, which is NOT necessarily the one at the top of this object:
+    # `sigma`/`beta` there are what the run STARTED with, these are what the next round uses
+    params: MetroParams = Field(default_factory=MetroParams)
+    params_changed: bool = False
     summary: MetroSummary = Field(default_factory=MetroSummary)
     notes: list[str] = []
     error: str | None = None
@@ -1060,6 +1160,10 @@ class MetroExport(BaseModel):
     seeds: list[list[float]] = []
     samples: list[MetroSample] = []
     chains_stats: list[MetroChainStat] = []
+    # the per-round history, so an exported stimulus set carries the kernel every state in it
+    # was actually drawn under rather than only the one the run was started with
+    rounds: list[MetroRoundLog] = []
+    params_changed: bool = False
     summary: MetroSummary = Field(default_factory=MetroSummary)
     notes: list[str] = []
 
