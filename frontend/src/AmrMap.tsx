@@ -7,7 +7,16 @@
  * draws the grid it searched ACROSS, so the two surfaces read as two ways of spending the
  * same budget on the same space.
  *
- * Two encodings of one lattice, never both at once (the toggle):
+ * Colour is the MEASUREMENT, as on the Cascade map: the default reads every mark on
+ * `divColor`, the blue->red divergence ramp exported from CascadeMap, because an AMR cell's
+ * divergence (max 1 - cos to its measured lattice neighbours, backend `pair_divergences`)
+ * and a chord probe's divergence there (`_set_div`) are the SAME quantity, and one quantity
+ * gets one ramp. The boundary EDGES go on it too, each at its own divergence, so a 0.4 edge
+ * and a 1.2 edge stop looking alike. The ladder then has the channel colour is not spending:
+ * dot SIZE, big = coarse.
+ *
+ * The secondary toggle keeps the other reading, which answers a different question (where
+ * did the budget go, not where is the boundary):
  *
  *   * BY LEVEL -- which rung of the ladder paid for this cell. Ordinal, so a one-hue
  *     light->dark ramp, coarse (dark) to fine (light), validated on this map's own surface
@@ -15,9 +24,8 @@
  *     2.35:1. Four of its five steps are tokens the map already uses for structure, and the
  *     hue is deliberately the structural neutral-blue rather than a data hue -- the two data
  *     ramps in this tool already mean something (blue->red divergence, orange S_V). Dot SIZE
- *     carries the level as well, so the level is never colour-alone.
- *   * BY DIVERGENCE -- `divColor`, imported from CascadeMap. The same quantity (1 - cos to
- *     the measured lattice neighbours) on the same ramp as a chord probe there.
+ *     carries the level here as well, so the level is never colour-alone, and the edges stay
+ *     on the divergence ramp -- they are a measurement either way.
  *
  * k=3 is the exact static triangle. k=4 is a 2-D shadow of the 3-D space, drawn by
  * CascadeMap's own `makeProjector` and turned with the same bindings as that map (left-drag
@@ -77,7 +85,8 @@ export default function AmrMap({
              weights?: number[] | null) => void;
 }) {
   const k = status.k || status.prompts.length;
-  const [colorBy, setColorBy] = useState<AmrColorBy>('level');
+  // divergence by default: the same reading, on the same ramp, as the Cascade's chord probes
+  const [colorBy, setColorBy] = useState<AmrColorBy>('divergence');
   const [finestOnly, setFinestOnly] = useState(false);
   const [theta, setTheta] = useState(0);
   const [view, setView] = useState<View>(HOME);
@@ -252,7 +261,9 @@ export default function AmrMap({
           <polygon points={hullOrder.map(([x, y]) => `${x},${y}`).join(' ')}
                    fill="#151538" stroke="#34346a" strokeWidth={q(1.5)} />
           {/* boundary edges UNDER the dots: an edge is a property of the pair of cells it
-              joins, so the cells stay the clickable objects on top of it */}
+              joins, so the cells stay the clickable objects on top of it. Each one is drawn
+              at ITS OWN divergence on the shared ramp -- every detected edge is past 0.35,
+              but they run from there to past 1, and one flat warning colour said otherwise. */}
           <g style={{ pointerEvents: 'none' }}>
             {shownEdges.map((ei) => {
               const [a, b] = status.edges[ei];
@@ -262,7 +273,8 @@ export default function AmrMap({
               const [x2, y2] = proj.project(pb);
               if (![x1, y1, x2, y2].every(Number.isFinite)) return null;
               return <line key={`e${ei}`} x1={x1} y1={y1} x2={x2} y2={y2}
-                           stroke={WARN} strokeWidth={q(2)} strokeOpacity={0.85}
+                           stroke={divColor(status.edge_divs[ei] ?? null)}
+                           strokeWidth={q(2)} strokeOpacity={0.85}
                            strokeLinecap="round" />;
             })}
           </g>
@@ -328,7 +340,7 @@ export default function AmrMap({
           {' '}· h: home
         </div>
         <label className="rx-focus"
-               title="level = which rung of the ladder paid for the cell (dark = coarse, light = fine; dot size says the same thing). divergence = the cell's own 1-cos to its measured lattice neighbours, on the same blue→red ramp the Cascade colours its probes with."
+               title="divergence (the default) = the cell's own 1-cos to its measured lattice neighbours, on the same blue→red ramp the Cascade colours its probes with; dot size carries the level. level = which rung of the ladder paid for the cell (dark = coarse, light = fine), which answers where the budget went rather than where the boundary is. The edges stay on the divergence ramp either way."
                style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 6,
                         color: '#aeb6dd' }}>
           colour
@@ -336,8 +348,8 @@ export default function AmrMap({
                   onChange={(e) => setColorBy(e.target.value as AmrColorBy)}
                   style={{ background: '#0a0a1a', color: '#8a9', border: '1px solid #444',
                            borderRadius: 3, padding: '1px 3px', fontSize: 11 }}>
-            <option value="level">by level</option>
             <option value="divergence">by divergence</option>
+            <option value="level">by level</option>
           </select>
         </label>
         <label className="rx-focus"
@@ -348,6 +360,27 @@ export default function AmrMap({
                  onChange={(e) => setFinestOnly(e.target.checked)} />
           finest level only
         </label>
+        {/* The divergence ramp is always here: in the default mode it colours the dots AND
+            the edges, and in level mode it still colours the edges. Same ramp, same wording
+            and same top of scale as the Cascade's cloud, so the two maps read as one
+            instrument. */}
+        <div style={{ marginBottom: 8 }}>
+          <div style={{ color: '#aeb6dd' }}>
+            divergence <span style={{ color: '#667' }}>· 1 − cos to neighbours</span>
+          </div>
+          <div style={{ height: 8, borderRadius: 2, marginTop: 4,
+                        border: '1px solid rgba(255,255,255,0.10)',
+                        background: `linear-gradient(90deg, ${divColor(0)}, `
+                                    + `${divColor(0.25)}, ${divColor(0.5)})` }} />
+          <div style={{ display: 'flex', justifyContent: 'space-between', color: '#889',
+                        fontVariantNumeric: 'tabular-nums' }}>
+            <span>0</span><span>0.50</span>
+          </div>
+          <div style={{ color: '#667', marginTop: 2 }}>
+            <span style={{ color: divColor(0) }}>quiet</span> →{' '}
+            <span style={{ color: WARN }}>hot</span>, the Cascade's probe ramp
+          </div>
+        </div>
         {colorBy === 'level' ? (
           <div style={{ marginBottom: 8 }}>
             <div style={{ color: '#aeb6dd' }}>
@@ -368,25 +401,33 @@ export default function AmrMap({
             </div>
           </div>
         ) : (
+          /* size = level: with colour spent on the measurement, the ladder is the radius,
+             so the legend draws the radii themselves rather than describing them */
           <div style={{ marginBottom: 8 }}>
             <div style={{ color: '#aeb6dd' }}>
-              divergence <span style={{ color: '#667' }}>· 1 − cos to neighbours</span>
+              size <span style={{ color: '#667' }}>= level, coarse → fine</span>
             </div>
-            <div style={{ height: 8, borderRadius: 2, marginTop: 4,
-                          border: '1px solid rgba(255,255,255,0.10)',
-                          background: `linear-gradient(90deg, ${divColor(0)}, `
-                                      + `${divColor(0.25)}, ${divColor(0.5)})` }} />
-            <div style={{ display: 'flex', justifyContent: 'space-between', color: '#889',
-                          fontVariantNumeric: 'tabular-nums' }}>
-              <span>0</span><span>0.50</span>
+            <div style={{ display: 'flex', gap: 2, marginTop: 2 }}>
+              {sched.map((n) => (
+                <div key={n} style={{ flex: 1, textAlign: 'center' }}>
+                  <svg width={16} height={10} style={{ display: 'block', margin: '0 auto' }}>
+                    <circle cx={8} cy={5} r={dotR(n)} fill="#aeb6dd" />
+                  </svg>
+                  <div style={{ color: '#889', fontVariantNumeric: 'tabular-nums' }}>{n}</div>
+                </div>
+              ))}
+            </div>
+            <div style={{ color: '#667', marginTop: 2 }}>
+              points per simplex edge
             </div>
           </div>
         )}
         <div style={{ marginBottom: 6 }}>
-          <span style={{ color: WARN }}>―</span> boundary edge — two adjacent cells whose
-          images differ by more than 0.35 (the Cascade's crossing threshold)
-          <br /><span style={{ color: LEVEL_RAMP[0] }}>●</span>
-          <span style={{ color: LEVEL_RAMP[4] }}>●</span> evaluated cells; the lattices are
+          <span style={{ color: divColor(0.5) }}>―</span> boundary edge — two adjacent cells
+          whose images differ by more than 0.35 (the Cascade's crossing threshold), drawn at
+          its own divergence on the ramp above
+          <br /><span style={{ color: divColor(0) }}>●</span>
+          <span style={{ color: divColor(0.5) }}>●</span> evaluated cells; the lattices are
           nested, so a coarse cell is also a fine one and was probed once
         </div>
         {hoverPt !== null && status.point_images[hoverPt] >= 0 ? (

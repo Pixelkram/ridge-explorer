@@ -11,6 +11,11 @@ Three parts, all stored-data or analytic -- nothing renders:
         The detected edges must straddle the plane, the refined share must shrink level by
         level, every true boundary-crossing fine edge must be inside the refined set
         (recall 1.0 at r_ref = 1), and the cost must be 0.5 image-eq per probe.
+  (ii-c) DIVERGENCE -- the number AmrMap now fills every dot with by default (the Cascade's
+        own divColor ramp): each point's `div` is recomputed from the run's points and the
+        lattice adjacency alone, on a SMOOTH field where every adjacent pair has its own
+        cosine distance, and must equal the max over the cell's evaluated neighbours (and
+        must have reached the shared probe cloud through cascade._set_div).
   (iii) ROUTER through FastAPI's TestClient with a stubbed app.state and amr.run_amr
         replaced by a no-op (as tests/stride_test.py does for the cascade): k=3 and k=4
         start, k=5 is refused with a 400 that names the projected probe count, the bounds
@@ -234,19 +239,50 @@ def _stub_evaluate(run, field, labels):
             run.embeddings[gi] = field(w)
             run.generated += 1
             run.phase_done += 1
+            # the live-cloud bookkeeping cascade.evaluate does, so cascade._set_div has
+            # somewhere to write and the map's shared colouring can be checked too
+            run._geo_pos[gi] = len(run.probe_geo)
+            run.probe_geo.append([float(v) for v in w])
+            run.probe_div.append(None)
             idxs.append(gi)
         return idxs
     return stub
 
 
-def _survey(levels=3, r_ref=1, seed=3, stop_after=None):
+def _smooth_field(seed=0, scale=7.0, modes=5):
+    """A field whose every adjacent pair has its OWN cosine distance: a few random sinusoidal
+    modes of the position, mixed into an 8-vector and normalised, so e(w) wanders over the
+    unit sphere instead of along one circle.
+
+    The plane field above cannot tell a max-over-neighbours rule from several wrong ones
+    (every answer is 0 or 0.8), and a field linear in w cannot either (the distance then
+    depends only on WHICH unit move it is, so one level has k(k-1)/2 answers in total). This
+    one gives a different number per pair, and still crosses COS_T often enough that the
+    ladder refines.
+    """
+    rng = np.random.default_rng(seed)
+    C = rng.standard_normal((modes, K))
+    C -= C.mean(axis=1, keepdims=True)          # sum-zero: only tangent motion is seen
+    ph = rng.uniform(0.0, 2.0 * math.pi, modes)
+    A = rng.standard_normal((modes, 8))
+
+    def f(w):
+        x = np.asarray(w, dtype=float) - 1.0 / K
+        e = A.T @ np.sin(scale * (C @ x) + ph)
+        nn = float(np.linalg.norm(e))
+        return e / nn if nn > 1e-12 else np.eye(8)[0]
+    return f
+
+
+def _survey(levels=3, r_ref=1, seed=3, stop_after=None, field=None):
     """One stubbed AMR survey over the planar field; returns (run, plane normal, labels)."""
     from backend.services import cascade as cs
     p = _plane(seed)
     a, b = np.zeros(8), np.zeros(8)
     a[0] = 1.0
     b[0], b[1] = 0.2, math.sqrt(1 - 0.2 ** 2)
-    field = lambda w: a if float(np.dot(np.asarray(w) - 1.0 / K, p)) > 0 else b
+    if field is None:
+        field = lambda w: a if float(np.dot(np.asarray(w) - 1.0 / K, p)) > 0 else b
     run = amr.AmrRun(run_id="a", prompts=[f"p{i}" for i in range(K)], seed=7, steps=8,
                      height=64, width=64, guidance_scale=3.5, base=5, levels=levels,
                      factor=2, r_ref=r_ref)
@@ -321,6 +357,62 @@ def part2b():
     check(cut.status == "cancelled" and len(lab) == 1 and len(cut.level_stats) <= 1,
           "a cancel during the first level stops the ladder and stays cancelled",
           f"{cut.status}, {len(lab)} rounds, {len(cut.level_stats)} level rows")
+
+
+# --------------------------- (ii-c) the `div` the map colours by, recomputed independently
+def part2c():
+    """`div` is what AmrMap fills a dot with (on the Cascade's own divColor ramp), so it is
+    worth pinning to its definition rather than to a range: the max cosine distance from the
+    cell to the EVALUATED LATTICE NEIGHBOURS it ever had. Recomputed here from the run's own
+    points and the lattice adjacency alone -- no refine_set, no pair_divergences -- on the
+    smooth field, where every pair has a different answer."""
+    print("\n(ii-c) point `div` = max cosd to the evaluated lattice neighbours (smooth field)")
+    from backend.services.cascade import _cosd
+    field = _smooth_field()
+    run, _p, _labels = _survey(levels=3, field=field)
+    sched = [r["level"] for r in run.level_stats]
+    fine_n = amr.nested_schedule(5, 3, 2)[-1]
+
+    # the run's points, keyed the way run_amr keys them (finest-level integer counts)
+    at = {tuple(int(round(v * fine_n)) for v in pt["weights"]): i
+          for i, pt in enumerate(run.points)}
+    check(len(at) == len(run.points), "every point has a distinct finest-level lattice key")
+    want = {}
+    for n in sched:
+        scale = fine_n // n
+        here = [at.get(tuple(int(v) * scale for v in c))
+                for c in amr.lattice_counts(K, n)]
+        for i, j in amr.neighbours(K, n):
+            pa, pb = here[i], here[j]
+            if pa is None or pb is None:        # one end of the pair was never evaluated
+                continue
+            d = _cosd(field(run.points[pa]["weights"]), field(run.points[pb]["weights"]))
+            for t in (pa, pb):
+                cur = want.get(t)
+                want[t] = d if cur is None else max(cur, d)
+    got = {i: pt["div"] for i, pt in enumerate(run.points)}
+
+    n_distinct = len(set(round(v, 9) for v in want.values()))
+    check(len(sched) > 1 and len(run.points) > 56 and n_distinct > 20,
+          "the survey refined past its coarse level and the field is genuinely varied",
+          f"levels {sched}, {len(run.points)} points, {n_distinct} distinct divergences")
+    check(all(v is not None for v in got.values()),
+          "`div` is present on every evaluated point",
+          f"{sum(1 for v in got.values() if v is None)} missing of {len(got)}")
+    check(set(want) == set(got),
+          "exactly the points with a measured neighbour carry a divergence",
+          f"{len(want)} expected, {len(got)} served")
+    worst = max((abs(got[i] - want[i]) for i in want), default=0.0)
+    check(worst < 1e-12,
+          "every point's `div` equals the max cosd over its evaluated lattice neighbours",
+          f"worst |served - recomputed| {worst:.1e} over {len(want)} points")
+    # and the same number reached the live-cloud colouring the Cascade shares with us
+    cloud = {run.points[i]["image"]: run.points[i]["div"] for i in range(len(run.points))}
+    bad = [gi for gi, d in cloud.items()
+           if run._geo_pos.get(gi) is not None
+           and abs((run.probe_div[run._geo_pos[gi]] or -1) - d) > 1e-12]
+    check(not bad, "_set_div carried the same divergence into the shared probe cloud",
+          f"{len(cloud)} cells, {len(bad)} disagreeing")
 
 
 # ------------------------------------------------------------------- (iii) router
@@ -449,6 +541,7 @@ if __name__ == "__main__":
     part1()
     part2()
     part2b()
+    part2c()
     part3()
     print(f"\n{'ALL CHECKS PASS' if not fails else 'FAILED: ' + ', '.join(fails)}")
     sys.exit(1 if fails else 0)

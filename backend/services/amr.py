@@ -412,6 +412,11 @@ def run_amr(app, run, pool):
         pairs = neighbours(k, n)
         level_emb = [emb.get(key) for key in keys]
         edges = detect_edges(level_emb, pairs)
+        # The map colours by this, so it is the cell's divergence over EVERY measured
+        # neighbour it ever had: a cell paid for at a coarse level is carried into each finer
+        # lattice (above), so it is re-paired there at the finer spacing and the max below
+        # accumulates across levels. Taking only the level that paid for a cell would read
+        # the coarse cells at a resolution the run has already improved on.
         for i, d in pair_divergences(level_emb, pairs).items():
             p = pid.get(keys[i])
             if p is not None:
