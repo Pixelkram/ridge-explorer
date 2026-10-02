@@ -30,7 +30,7 @@ function check(name, actual, expected) {
   }
 }
 
-const OG = ['amr', 'cascade', 'discovery', 'hikers', 'itinerary', 'metro', 'mfscan',
+const OG = ['amr', 'cascade', 'desk', 'discovery', 'hikers', 'itinerary', 'metro', 'mfscan',
   'microscope', 'surprise'];
 
 console.log('featureFlags');
@@ -50,6 +50,7 @@ check('aliases normalise', set('?hide=Hiker, MF-Scan ,discover,3d', undefined),
   ['discovery', 'hikers', 'mfscan', 'threed']);
 check('microscope aliases', set('?hide=scope', undefined), ['microscope']);
 check('microscope aliases (plane)', set('?hide=Plane', undefined), ['microscope']);
+check('desk aliases', set('?hide=mixer,WeightLifter,mixing-desk', undefined), ['desk']);
 check('unknown tokens are dropped, known ones survive',
   set('?hide=hikers,nonsense', undefined), ['hikers']);
 check('preset + extra', set('?hide=og,explore', undefined), [...OG, 'explore'].sort());

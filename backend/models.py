@@ -1395,3 +1395,130 @@ class MicroZoomResponse(BaseModel):
     status: str
     cost_image_eq: float = 0.0
 
+
+# ---- Mixing desk (services/desk.py) --------------------------------------------------------
+
+class DeskStartRequest(BaseModel):
+    """A WeightLifter desk over k prompts: one line per prompt through `w0` (barycentre when
+    null), sampled every `dalpha` on the cheap field; `refine` bisects each detected change to
+    dalpha/8 at full fidelity."""
+    prompts: list[str] = Field(..., min_length=3, max_length=12)
+    w0: list[float] | None = None
+    dalpha: float = Field(0.05, ge=0.01, le=0.25)
+    refine: bool = False
+    seed: int = 42
+    steps: int = Field(config.DEFAULT_NUM_INFERENCE_STEPS, ge=1, le=50)
+    # line samples run on the cheap field, as the Cascade's chord probes do; null = full fidelity
+    probe_steps: int | None = Field(4, ge=1, le=50)
+    height: int = Field(config.DEFAULT_HEIGHT, ge=64, le=1024)
+    width: int = Field(config.DEFAULT_WIDTH, ge=64, le=1024)
+    guidance_scale: float = Field(config.DEFAULT_GUIDANCE_SCALE, ge=0.0, le=20.0)
+
+
+class DeskMoveRequest(BaseModel):
+    """A new current mix: either `w0` outright, or `alpha` along prompt `line`'s slider through
+    the current mix (the released marker). dalpha/refine default to the desk's."""
+    w0: list[float] | None = None
+    line: int | None = Field(None, ge=0)
+    alpha: float | None = Field(None, ge=0.0, le=1.0)
+    dalpha: float | None = Field(None, ge=0.01, le=0.25)
+    refine: bool | None = None
+
+
+class DeskStartResponse(BaseModel):
+    desk_id: str
+    status: str
+    position: int = 0
+    cost_image_eq: float = 0.0
+    cached_lines: int = 0
+
+
+class DeskFlip(BaseModel):
+    """One label change along a line: the bracket [alphas[lo], alphas[hi]] whose two samples
+    are further apart than COS_T, quoted at its midpoint -- or, refined, at the midpoint of the
+    full-fidelity bisection bracket of `width`. `confirmed` = the full-fidelity ends still pass
+    COS_T (null unless refined); img_lo / img_hi = the images either side (full fidelity when
+    refined)."""
+    lo: int
+    hi: int
+    alpha: float
+    div: float
+    refined: bool = False
+    width: float
+    confirmed: bool | None = None
+    full_div: float | None = None
+    img_lo: int = -1
+    img_hi: int = -1
+
+
+class DeskSegment(BaseModel):
+    lo: int
+    hi: int
+    alpha_lo: float
+    alpha_hi: float
+    thumb: int = -1
+
+
+class DeskLine(BaseModel):
+    i: int
+    prompt: str
+    alpha0: float
+    degenerate: bool = False
+    cached: bool = False
+    status: str = "pending"
+    alphas: list[float]
+    images: list[int]
+    divs: list[float | None]
+    flips: list[DeskFlip] = []
+    segments: list[DeskSegment] = []
+
+
+class DeskFlipRef(BaseModel):
+    """The nearest change one way along a line: how far (in alpha), where, and the image just
+    beyond it."""
+    dist: float
+    alpha: float
+    thumb: int = -1
+    refined: bool = False
+
+
+class DeskReadout(BaseModel):
+    i: int
+    prompt: str
+    up: DeskFlipRef | None = None
+    down: DeskFlipRef | None = None
+    nearest: float | None = None
+
+
+class DeskPositionRef(BaseModel):
+    pid: int
+    w0: list[float]
+    status: str
+    cost_image_eq: float = 0.0
+
+
+class DeskStatus(BaseModel):
+    desk_id: str
+    status: str
+    k: int = 0
+    prompts: list[str] = []
+    seed: int = 0
+    steps: int = 0
+    probe_steps: int | None = None
+    position: int = -1
+    w0: list[float] = []
+    w0_image: int = -1
+    dalpha: float = 0.05
+    refine: bool = False
+    lines: list[DeskLine] = []
+    readout: list[DeskReadout] = []
+    readout_label: str = ""
+    positions: list[DeskPositionRef] = []
+    cost_image_eq: float = 0.0
+    position_cost: float = 0.0
+    max_request_image_eq: float = 0.0
+    max_session_image_eq: float = 0.0
+    cos_t: float = 0.35
+    generated: int = 0
+    notes: list[str] = []
+    error: str | None = None

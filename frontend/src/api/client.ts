@@ -558,3 +558,53 @@ export async function microscopeCancel(runId: string): Promise<void> {
 export function microscopeImageUrl(runId: string, index: number): string {
   return `${BASE}/api/microscope/${runId}/image/${index}`;
 }
+
+// ---- Mixing desk ----
+// The microscope's shape: start and move can be refused with a 4xx whose detail is the useful
+// answer (a projection past a ceiling, a mix that is no recipe), so it is lifted out.
+async function deskPost<T>(path: string, body?: unknown): Promise<T> {
+  const r = await fetchRetry(`${BASE}/api/desk/${path}`, {
+    method: 'POST',
+    ...(body === undefined ? {} : {
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  });
+  if (!r.ok) {
+    let detail = `desk ${path} failed: HTTP ${r.status}`;
+    try {
+      const j = await r.json();
+      if (typeof j?.detail === 'string') detail = j.detail;
+      else if (Array.isArray(j?.detail) && j.detail[0]?.msg) detail = j.detail[0].msg;
+    } catch { /* keep the HTTP line */ }
+    throw new Error(detail);
+  }
+  return r.json();
+}
+
+export function deskStart(
+  req: import('./types').DeskStartRequest,
+): Promise<import('./types').DeskStartResponse> {
+  return deskPost('start', req);
+}
+
+/** A new current mix. Called on RELEASE of a marker, never while dragging. */
+export function deskMove(
+  deskId: string, req: import('./types').DeskMoveRequest,
+): Promise<import('./types').DeskStartResponse> {
+  return deskPost(`${deskId}/move`, req);
+}
+
+export async function deskStatus(deskId: string): Promise<import('./types').DeskStatus> {
+  // bare fetch on purpose: retrying a poll just delays the next one
+  const r = await fetch(`${BASE}/api/desk/${deskId}/status`);
+  return r.json();
+}
+
+export async function deskCancel(deskId: string): Promise<void> {
+  await fetch(`${BASE}/api/desk/${deskId}/cancel`, { method: 'POST' });
+}
+
+export function deskImageUrl(deskId: string, index: number): string {
+  return `${BASE}/api/desk/${deskId}/image/${index}`;
+}

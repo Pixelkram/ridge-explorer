@@ -297,6 +297,12 @@ export default function MicroscopePanel() {
     setOpen(true);
     setErr(null);
     setRedraw(0);
+    // a new place to look at: put its plan on screen rather than the previous run's lattice
+    // (that run stays on the server; Start renders the new one)
+    setRunId(null);
+    setStatus(null);
+    setView(0);
+    setDetail(null);
     setK(handoff.prompts.length);
     setPromptText(handoff.prompts.join('\n'));
     setCentreText(handoff.weights.map((w) => w.toFixed(4)).join(', '));

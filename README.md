@@ -113,8 +113,8 @@ VITE_RIDGE_HIDE=og npm run dev        # every tab opens on the original surface
 | `?hide=none` | everything back, even if `VITE_RIDGE_HIDE` hid it |
 
 Individually gateable: `hikers`, `cascade`, `amr`, `metro`, `microscope` (aliases `scope`,
-`plane`), `discovery`, `itinerary`, `mfscan`, `surprise`, `explore`, `fastscan`, `refine`,
-`seeds`, `threed`. The `og` preset keeps
+`plane`), `desk` (aliases `mixer`, `weightlifter`), `discovery`, `itinerary`, `mfscan`,
+`surprise`, `explore`, `fastscan`, `refine`, `seeds`, `threed`. The `og` preset keeps
 Explore, Fast Scan, Refine, the seed controls and the 2D/3D selector — add them by name
 (`?hide=og,explore`) to strip further. Names are case- and separator-insensitive
 (`MF-Scan` = `mfscan`) and a few aliases work (`hike`, `discover`, `3d`); an unrecognised
@@ -262,6 +262,20 @@ not grow with k.
   `GET /api/microscope/{run}/status`, `POST /api/microscope/{run}/zoom {level, ia, ib}`,
   `POST /api/microscope/{run}/cancel`, `GET /api/microscope/{run}/image/{index}`;
   `tests/microscope_test.py`.
+- **Mixing desk** (`desk` flag; `backend/services/desk.py`) — one slider per prompt, as in
+  WeightLifter (Pajer et al., TVCG 2017): prompt i's slider is the line through the current mix
+  w0 with w_i = α and the others' proportions kept, w_j = w0_j·(1 − α)/(1 − w0_i) (a vertex mix,
+  w0_i = 1, shares the rest equally and is flagged). Each line is sampled every Δα (0.05) with
+  the Cascade's cheap chord probes; dark cuts mark consecutive samples past COS_T, each stretch
+  between cuts shows one image, and *refine* bisects every change (≤ 4 per line) to Δα/8 at full
+  fidelity. Dragging a marker previews the mix; releasing it moves there and recomputes the other
+  k − 1 lines (the dragged line, and every line or mix seen before, comes from the cache).
+  Readout: per prompt, the distance to the nearest change up and down with the image beyond it,
+  sorted — labelled *exploratory — calibration pending (h26a)*. Cost k × samples × 0.5 image-eq
+  (+ refine ≤ 20 full images per line), shown before running; refused past 300 image-eq per
+  request or 3000 per desk. Routes: `POST /api/desk/start`, `POST /api/desk/{desk}/move` (`w0`,
+  or `line` + `alpha`), `GET /api/desk/{desk}/status`, `POST /api/desk/{desk}/cancel`,
+  `GET /api/desk/{desk}/image/{index}`; `tests/desk_test.py`.
 
 ## Architecture
 

@@ -9,6 +9,7 @@ import CascadePanel from './CascadePanel';
 import AmrPanel from './AmrPanel';
 import MetroPanel from './MetroPanel';
 import MicroscopePanel from './MicroscopePanel';
+import DeskPanel from './DeskPanel';
 import SurpriseSlider from './components/SurpriseSlider';
 import { feature } from './featureFlags';
 
@@ -2530,6 +2531,9 @@ export default function App() {
           it. The microscope lays a G x G image lattice on a plane through a recipe -- G^2
           images at any k -- and zooms 2x per click (Sequential Gallery). */}
       {feature('microscope') && <MicroscopePanel />}
+      {/* and the Mixing desk: one WeightLifter slider per prompt through the current mix --
+          k lines, not a lattice -- with the places the image changes identity cut into each */}
+      {feature('desk') && <DeskPanel />}
       <MainViewport />
       <ExportOverlay />
     </div>

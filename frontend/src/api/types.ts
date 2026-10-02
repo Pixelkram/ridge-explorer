@@ -1061,3 +1061,116 @@ export interface MicroZoomResponse {
   status: string;
   cost_image_eq: number;
 }
+
+// ---- Mixing desk: one WeightLifter slider per prompt through the current mix (any k) ----
+
+export interface DeskStartRequest {
+  prompts: string[];
+  w0?: number[] | null;               // null = the barycentre
+  dalpha?: number;                    // sample spacing along each line (0.05)
+  refine?: boolean;                   // bisect each change to dalpha/8 at full fidelity
+  seed?: number;
+  steps?: number;
+  probe_steps?: number | null;        // cheap field (4); null = full fidelity
+}
+
+/** A new current mix: outright (`w0`) or a released marker (`line` + `alpha`). */
+export interface DeskMoveRequest {
+  w0?: number[] | null;
+  line?: number | null;
+  alpha?: number | null;
+  dalpha?: number | null;
+  refine?: boolean | null;
+}
+
+export interface DeskStartResponse {
+  desk_id: string;
+  status: string;
+  position: number;
+  cost_image_eq: number;
+  cached_lines: number;
+}
+
+export interface DeskFlip {
+  lo: number;                         // sample indices of the bracket
+  hi: number;
+  alpha: number;                      // where the change is quoted
+  div: number;                        // 1 - cos across the cheap bracket
+  refined: boolean;
+  width: number;                      // the bracket it is quoted at
+  confirmed: boolean | null;          // full-fidelity ends still past COS_T (refined only)
+  full_div: number | null;
+  img_lo: number;
+  img_hi: number;
+}
+
+export interface DeskSegment {
+  lo: number;
+  hi: number;
+  alpha_lo: number;
+  alpha_hi: number;
+  thumb: number;
+}
+
+export interface DeskLine {
+  i: number;
+  prompt: string;
+  alpha0: number;                     // the current mix's weight on this prompt
+  degenerate: boolean;
+  cached: boolean;
+  status: string;
+  alphas: number[];
+  images: number[];
+  divs: (number | null)[];
+  flips: DeskFlip[];
+  segments: DeskSegment[];
+}
+
+export interface DeskFlipRef {
+  dist: number;
+  alpha: number;
+  thumb: number;
+  refined: boolean;
+}
+
+export interface DeskReadout {
+  i: number;
+  prompt: string;
+  up: DeskFlipRef | null;
+  down: DeskFlipRef | null;
+  nearest: number | null;
+}
+
+export interface DeskPositionRef {
+  pid: number;
+  w0: number[];
+  status: string;
+  cost_image_eq: number;
+}
+
+export interface DeskStatus {
+  desk_id: string;
+  status: string;
+  k: number;
+  prompts: string[];
+  seed: number;
+  steps: number;
+  probe_steps: number | null;
+  position: number;
+  w0: number[];
+  w0_image: number;
+  dalpha: number;
+  refine: boolean;
+  lines: DeskLine[];
+  readout: DeskReadout[];
+  readout_label: string;
+  positions: DeskPositionRef[];
+  cost_image_eq: number;
+  position_cost: number;
+  max_request_image_eq: number;
+  max_session_image_eq: number;
+  cos_t: number;
+  generated: number;
+  notes: string[];
+  error?: string | null;
+}
