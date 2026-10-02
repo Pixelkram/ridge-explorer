@@ -15,7 +15,12 @@ Two things this router does beyond that:
     bill is (1 + m) x chains x steps probes and easy to type past the shared pool's day;
   * it validates the CASCADE seed mode against the live run it names -- unknown id, still
     running, wrong k, or no crossings -- because "seed at the crossings" of a run that has
-    none would silently become uniform sampling, which is a different experiment.
+    none would silently become uniform sampling, which is a different experiment;
+  * `/status` serves the SEED phase as it happens (`seed_chords`, `seed_probes`,
+    `seed_crossings`), so the panel's map has something true to draw during the first minute
+    or two of a run instead of a progress bar. The probes are strided to `SEED_PROBES_MAX`;
+    every other field is served whole, and all of them default to empty, so a client that
+    predates them is unaffected.
 
 `GET /api/metro/cascade-runs` lists the runs that mode can use, so the panel can offer a
 selector instead of asking the user to remember an 8-hex id.
@@ -37,12 +42,19 @@ from fastapi.responses import Response
 from backend.models import (MetroStartRequest, MetroStartResponse, MetroStatus, MetroSample,
                             MetroChainStat, MetroSummary, MetroExport, MetroCascadeRun,
                             MetroRoundLog, MetroEvent, MetroRoundEvents, MetroParams,
-                            MetroParamsRequest, MetroAddChainRequest)
+                            MetroParamsRequest, MetroAddChainRequest, MetroSeedProbe,
+                            MetroSeedCrossing)
 from backend.services import metro
 from backend.services.cascade import COS_T, _clipn
 from backend.cache.thumbnail_cache import ThumbnailStore
 
 router = APIRouter(prefix="/api/metro", tags=["metro"])
+
+# Ceiling on the seed probes /status serves. 20 chords is ~500 probes, but `n_seed_chords`
+# goes to 200 and this object is polled every 1.2 s, so a long survey is strided down rather
+# than sent whole -- the map's picture thins out evenly, which is what the Cascade's own cloud
+# does past its `maxPts`. The run keeps every probe; only the view is capped.
+SEED_PROBES_MAX = 4000
 
 
 def _runs(app):
@@ -180,6 +192,29 @@ def _chain_stats(run):
     return out
 
 
+def _seed_probes(run):
+    """The seed survey's probes, strided to at most SEED_PROBES_MAX (see the constant).
+
+    A plain stride, not a filter on divergence: these are the only measurement the seed phase
+    has, and dropping the quiet ones would turn a map of where the survey went into a map of
+    where it found something -- the same picture the crossing rings already give.
+    """
+    pts = list(getattr(run, "seed_probes", []))
+    stride = 1 if len(pts) <= SEED_PROBES_MAX else -(-len(pts) // SEED_PROBES_MAX)
+    return [MetroSeedProbe(**p) for p in pts[::stride]]
+
+
+def _seed_view(run):
+    """The seed phase's live half of /status: the chords, the probes, the crossings so far."""
+    return {
+        "seed_chords": [[list(a), list(b)]
+                        for a, b in getattr(run, "seed_chords", [])],
+        "seed_probes": _seed_probes(run),
+        "seed_crossings": [MetroSeedCrossing(w=list(x["weights"]), div=x["divergence"])
+                           for x in run.seed_crossings],
+    }
+
+
 def _live(run):
     """The live-view half of /status: the round log, the events to animate, the kernel."""
     return {
@@ -227,7 +262,7 @@ async def status(run_id: str, request: Request):
         seed_divs=[x["divergence"] for x in run.seed_crossings],
         chains_stats=_chain_stats(run), samples=_samples(run),
         summary=MetroSummary(**run.summary()),
-        notes=list(run.notes), error=run.error, **_live(run))
+        notes=list(run.notes), error=run.error, **_seed_view(run), **_live(run))
 
 
 @router.post("/{run_id}/cancel")

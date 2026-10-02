@@ -206,11 +206,18 @@ def _two_basin(seed=1, band=0.02, amp=2.5, bg=0.25, freq=2.5, modes=3):
 def _stub_evaluate(run, field, rounds):
     """Stand-in for cascade.evaluate (the shape tests/amr_test.py uses): embeds every weight
     vector through the analytic field, keeps the live-cloud bookkeeping the real one keeps,
-    and records (label, batch size) per GPU round -- which is how the batching is counted."""
+    and records (label, batch size) per GPU round -- which is how the batching is counted.
+
+    `on_arrival` is called for every point, after its embedding is in `run.embeddings` and in
+    the order the points were asked for: the real one calls it per result off the inbox (so the
+    order is the workers'), and a caller that only works for one of those orders would be
+    broken in the tool and passing here. It is what publishes the seed phase live, so it is
+    part of the contract this stub has to keep, not an extra.
+    """
     def stub(app, r, pool, weights, seed, label, ctl=None, on_arrival=None, steps=None):
         rounds.append((label.split(".")[0], len(weights), steps))
         idxs = []
-        for w in weights:
+        for li, w in enumerate(weights):
             gi = run.next_idx
             run.next_idx += 1
             run.embeddings[gi] = field(w)
@@ -219,6 +226,8 @@ def _stub_evaluate(run, field, rounds):
             run._geo_pos[gi] = len(run.probe_geo)
             run.probe_geo.append([float(v) for v in w])
             run.probe_div.append(None)
+            if on_arrival is not None:
+                on_arrival(li, gi)
             idxs.append(gi)
         return idxs
     return stub

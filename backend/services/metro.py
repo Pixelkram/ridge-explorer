@@ -55,6 +55,17 @@ Caveats carried from the study, and what is NOT claimed here:
     extrapolation that renders fine, and clipping it would shorten delta exactly where a
     boundary runs along a face.
 
+Watching the seed phase
+-----------------------
+The first thing a run does is a chord survey (or a read of a finished Cascade's), and on the
+shared pool that is the first minute or two of it. It publishes as it goes, the way the
+Cascade's own chord phase does: `run.seed_chords` the moment a chord is drawn,
+`run.seed_probes` the moment a probe ARRIVES (with its divergence the moment its chord
+neighbour is there too), `run.seed_crossings` the moment a pair clears COS_T, and
+`run.chains_state` as soon as the chains have POSITIONS -- before the batch that measures
+their energies, with `s` None until it lands. So the map has something true to draw from the
+first few seconds, instead of a progress bar standing in for a phase.
+
 Driving the chain while it runs
 ------------------------------
 The round loop is also the panel's instrument, so four things can change between rounds:
@@ -280,7 +291,21 @@ class MetroRun:
     phase_done: int = 0
     phase_total: int = 0
     round_done: int = 0
-    # the crossings the chains were seeded at: {weights, divergence}
+    # --- the SEED phase, published WHILE it runs (see `seed_chords` below). The first phase of
+    # a 60 x 50 run is a minute or two of chord probes, and until these existed the panel had
+    # nothing to draw for it but a progress bar: the map now mounts on them.
+    # the chords the seeds are drawn along, as [[w_start, w_end], ...] -- this run's own IUR
+    # chords, or the source run's in cascade seed mode. Named for the phase rather than for the
+    # function `seed_chords()` that fills it; the two never collide (field vs module global).
+    seed_chords: list = field(default_factory=list)
+    # every seed probe as it ARRIVED: {w, div, image_idx}. `div` is the divergence to the
+    # chord-NEIGHBOUR probe, filled in the moment both of a pair exist -- the Cascade's
+    # `_live_div` rule, so a dot's colour means on this map what it means on that one.
+    seed_probes: list = field(default_factory=list)
+    # the crossings the chains were seeded at: {weights, divergence}. Appended live as pairs
+    # past COS_T are detected, then REPLACED by `seed_chords()`'s return value, which is the
+    # same set in chord order: the live list is for watching, the ordered one is what
+    # `_start_states` hands the chains, so a seed assignment never depends on arrival order.
     seed_crossings: list = field(default_factory=list)
     n_chords: int = 0
     # one per chain: {chain, weights, s, image, seed_weights, seed_s, seed_image,
@@ -530,6 +555,13 @@ def _log_round(run, r, events):
 
 # ---- seeding -------------------------------------------------------------------------
 
+def _probe_div(rec, d):
+    """Put a divergence on a seed probe, keeping the LARGER of the two chord neighbours' --
+    `cascade._set_div`'s rule, so an interior probe reads as hot when either side of it is."""
+    cur = rec["div"]
+    rec["div"] = float(d) if cur is None else max(float(cur), float(d))
+
+
 def seed_chords(app, run, pool, rng):
     """IUR root chords and the crossings along them: the Cascade's chord phase, reused.
 
@@ -541,6 +573,14 @@ def seed_chords(app, run, pool, rng):
     sampler that should not carry a position bias.
 
     One batched evaluate for every chord's probes together. Returns [{weights, divergence}].
+
+    LIVE, as the Cascade's chord phase is: each chord goes on `run.seed_chords` the moment it
+    is drawn, each probe on `run.seed_probes` the moment it ARRIVES (`on_arrival`), and each
+    pair past COS_T on `run.seed_crossings` the moment both of its probes are there. This is a
+    minute or two of a run during which nothing else exists to look at, and none of it needs
+    the batch to finish. The ordered pass below still has the last word on the crossings (see
+    the field's comment): detection order is arrival order, which is not reproducible, and the
+    chains' seeds must not be.
     """
     k = run.k
     pts, meta, geo = [], [], []
@@ -553,15 +593,57 @@ def seed_chords(app, run, pool, rng):
         offs = cs._chord_offsets(tneg, tpos, cs.STRIDE)
         ci = len(geo)
         geo.append((w0, u, offs))
+        first = len(pts)
         for i, off in enumerate(offs):
             pts.append(np.clip(w0 + off * u, 0, None))
             meta.append((ci, i))
+        # the two ENDS of the probe run, which is what the map draws a chord as: its first and
+        # last probe, in the same clipped coordinates the probes are rendered at
+        run.seed_chords.append([[float(v) for v in pts[first]],
+                                [float(v) for v in pts[-1]]])
     run.n_chords = len(geo)
     if not pts:
         return []
     run.phase = "seed chords"
     run.phase_done, run.phase_total = 0, len(pts)
-    gidx = cs.evaluate(app, run, pool, pts, run.seed, "metroseed", steps=run.probe_steps)
+    at = {}                                           # local probe index -> seed_probes slot
+
+    def _live(li, gi, _meta=meta, _at=at):
+        """One seed probe, the moment it lands (`cascade.evaluate`'s `on_arrival`).
+
+        The dot goes up uncoloured and gets its colour when its chord neighbour arrives, which
+        is the Cascade's `_live_div` exactly; the crossing it brackets goes up with it, so the
+        rings the chains will be seeded at appear while the survey is still running.
+        """
+        _at[li] = len(run.seed_probes)
+        run.seed_probes.append({"w": [float(v) for v in pts[li]], "div": None,
+                                "image_idx": int(gi)})
+        ci, ii = _meta[li]
+        for nb in (li - 1, li + 1):
+            pos = _at.get(nb)
+            if pos is None:
+                continue                              # the neighbour has not arrived yet
+            cj, jj = _meta[nb]
+            if cj != ci or abs(jj - ii) != 1:
+                continue                              # a different chord, or not adjacent
+            gj = run.seed_probes[pos]["image_idx"]
+            e1, e2 = run.embeddings.get(gi), run.embeddings.get(gj)
+            if e1 is None or e2 is None:
+                continue
+            d = float(_cosd(e1, e2))
+            _probe_div(run.seed_probes[_at[li]], d)
+            _probe_div(run.seed_probes[pos], d)
+            cs._set_div(run, gi, d)                   # the live cloud, same number
+            cs._set_div(run, gj, d)
+            if d > COS_T:
+                lo = min(ii, jj)
+                w0, u, offs = geo[ci]
+                mid = cs._clipn(w0 + 0.5 * (offs[lo] + offs[lo + 1]) * u, k)
+                run.seed_crossings.append({"weights": [float(v) for v in mid],
+                                           "divergence": d})
+
+    gidx = cs.evaluate(app, run, pool, pts, run.seed, "metroseed", on_arrival=_live,
+                       steps=run.probe_steps)
     run.n_probes += sum(1 for g in gidx if g is not None)
     per = {}
     for (ci, i), gi in zip(meta, gidx):
@@ -583,6 +665,18 @@ def seed_chords(app, run, pool, rng):
     run.notes.append(f"seed chords: {len(geo)} chords, {len(pts)} cheap probes, "
                      f"{len(out)} crossings past {COS_T}")
     return out
+
+
+def cascade_chords(src):
+    """The source Cascade run's own chords, as [[w_start, w_end], ...].
+
+    Cascade seed mode measures nothing of its own, so the only lines there are to draw for its
+    seed phase are the ones that found the crossings in the first place. Drawing them says
+    where this run's seeds came from, which is otherwise invisible: a cloud of rings with no
+    survey behind them looks like the sampler found them.
+    """
+    return [[[float(v) for v in a], [float(v) for v in b]]
+            for a, b in (getattr(src, "chords_geo", None) or ())]
 
 
 def cascade_seeds(run, src):
@@ -683,6 +777,7 @@ def run_metro(app, run, pool):
         src = (getattr(app.state, "cascades", {}) or {}).get(run.cascade_run_id) \
             if app is not None else None
         run.seed_crossings = cascade_seeds(run, src) if src is not None else []
+        run.seed_chords = cascade_chords(src) if src is not None else []
         run.notes.append(f"seeded from cascade run {run.cascade_run_id}: "
                          f"{len(run.seed_crossings)} crossings")
     else:
@@ -700,18 +795,27 @@ def run_metro(app, run, pool):
                          f"some chains share a starting sheet")
 
     # ---- the chains' initial energies: one batched round
+    #
+    # The chains are published BEFORE the batch that measures them, every one at its seed with
+    # `s` None (no energy yet, so the map draws its head hollow and the table's S and acc_rate
+    # read "—"). They exist from the moment they have a position: waiting for the batch would
+    # hide a whole round's worth of run behind a progress bar, and "where the chains start" is
+    # the one thing about this phase worth watching. The rows are then FILLED IN -- never
+    # re-appended -- so chain ids stay positional, which `queue_chain` relies on.
     run.phase = "initial energies"
+    for i, w in enumerate(starts):
+        run.chains_state.append({
+            "chain": i, "weights": [float(v) for v in w], "s": None, "image": -1,
+            "seed_weights": [float(v) for v in w], "seed_s": None, "seed_image": -1,
+            "n_propose": 0, "n_accept": 0, "n_outside": 0, "moved": False,
+            "stopped": False, "joined_round": 0})
     init = energy_batch(app, run, pool, rng, starts, "metroinit")
     if run.status != "running":
         return
     for i, (gi, s) in enumerate(init):
-        run.chains_state.append({
-            "chain": i, "weights": [float(v) for v in starts[i]], "s": s,
-            "image": int(gi) if gi is not None else -1,
-            "seed_weights": [float(v) for v in starts[i]], "seed_s": s,
-            "seed_image": int(gi) if gi is not None else -1,
-            "n_propose": 0, "n_accept": 0, "n_outside": 0, "moved": False,
-            "stopped": False, "joined_round": 0})
+        c = run.chains_state[i]
+        c["s"] = c["seed_s"] = s
+        c["image"] = c["seed_image"] = int(gi) if gi is not None else -1
     dead = [c["chain"] for c in run.chains_state if c["s"] is None]
     if dead:
         run.notes.append(f"{len(dead)} chains never got a starting energy (missing probes) "

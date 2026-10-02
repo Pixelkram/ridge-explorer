@@ -1065,6 +1065,30 @@ class MetroRoundEvents(BaseModel):
     events: list[MetroEvent] = []
 
 
+class MetroSeedProbe(BaseModel):
+    """One probe of the seed survey, as it arrived.
+
+    `div` is the cosine distance to its chord NEIGHBOUR -- the Cascade's chord-probe reading on
+    the same ramp -- and is null until the neighbour has arrived too, which is why these are
+    served at all: during the seed phase this is the only measurement the run has, and a dot
+    that has not been paired up yet is honest grey rather than absent.
+    """
+    w: list[float] = []
+    div: float | None = None
+    image_idx: int | None = None
+
+
+class MetroSeedCrossing(BaseModel):
+    """One seed crossing: the midpoint of a probe pair past COS_T, and that pair's divergence.
+
+    The same crossings `seeds`/`seed_divs` carry (which stay as they were for old clients), in
+    one record per crossing so the map can draw a ring and its reading together. Both lists
+    grow WHILE the survey runs.
+    """
+    w: list[float] = []
+    div: float | None = None
+
+
 class MetroParams(BaseModel):
     """The kernel in force right now -- what the next round will run under."""
     sigma: float = 0.03
@@ -1120,6 +1144,15 @@ class MetroStatus(BaseModel):
     # bracket that found each (reported, never used as an energy)
     seeds: list[list[float]] = []
     seed_divs: list[float | None] = []
+    # --- the seed phase while it runs. All three are empty on a cascade-seeded run except
+    # `seed_chords` (the source run's own chords) and the crossings it inherits; all three
+    # default to empty, so a client that predates them sees exactly what it saw before.
+    # the chords the seeds come from, as [[w_start, w_end], ...] in weight space
+    seed_chords: list[list[list[float]]] = []
+    # every seed probe that has arrived, strided down to at most SEED_PROBES_MAX points
+    seed_probes: list[MetroSeedProbe] = []
+    # the crossings found so far, as records (the same set as `seeds`/`seed_divs`)
+    seed_crossings: list[MetroSeedCrossing] = []
     chains_stats: list[MetroChainStat] = []
     samples: list[MetroSample] = []
     # --- the live view

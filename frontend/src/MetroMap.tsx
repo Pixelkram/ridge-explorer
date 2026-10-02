@@ -3,10 +3,18 @@
  *
  * Same picture as CascadeMap and AmrMap, by the same arithmetic (`makeProjector`,
  * `viewTransform`): prompt vertices around the hull, the k=3 triangle exact, k>=4 a 2-D
- * shadow of the (k-1)-dimensional space that left-drag turns. Five layers:
+ * shadow of the (k-1)-dimensional space that left-drag turns. Seven layers, the first two of
+ * which belong to a phase that used to have no picture at all:
  *
+ *   * the SEED CHORDS as faint lines and the SEED PROBES as dots on the divergence ramp,
+ *     arriving one by one while the survey runs -- the Cascade's chord phase, in the Cascade's
+ *     own visual language (line #4a4f8f, dot filled by `divColor`, grey while a probe has no
+ *     chord neighbour to be read against yet). Before these existed the first minute or two of
+ *     a run was a progress bar: the map mounted only once the first chain had a state, so the
+ *     phase that DECIDES where every chain starts was the one phase nobody could watch;
  *   * the SEED crossings as hollow rings -- where the survey (or this run's own chords)
- *     handed the chains their starting sheets;
+ *     handed the chains their starting sheets. They appear as they are detected, so a ring
+ *     lands on the map while the chords around it are still being probed;
  *   * each chain's accepted states joined in order as a faint TRACE polyline -- the path is
  *     structure, not data, so it takes the map's existing chord token at low opacity and
  *     stays recessive under the dots. (This is deliberately below the 3:1 contrast a data
@@ -17,7 +25,10 @@
  *     with and the AMR map a cell's. S is that quantity, averaged over m directions instead
  *     of read across one lattice edge, so it belongs on the same ramp and gets no new one;
  *   * each chain's current state as a HEAD: the same ramp fill, larger, ringed in the path
- *     token, so "where the chains are now" reads apart from "where they have been";
+ *     token, so "where the chains are now" reads apart from "where they have been". A head
+ *     whose energy has not been measured yet -- every chain during the "initial energies"
+ *     batch, and a hand-placed one for the round it joins at -- is drawn HOLLOW: it has a
+ *     position and no reading, and filling it from the ramp would invent one;
  *   * the last round's PROPOSALS, for as long as they take to resolve.
  *
  * Motion is information, as it is on the cascade map. Every poll that brings a new round
@@ -42,6 +53,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { MetroEvent, MetroStatus } from './api/types';
 import { divColor, makeProjector } from './CascadeMap';
+import { baryFromPoint } from './metroUtil';
 import {
   HOME, dragFactor, isDrag, isHome, pan, reset, rotationDelta, svgTransform, toScreen,
   toWorld, wheelFactor, wrapAngle, zoomAbout,
@@ -95,29 +107,6 @@ function short(p: string, n = 26) {
 // eye gains from, and the chains with the most accepted states are the ones worth drawing.
 const MAX_PATHS = 80;
 
-/**
- * Barycentric coordinates of a point in the k=3 triangle, or null if the triangle is
- * degenerate. `vs` must be the vertices in PROMPT order, which is how the caller builds them,
- * so the result is a recipe over the same prompts and not a permutation of one.
- *
- * k=3 only on purpose. For k>=4 the map is a 2-D shadow of a (k-1)-dimensional space: a pixel
- * is a whole fibre of recipes, so there is no inverse to compute and a click cannot mean one
- * recipe. The panel offers the two unambiguous seeds instead (an existing sample, or an
- * existing crossing), which is the honest version of the same gesture.
- */
-export function baryFromPoint(
-  vs: readonly (readonly [number, number])[], x: number, y: number,
-): number[] | null {
-  if (vs.length < 3) return null;
-  const [[x1, y1], [x2, y2], [x3, y3]] = vs;
-  const det = (y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3);
-  if (!Number.isFinite(det) || Math.abs(det) < 1e-9) return null;
-  const a = ((y2 - y3) * (x - x3) + (x3 - x2) * (y - y3)) / det;
-  const b = ((y3 - y1) * (x - x3) + (x1 - x3) * (y - y3)) / det;
-  const w = [a, b, 1 - a - b];
-  return w.every((v) => Number.isFinite(v)) ? w : null;
-}
-
 export default function MetroMap({
   status, runId, size = 560, imageUrl, onImage, followed = null, onFollow, onSeed,
   live = false,
@@ -140,6 +129,7 @@ export default function MetroMap({
   const k = status.k || status.prompts.length;
   const [showPaths, setShowPaths] = useState(true);
   const [showSeeds, setShowSeeds] = useState(true);
+  const [showSurvey, setShowSurvey] = useState(true);
   const [showHeads, setShowHeads] = useState(true);
   const [showSamples, setShowSamples] = useState(true);
   const [showRejected, setShowRejected] = useState(true);
@@ -159,6 +149,12 @@ export default function MetroMap({
   const dragged = useRef(false);
   const canRotate = k > 3;
   const canSeed = live && !!onSeed;
+
+  // The seed survey. Optional on the wire: a backend that predates these fields serves a
+  // status without them, and this map still has to draw the rest of the run.
+  const chords = status.seed_chords ?? [];
+  const probes = status.seed_probes ?? [];
+  const seeding = status.status === 'running' && status.phase.startsWith('seed chords');
 
   // The round being animated. Only ever ONE: the heads are already at their final positions
   // in `chains_stats`, so a poll that fell two rounds behind replays the newest round's
@@ -382,6 +378,35 @@ export default function MetroMap({
         <g transform={svgTransform(view)}>
           <polygon points={hullOrder.map(([x, y]) => `${x},${y}`).join(' ')}
                    fill="#151538" stroke="#34346a" strokeWidth={q(1.5)} />
+          {/* The seed survey, UNDER everything the chains do: the chords it probed along and
+              the probes themselves, which arrive one by one. Faint lines and small dots on
+              purpose -- by the time the chains are running this is the ground they started
+              from, and during the seed phase it is the only thing on the map. Pointer events
+              off: there is nothing to click here, and these dots must never take a click
+              meant for a sample or a head sitting on top of them. */}
+          {showSurvey && (
+            <g style={{ pointerEvents: 'none' }}>
+              {chords.map((c, i) => {
+                if (!c || c.length < 2) return null;
+                const [x1, y1] = proj.project(c[0]);
+                const [x2, y2] = proj.project(c[1]);
+                if (![x1, y1, x2, y2].every((v) => Number.isFinite(v))) return null;
+                return <line key={`sc${i}`} x1={x1} y1={y1} x2={x2} y2={y2} stroke={PATH}
+                             strokeWidth={q(1)} strokeOpacity={0.5} />;
+              })}
+              {probes.map((p, i) => {
+                const [x, y] = proj.project(p.w);
+                if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+                const d = p.div ?? null;
+                // the Cascade's own cloud rule: a measured probe grows with its reading, an
+                // unpaired one stays small and grey -- "not read yet", not "quiet"
+                const hot = d !== null ? Math.min(1, d / 0.5) : 0;
+                return <circle key={`sp${i}`} cx={x} cy={y}
+                               r={q(d !== null ? 1.8 + 1.4 * hot : 1.5)} fill={divColor(d)}
+                               fillOpacity={d !== null ? 0.9 : 0.55} />;
+              })}
+            </g>
+          )}
           {/* chain traces UNDER everything: structure, not data */}
           {showPaths && (
             <g style={{ pointerEvents: 'none' }}>
@@ -453,15 +478,19 @@ export default function MetroMap({
               })}
             </g>
           )}
-          {/* the heads: where every chain is NOW */}
+          {/* the heads: where every chain is NOW. A chain whose energy has not been measured
+              yet (the whole set during "initial energies", a hand-placed one for the round it
+              joins at) is hollow: it has a position and no reading. */}
           {showHeads && status.chains_stats.map((c) => {
-            if (c.s === null || c.s === undefined) return null;
             const [x, y] = proj.project(c.weights);
             if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
             const on = followed === c.chain;
+            const s = c.s ?? null;
+            const unread = s === null;
             return (
               <circle key={`h${c.chain}`} className={glide ? 'mx-head' : undefined}
-                      cx={x} cy={y} r={q(on ? 5.6 : 4.6)} fill={divColor(c.s)}
+                      cx={x} cy={y} r={q(on ? 5.6 : 4.6)}
+                      fill={unread ? 'none' : divColor(s)}
                       fillOpacity={0.98 * dim(c.chain)}
                       stroke={on ? '#fff' : c.stopped ? SEED : PATH}
                       strokeWidth={q(on ? 2.2 : 1.8)}
@@ -473,8 +502,13 @@ export default function MetroMap({
                         onFollow?.(on ? null : c.chain);
                       }}>
                 <title>
-                  {`chain ${c.chain} · S ${(c.s ?? 0).toFixed(3)} · `
-                   + `${c.n_accept}/${c.n_propose} accepted`
+                  {`chain ${c.chain} · `
+                   + (unread
+                     ? (status.phase === 'initial energies'
+                       ? 'S not measured yet — its energy lands in this batch'
+                       : 'no starting energy: its probes never arrived, so it sits out the '
+                         + 'run (the run\'s notes count these)')
+                     : `S ${s.toFixed(3)} · ${c.n_accept}/${c.n_propose} accepted`)
                    + (c.stopped ? ' · frozen' : '')
                    + (c.joined_round ? ` · added at round ${c.joined_round}` : '')}
                 </title>
@@ -507,6 +541,15 @@ export default function MetroMap({
           <text x={10} y={20} fill="#7d84c8" fontSize={10}
                 style={{ fontVariantNumeric: 'tabular-nums' }}>
             {view.s.toFixed(2)}× · h: home
+          </text>
+        )}
+        {/* during the seed phase the map IS the survey, so it says so rather than leaving a
+            half-drawn picture to be read as a finished one */}
+        {seeding && (
+          <text x={10} y={size - 38} fill={SEED} fontSize={10}
+                style={{ fontVariantNumeric: 'tabular-nums' }}>
+            seeding: {chords.length} chord{chords.length === 1 ? '' : 's'} ·{' '}
+            {probes.length} probes · {status.seeds.length} crossings so far
           </text>
         )}
         {followed !== null && (
@@ -553,8 +596,9 @@ export default function MetroMap({
         </div>
         {toggle(showHeads, setShowHeads, 'chain heads',
                 'where every chain is NOW: one larger dot per chain, ringed in the trace '
-                + 'colour, filled by its own energy on the ramp above. It glides to each '
-                + 'accepted proposal, and a frozen chain\'s ring goes dashed.')}
+                + 'colour, filled by its own energy on the ramp above. A head with no fill '
+                + 'has no energy yet — it is waiting for the batch that measures it. It '
+                + 'glides to each accepted proposal, and a frozen chain\'s ring goes dashed.')}
         {toggle(showSamples, setShowSamples, 'accepted states',
                 'every state any chain has accepted, filled by its energy. This is the '
                 + 'sample set — the gallery below shows the same states as images.')}
@@ -570,16 +614,30 @@ export default function MetroMap({
         {toggle(showSeeds, setShowSeeds, 'seed crossings',
                 'the crossings the chains were seeded at: either this run\'s own IUR chords '
                 + 'or a finished Cascade\'s. Hollow, so a seed never reads as a sample.')}
+        {(chords.length > 0 || probes.length > 0) && toggle(
+          showSurvey, setShowSurvey, 'seed survey',
+          'the chords the seeds were looked for along, and every probe of them, on the same '
+          + 'divergence ramp as everything else. Each pair of adjacent probes past 0.35 is a '
+          + 'crossing, and that is where a chain starts — so this layer is the evidence '
+          + 'behind the rings. A probe still waiting for its neighbour is small and grey: '
+          + 'not read yet, rather than quiet. In cascade seed mode the chords are the SOURCE '
+          + 'run\'s and there are no probes of this run\'s own.')}
         <div style={{ margin: '6px 0' }}>
           <span style={{ color: divColor(0.5) }}>●</span> accepted state — colour = its
           energy S
           <br /><span style={{ color: divColor(0.35) }}>◉</span> a chain's head, where it is
-          now
+          now <span style={{ color: '#667' }}>(hollow = energy not measured yet)</span>
           <br /><span style={{ color: ACCENT }}>◌</span> proposal accepted (the head is on
           its way)
           <br /><span style={{ color: SEED }}>•</span> proposal rejected, fading out
           <br /><span style={{ color: PATH }}>―</span> one chain's trace, seed first
           <br /><span style={{ color: SEED }}>◦</span> seed crossing
+          {(chords.length > 0 || probes.length > 0) && (
+            <>
+              <br /><span style={{ color: PATH }}>―</span> seed chord ·{' '}
+              <span style={{ color: divColor(0.2) }}>·</span> its probes
+            </>
+          )}
         </div>
         {canSeed && (
           <div style={{ borderTop: '1px solid #2a2a4a', paddingTop: 5, marginBottom: 6 }}>
@@ -635,7 +693,10 @@ random — the same kind of start the run's own chains were given"
           </div>
         ) : (
           <div style={{ color: '#667' }}>
-            hover a state to see its image · click a head to follow its chain
+            {seeding
+              ? 'seeding: the chords and their probes are going up as they come back — the '
+                + 'chains appear once the survey has crossings to start them on'
+              : 'hover a state to see its image · click a head to follow its chain'}
           </div>
         )}
       </div>

@@ -3,7 +3,11 @@
  *
  * Three pieces, none of which knows anything about running a chain: a `Sparkline`, the
  * `ChainTable` that lists the chains and lets one be followed or frozen, and `ChainTrace`,
- * the followed chain's own trajectory and its last thumbnails.
+ * the followed chain's own trajectory and its last thumbnails. Three COMPONENTS and nothing
+ * else: the pure helpers that used to sit here (`paramChangeRounds`, and the Sparkline's two
+ * data shapes) are in `metroUtil.ts`, because one plain function exported from a component
+ * file costs Fast Refresh for the whole module -- and a panel watching a run that takes
+ * minutes is exactly the thing a full page reload throws away.
  *
  * Why these charts look the way they do
  * ------------------------------------
@@ -34,7 +38,8 @@
  * reading of the same number.
  */
 import { useState } from 'react';
-import type { MetroChainStat, MetroRoundLog, MetroSample } from './api/types';
+import type { MetroChainStat, MetroSample } from './api/types';
+import type { SparkMark, SparkPoint } from './metroUtil';
 import { divColor } from './CascadeMap';
 
 /** recessive series ink: the panel's in-progress bar, and the sparkline recipe's de-emphasis */
@@ -49,17 +54,6 @@ const INK = '#c9d1f0';
 const LABEL = '#aeb6dd';
 const MUTED = '#667';
 const WARN = '#e94560';
-
-export interface SparkPoint {
-  x: number;
-  /** null breaks the line rather than being drawn as a zero */
-  y: number | null;
-}
-
-export interface SparkMark {
-  x: number;
-  title: string;
-}
 
 function fmt(x: number | null | undefined, d = 3): string {
   return x === null || x === undefined || !Number.isFinite(x) ? '—' : x.toFixed(d);
@@ -170,22 +164,6 @@ export function Sparkline({
       </div>
     </div>
   );
-}
-
-/** The rounds at which the kernel differs from the round before -- the backend's own rule. */
-export function paramChangeRounds(rounds: MetroRoundLog[]): SparkMark[] {
-  const out: SparkMark[] = [];
-  for (let i = 1; i < rounds.length; i++) {
-    const a = rounds[i - 1], b = rounds[i];
-    if (a.sigma === b.sigma && a.beta === b.beta) continue;
-    const bits: string[] = [];
-    if (a.sigma !== b.sigma) bits.push(`σ ${a.sigma} → ${b.sigma}`);
-    if (a.beta !== b.beta) bits.push(`β ${a.beta} → ${b.beta}`);
-    out.push({ x: b.round,
-               title: `round ${b.round}: ${bits.join(', ')} — the kernel changed here, so `
-                      + 'the states before and after are draws from two different chains' });
-  }
-  return out;
 }
 
 /**

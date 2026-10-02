@@ -32,6 +32,13 @@ gets (the loop reads every control at the START of a round, never inside the bat
         loop has stopped, 422 for out-of-bounds params, 400 for an empty params body and for
         a recipe that is not one, the add-chain cost refusal against MAX_IMAGE_EQ, 404 for an
         unknown chain, and the live fields on /status.
+  (vii) THE SEED PHASE, which is the first minute or two of a real run and used to publish
+        nothing: `seed_chords` as the chords are drawn, `seed_probes` as the probes ARRIVE
+        (the `on_arrival` hook, with the divergence to the chord neighbour filled in once both
+        of a pair exist), `seed_crossings` as pairs clear COS_T -- checked against the ordered
+        pass that has the last word on them, which must find the same SET; and the chains
+        published at step 0, every one at its seed with S null, BEFORE the batch that measures
+        them. Plus the three fields on /status, including the 4,000-point stride.
 
 Run: python tests/metro_live_test.py
 """
@@ -673,6 +680,257 @@ def part6():
         metro.run_metro = orig
 
 
+# ------------------------------------------------------- (vii) the seed phase, published live
+def _drive_seed(run, field):
+    """Run the loop with snapshots taken INSIDE the two phases that precede round 1.
+
+    Returns a dict of readings nothing else can give: what `seed_chords` held when the seed
+    batch was dispatched, what `seed_probes`/`seed_crossings` held after each arrival, the live
+    crossing list the moment the survey ended (before the ordered pass replaces it), and the
+    chain set as it stood when the initial-energy batch was dispatched.
+    """
+    snap = {"arrivals": [], "chords_at_dispatch": None, "live_crossings": None,
+            "chains_at_init": None, "phase_at_init": None, "rounds_at_init": None}
+    dispatches = []
+    stub = _stub_evaluate(run, field, dispatches)
+
+    def driven(app, r, pool, weights, seed, label, ctl=None, on_arrival=None, steps=None):
+        if label.startswith("metroseed"):
+            snap["chords_at_dispatch"] = [[list(a), list(b)] for a, b in run.seed_chords]
+            inner = on_arrival
+
+            def hook(li, gi, _inner=inner):
+                _inner(li, gi)
+                snap["arrivals"].append(
+                    (len(run.seed_probes), len(run.seed_crossings), run.phase_done,
+                     run.phase))
+            on_arrival = hook
+        if label.startswith("metroinit"):
+            snap["chains_at_init"] = [dict(c) for c in run.chains_state]
+            snap["phase_at_init"] = run.phase
+            snap["rounds_at_init"] = len(run.rounds)
+        out = stub(app, r, pool, weights, seed, label, ctl, on_arrival, steps)
+        if label.startswith("metroseed"):
+            snap["live_crossings"] = [dict(x) for x in run.seed_crossings]
+        return out
+
+    orig = cs.evaluate
+    cs.evaluate = driven
+    try:
+        metro.run_metro(None, run, None)
+    finally:
+        cs.evaluate = orig
+    return snap, dispatches
+
+
+def part7():
+    print("\n(vii) the seed phase publishes itself: chords, probes, crossings, chains at step 0")
+    field, _p = _two_basin()
+    chains, L = 10, 4
+    run = _mk_run(chains=chains, chain_steps=L, m=2, n_seed_chords=14)
+    snap, dispatches = _drive_seed(run, field)
+    n_seed = next(n for lab, n, _st in dispatches if lab == "metroseed")
+    key = (lambda w: tuple(round(float(v), 9) for v in w))
+
+    # --- the chords
+    check(len(run.seed_chords) == run.n_chords
+          and len(snap["chords_at_dispatch"]) == run.n_chords,
+          "every chord is published as it is DRAWN, so they are all on the map before the "
+          "first probe of them was even dispatched",
+          f"{len(snap['chords_at_dispatch'])} chords at dispatch = {run.n_chords} drawn")
+    check(all(len(c) == 2 and len(c[0]) == K and len(c[1]) == K for c in run.seed_chords),
+          "a chord is [w_start, w_end], both k-long")
+    ends = {key(c[0]) for c in run.seed_chords} | {key(c[1]) for c in run.seed_chords}
+    at = {key(p["w"]) for p in run.seed_probes}
+    check(ends <= at,
+          "and its two ends ARE probes of it (the first and the last), so the line drawn is "
+          "the line measured rather than the unclipped chord it was taken from",
+          f"{len(ends)} endpoints, all among {len(at)} probe positions")
+    check(all(float(np.linalg.norm(np.asarray(c[1]) - np.asarray(c[0])))
+              >= cs._min_chord_len(cs.STRIDE) - 2 * cs.STRIDE for c in run.seed_chords),
+          "every published chord is a chord that was long enough to carry a bracket")
+
+    # --- the probes, as they arrive
+    check(len(run.seed_probes) == n_seed,
+          "one seed probe is published per probe RENDERED -- the whole batch, nothing dropped",
+          f"{len(run.seed_probes)} probes = {n_seed} in the metroseed batch")
+    check(all(set(p) == {"w", "div", "image_idx"} for p in run.seed_probes),
+          "each carries the documented three fields", f"{sorted(run.seed_probes[0])}")
+    check(all(len(p["w"]) == K and p["image_idx"] in run.embeddings
+              for p in run.seed_probes),
+          "a probe names its own recipe and the image that was rendered at it")
+    firsts = [a[0] for a in snap["arrivals"]]
+    check(firsts == list(range(1, n_seed + 1))
+          and snap["arrivals"][0][2] <= 1 and snap["arrivals"][0][3] == "seed chords",
+          "they go up ONE AT A TIME as they arrive, from the first one on -- the panel does "
+          "not wait for the batch",
+          f"{len(firsts)} arrivals, {firsts[:3]}... with phase "
+          f"{snap['arrivals'][0][3]!r}")
+    check(all(p["div"] is not None for p in run.seed_probes),
+          "every probe ends up with a divergence: a chord carries at least three probes "
+          "(cascade._min_chord_len), so every probe has a chord neighbour to be read against")
+    # the reading itself is the Cascade's: the cosine distance to a NEIGHBOUR's embedding.
+    # Arrival order is dispatch order here, so a probe's chord neighbours are among its list
+    # neighbours, and its div must be one of those two readings exactly -- not a placeholder,
+    # and not a distance to something that is not next to it.
+    bad = []
+    for i, p in enumerate(run.seed_probes):
+        nb = [x["image_idx"] for x in (run.seed_probes[max(0, i - 1):i]
+                                       + run.seed_probes[i + 1:i + 2])]
+        ds = [float(cs._cosd(run.embeddings[p["image_idx"]], run.embeddings[g])) for g in nb]
+        if not any(abs(p["div"] - d) < 1e-12 for d in ds):
+            bad.append(i)
+    check(not bad,
+          "and that divergence IS the cosine distance to one of its chord neighbours (the "
+          "larger of the two where it has two, as the Cascade's `_set_div` keeps it)",
+          f"{len(run.seed_probes)} probes checked against their neighbours")
+
+    # --- the crossings, live against the ordered pass that has the last word on them
+    live, final = snap["live_crossings"], run.seed_crossings
+    check(live and len(live) == len(final)
+          and {key(x["weights"]) for x in live} == {key(x["weights"]) for x in final},
+          "the crossings detected live are exactly the set the ordered pass finds -- the live "
+          "list is for watching, the ordered one is what seeds the chains, and they never "
+          "disagree about WHICH crossings there are",
+          f"{len(live)} live = {len(final)} ordered")
+    check(all(x["divergence"] > cs.COS_T and metro.in_simplex(x["weights"]) for x in live),
+          "every live crossing is a legal recipe past the threshold",
+          f"min div {min(x['divergence'] for x in live):.3f} > {cs.COS_T}")
+    mid = [a for a in snap["arrivals"] if a[0] < n_seed]
+    check(any(a[1] > 0 for a in mid),
+          "and the first of them lands while the survey is still probing, not at the end of "
+          "it", f"{max(a[1] for a in mid)} crossings up before the batch finished")
+
+    # --- the chains, published at step 0 before the batch that measures them
+    c0 = snap["chains_at_init"]
+    check(c0 is not None and len(c0) == chains and snap["phase_at_init"] == "initial energies"
+          and snap["rounds_at_init"] == 0,
+          f"all {chains} chains exist BEFORE the initial-energy batch is dispatched, in a "
+          f"phase that names itself", f"{len(c0 or [])} chains, phase "
+          f"{snap['phase_at_init']!r}, {snap['rounds_at_init']} rounds logged")
+    check(all(c["s"] is None and c["seed_s"] is None and c["image"] == -1
+              and c["seed_image"] == -1 for c in c0),
+          "with no energy and no image yet: null, not 0 -- the map draws such a head hollow "
+          "rather than inventing a reading for it")
+    check(all(c["n_propose"] == 0 and c["n_accept"] == 0 and c["acc_rate"] is None
+              for c in _as_stats(c0)),
+          "and at step 0 with acc_rate null, which is what the chain table shows")
+    check(all(c["weights"] == c["seed_weights"] and len(c["weights"]) == K for c in c0)
+          and [c["chain"] for c in c0] == list(range(chains)),
+          "every head sits at its own seed, and the ids are positional")
+    seeds_at = {key(x["weights"]) for x in final}
+    check(all(key(c["seed_weights"]) in seeds_at for c in c0),
+          "and the seeds they sit on are crossings the survey found",
+          f"{len(seeds_at)} distinct crossings for {chains} chains")
+    check(len(run.chains_state) == chains
+          and [c["chain"] for c in run.chains_state] == [c["chain"] for c in c0]
+          and all(a["weights"] == b["seed_weights"] for a, b in zip(c0, run.chains_state))
+          and all(c["s"] is not None and c["seed_s"] is not None
+                  for c in run.chains_state),
+          "when the batch lands the rows are FILLED IN, not appended a second time: the same "
+          "chains, with the same ids, each still recording as its seed the position it was "
+          "published at -- and now with an energy there",
+          f"{len(run.chains_state)} chains at the end")
+    check(not run.samples or min(x["step"] for x in run.samples) >= 1,
+          "a start state is not a sample: nothing is stamped with round 0")
+
+
+def _as_stats(rows):
+    """The router's per-chain view of raw chain rows (routers/metro._chain_stats' arithmetic)."""
+    out = []
+    for c in rows:
+        p = int(c.get("n_propose", 0))
+        out.append({**c, "acc_rate": (float(c.get("n_accept", 0)) / p) if p else None})
+    return out
+
+
+# -------------------------------------------- (viii) the seed phase on /status, with its cap
+def part8():
+    print("\n(viii) /status serves the seed phase, probes strided to the served ceiling")
+    try:
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+    except Exception as exc:                         # noqa: BLE001
+        check(False, "TestClient available", str(exc))
+        return
+    from backend.routers import metro as router_mod
+
+    class _NoCache:
+        def has(self, h):
+            return False
+
+        def save(self, h, data):
+            pass
+
+        def get_path(self, h):
+            return None
+
+    orig = metro.run_metro
+    metro.run_metro = lambda app, run, pool: None
+    try:
+        app = FastAPI()
+        app.include_router(router_mod.router)
+        app.state.metro_runs = {}
+        app.state.cascades = {}
+        app.state.cache = _NoCache()
+        app.state.gpu_pool = None
+        c = TestClient(app, raise_server_exceptions=False)
+        r = c.post("/api/metro/start", json={"prompts": ["a", "b", "c", "d"], "chains": 4,
+                                            "chain_steps": 5})
+        rid = r.json()["run_id"]
+        run = app.state.metro_runs[rid]
+
+        # a fresh run: the three fields are there and empty, which is what an old client that
+        # never heard of them also sees
+        j = c.get(f"/api/metro/{rid}/status").json()
+        check(j["seed_chords"] == [] and j["seed_probes"] == [] and j["seed_crossings"] == [],
+              "a run that has not started seeding serves the three fields empty")
+
+        run.seed_chords = [[[0.9, 0.1, 0.0, 0.0], [0.0, 0.1, 0.9, 0.0]],
+                           [[0.25] * 4, [0.4, 0.2, 0.2, 0.2]]]
+        run.seed_probes = [{"w": [0.25] * 4, "div": 0.41, "image_idx": 7},
+                           {"w": [0.3, 0.3, 0.2, 0.2], "div": None, "image_idx": 8}]
+        run.seed_crossings = [{"weights": [0.25] * 4, "divergence": 0.41},
+                              {"weights": [0.5, 0.2, 0.2, 0.1], "divergence": None}]
+        j = c.get(f"/api/metro/{rid}/status").json()
+        check(j["seed_chords"] == [[[0.9, 0.1, 0.0, 0.0], [0.0, 0.1, 0.9, 0.0]],
+                                  [[0.25] * 4, [0.4, 0.2, 0.2, 0.2]]],
+              "the chords come through as [w_start, w_end] pairs",
+              f"{len(j['seed_chords'])} chords")
+        check(len(j["seed_probes"]) == 2 and j["seed_probes"][0] == {
+            "w": [0.25] * 4, "div": 0.41, "image_idx": 7}
+            and j["seed_probes"][1]["div"] is None,
+              "a probe carries w, div and image_idx, with div null while it is unpaired",
+              f"{j['seed_probes'][1]}")
+        check(j["seed_crossings"] == [{"w": [0.25] * 4, "div": 0.41},
+                                     {"w": [0.5, 0.2, 0.2, 0.1], "div": None}],
+              "a crossing comes through as {w, div} (div null where the source run had none)")
+        check(j["seeds"] == [[0.25] * 4, [0.5, 0.2, 0.2, 0.1]]
+              and j["seed_divs"] == [0.41, None],
+              "and `seeds`/`seed_divs` still say exactly what they said before, so a client "
+              "that reads those is untouched", f"{j['seeds']}")
+
+        # the cap: every probe is kept on the run, only the view is strided
+        n = 4 * router_mod.SEED_PROBES_MAX + 1
+        run.seed_probes = [{"w": [0.25] * 4, "div": i / n, "image_idx": i} for i in range(n)]
+        j = c.get(f"/api/metro/{rid}/status").json()
+        got = j["seed_probes"]
+        check(len(got) <= router_mod.SEED_PROBES_MAX and len(got) > 0
+              and got[0]["image_idx"] == 0
+              and [p["image_idx"] for p in got] == list(range(0, n, 5)),
+              f"{n} probes are strided down to at most {router_mod.SEED_PROBES_MAX} served, "
+              f"evenly and from the first one, with the run keeping all of them",
+              f"{len(got)} served of {len(run.seed_probes)} held")
+        run.seed_probes = [{"w": [0.25] * 4, "div": None, "image_idx": i}
+                           for i in range(router_mod.SEED_PROBES_MAX)]
+        j = c.get(f"/api/metro/{rid}/status").json()
+        check(len(j["seed_probes"]) == router_mod.SEED_PROBES_MAX,
+              "exactly at the ceiling nothing is strided away",
+              f"{len(j['seed_probes'])} served")
+    finally:
+        metro.run_metro = orig
+
+
 if __name__ == "__main__":
     part1()
     part2()
@@ -680,5 +938,7 @@ if __name__ == "__main__":
     part4()
     part5()
     part6()
+    part7()
+    part8()
     print(f"\n{'ALL CHECKS PASS' if not fails else 'FAILED: ' + ', '.join(fails)}")
     sys.exit(1 if fails else 0)

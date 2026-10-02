@@ -25,6 +25,12 @@
  * plus one for the chains' initial energies -- which is what makes 3,000 evaluations a
  * matter of minutes on the pool rather than days.
  *
+ * The map is up from the moment a run exists, including for the phases that are not rounds: the
+ * seed survey draws its chords and their probes into it as they come back and its crossings as
+ * they are found, the chains then appear as heads at those crossings (hollow until the batch
+ * that measures their energies lands), and only then does the round animation start. The counter
+ * row names whichever of the three is running.
+ *
  * It is also a run you can DRIVE while it goes round, which is what most of this file is: the
  * map animates each round's proposals as they resolve, the sparklines show whether the chain
  * is mixing, and five controls change the run itself -- sigma, beta, a new chain, a frozen
@@ -43,7 +49,8 @@ import {
 } from './api/client';
 import type { MetroStatus, MetroCascadeRun, MetroSample } from './api/types';
 import MetroMap from './MetroMap';
-import { ChainTable, ChainTrace, Sparkline, paramChangeRounds } from './MetroLive';
+import { ChainTable, ChainTrace, Sparkline } from './MetroLive';
+import { paramChangeRounds } from './metroUtil';
 import { divColor } from './CascadeMap';
 
 const BOX: React.CSSProperties = {
@@ -149,6 +156,39 @@ function projection(
     total += chains * steps;
   }
   return { rows, total };
+}
+
+/**
+ * Where the run is, for the counter row: the phase, and the round only once there are rounds.
+ *
+ * A run has three phases with something to say and the first two are not rounds, so counting
+ * "round 0 / 50" through a minute of chord probes said nothing about what was happening. The
+ * seed phase counts its probes (the only progress it has), the initial-energy batch names
+ * itself, and from the first MCMC round on the round count is the number that matters.
+ */
+function phaseLabel(status: MetroStatus): { text: string; tip: string } {
+  const ph = status.phase || status.status;
+  if (ph.startsWith('seed chords')) {
+    return { text: status.phase_total > 0
+      ? `seeding chords · ${status.phase_done}/${status.phase_total}` : 'seeding chords',
+    tip: 'the seed survey: isotropic chords probed every 0.025 on the cheap field. Every '
+         + 'adjacent pair past 0.35 is a crossing, and the crossings are where the chains '
+         + 'start — so no chain exists until this phase has found some.' };
+  }
+  if (ph === 'initial energies') {
+    return { text: 'initial energies',
+             tip: 'one batched round measuring S at every chain\'s start state: (1 + m) '
+                  + 'probes each. The chains are already on the map at their seeds, hollow '
+                  + 'until this batch gives them an energy.' };
+  }
+  if (ph === 'full-fidelity pass') {
+    return { text: 'full-fidelity pass',
+             tip: 're-rendering every distinct accepted state at full denoising steps, one '
+                  + 'image each. The chain is finished; this only replaces the thumbnails.' };
+  }
+  return { text: `round ${status.round_done} / ${status.chain_steps}`,
+           tip: 'MCMC rounds completed. One round is one batched GPU pass across every chain '
+                + 'that proposed.' };
 }
 
 /** One segment per round: the rounds already done full, the running one filling by probes. */
@@ -568,8 +608,8 @@ export default function MetroPanel() {
               <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 4,
                             fontSize: 11, fontVariantNumeric: 'tabular-nums',
                             color: '#aeb6dd' }}>
-                <span title="MCMC rounds completed. One round is one batched GPU pass across every chain that proposed.">
-                  round {status.round_done} / {status.chain_steps}
+                <span title={phaseLabel(status).tip}>
+                  {phaseLabel(status).text}
                 </span>
                 <span title="image-equivalents spent against this run's own projection, recomputed with the chains it has now — a chain added by hand raises the bill">
                   cost {Math.round(sm.cost_image_eq).toLocaleString()} /{' '}
@@ -749,7 +789,12 @@ export default function MetroPanel() {
                 </div>
               )}
 
-              {(status.samples.length > 0 || status.chains_stats.length > 0) && runId && (
+              {/* The map is up from the moment there IS a run: the seed survey draws itself
+                  into it (chords, probes, crossings), then the chains appear as heads, then
+                  the rounds animate. Gating it on "a chain has a state" left the first one to
+                  two minutes of every run — the phase that decides where all 60 chains start
+                  — behind a progress bar. */}
+              {runId && (
                 <div style={{ marginTop: 8 }}>
                   <MetroMap status={status} runId={runId} size={560}
                             imageUrl={metroImageUrl} followed={followed}

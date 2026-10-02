@@ -682,6 +682,19 @@ export interface MetroSummary {
   cost_image_eq: number;
 }
 
+/** One probe of the seed survey, as it arrived. `div` is null until its chord neighbour lands. */
+export interface MetroSeedProbe {
+  w: number[];
+  div?: number | null;
+  image_idx?: number | null;
+}
+
+/** One seed crossing: a probe pair past COS_T, at its midpoint, with that pair's divergence. */
+export interface MetroSeedCrossing {
+  w: number[];
+  div?: number | null;
+}
+
 export interface MetroStatus {
   run_id: string;
   status: string;
@@ -708,6 +721,12 @@ export interface MetroStatus {
   recent_thumbs: number[];
   seeds: number[][];                 // the crossings the chains were seeded at
   seed_divs: (number | null)[];      // divergence ACROSS each bracket (reported, not an S)
+  // --- the seed phase, growing WHILE it runs: the chords the seeds come from, every probe that
+  // has arrived (strided to 4,000 served), and the crossings found so far. Optional because a
+  // backend that predates them serves a status without them, and the panel still has to draw.
+  seed_chords?: number[][][];        // [[w_start, w_end], ...] in weight space
+  seed_probes?: MetroSeedProbe[];
+  seed_crossings?: MetroSeedCrossing[];
   chains_stats: MetroChainStat[];
   samples: MetroSample[];
   // --- the live view
