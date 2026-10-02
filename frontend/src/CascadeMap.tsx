@@ -23,6 +23,11 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { CascadeStatus, LocalSvMap } from './api/types';
 import { useProbeStore, probeLabel, probeCodim } from './stores/probeStore';
 import type { CascadeProbeMap, LocalSvView } from './stores/probeStore';
+import {
+  HOME, dragFactor, isDrag, isHome, pan, reset, rotationDelta, svgTransform, toScreen,
+  wheelFactor, wrapAngle, zoomAbout,
+} from './viewTransform';
+import type { View } from './viewTransform';
 
 const ACCENT = '#4ecca3';
 const WARN = '#e94560';
@@ -223,7 +228,11 @@ const KEYFRAMES = `
   @keyframes csBurst { from { transform: scale(1); opacity: 1; }
                        to { transform: scale(3.2); opacity: 0; } }
   .cs-march { animation: csMarch .8s linear infinite; }
-  @keyframes csMarch { from { stroke-dashoffset: 22; } to { stroke-dashoffset: 0; } }
+  /* the offset is in user units, so inside a zoomed-in view one cycle would cross many
+     dash periods and the march would read as a strobe; the drawn group sets --cs-march
+     to whatever 22 SCREEN px is worth at its current zoom */
+  @keyframes csMarch { from { stroke-dashoffset: var(--cs-march, 22); }
+                       to { stroke-dashoffset: 0; } }
   .cs-beat { animation: csBeat 1.2s ease-in-out infinite; }
   @keyframes csBeat { 0%,100% { fill-opacity: 1; } 50% { fill-opacity: .25; } }
   .cs-spulse { animation: csSPulse 1.1s ease-in-out infinite; }
@@ -241,6 +250,7 @@ const KEYFRAMES = `
 function MapSvg({
   status, size, theta, base, sel, onPick, walkPath, walkSegs, walkColors,
   caption, showBadge, showBeat, spin, compact, probes, pendingCid, sv, showClouds,
+  onRotate,
 }: {
   status: CascadeStatus;
   size: number;
@@ -265,12 +275,131 @@ function MapSvg({
   sv?: SvOverlay | null;
   /** draw the hi-res pass's cloud points around the crossings it sampled */
   showClouds?: boolean;
+  /** turn the shadow plane to this angle (left-drag); absent = rotation is not offered */
+  onRotate?: (theta: number) => void;
 }) {
   const prevLen = useRef(0);
   const newFrom = prevLen.current;
   useEffect(() => { prevLen.current = status.points.length; });
 
   const k = status.prompts.length;
+
+  // --- pan / zoom / rotate -------------------------------------------------------------
+  // Two transforms, deliberately not one. The pan/zoom VIEW belongs to this shadow: split
+  // tiles project the space differently, so each keeps its own, and it is applied on top
+  // of whatever `makeProjector` produced. The ROTATION is the projection's own angle,
+  // owned by the parent, so a left-drag in one tile turns every tile -- and because the
+  // two live apart, re-projecting composes with the view instead of resetting it.
+  const [view, setView] = useState<View>(HOME);
+  const svgRef = useRef<SVGSVGElement>(null);
+  const hovering = useRef(false);
+  // k=3 is the exact static triangle: there is no shadow plane to turn, so the left
+  // button stays what it was, a way to pick a crossing.
+  const canRotate = k > 3 && !!onRotate;
+  // The live gesture. `view`/`theta` are the state the drag STARTED from, so every gesture
+  // is absolute in the total drag distance -- no accumulated drift, and the Alt+right zoom
+  // keeps pinning the point it started on. `moved` is what separates a click from a drag.
+  const gesture = useRef<{
+    kind: 'pan' | 'zoom' | 'rotate';
+    x: number; y: number; pid: number; view: View; theta: number; moved: boolean;
+  } | null>(null);
+  // written at pointerup, read by the click that follows it: a left-drag that really did
+  // turn the plane must not ALSO land as a selection on the dot it started over
+  const dragged = useRef(false);
+
+  /** pointer position in the svg's own coordinates */
+  const at = (e: { clientX: number; clientY: number }) => {
+    const r = svgRef.current?.getBoundingClientRect();
+    return [e.clientX - (r?.left ?? 0), e.clientY - (r?.top ?? 0)] as const;
+  };
+
+  // Wheel zoom about the cursor. React's onWheel is passive, so it cannot preventDefault
+  // the page scroll underneath -- hence an explicit non-passive listener, the same shape
+  // the three-prompt canvas in App.tsx uses.
+  useEffect(() => {
+    const el = svgRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const r = el.getBoundingClientRect();
+      setView((v) => zoomAbout(v, wheelFactor(e.deltaY, e.deltaMode),
+                               e.clientX - r.left, e.clientY - r.top));
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+
+  // `h` = home: pan back to 0, zoom back to 1. It acts for the shadow under the pointer,
+  // or for the focused one, so in split view exactly one tile resets and which one is
+  // never in doubt. The angle is left alone -- it has its own slider and its own history.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'h' && e.key !== 'H') return;
+      if (e.altKey || e.ctrlKey || e.metaKey) return;
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
+          || t?.isContentEditable) return;
+      const el = svgRef.current;
+      if (!el || (!hovering.current && document.activeElement !== el)) return;
+      setView(reset());
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  const onPointerDown = (e: React.PointerEvent<SVGSVGElement>) => {
+    // Mouse only. Every binding here names a button the touch screen does not have, and
+    // the mobile view renders this same map: taking a one-finger drag would steal the
+    // page scroll from it.
+    if (e.pointerType !== 'mouse') return;
+    const kind = e.button === 1 ? 'pan'
+      : e.button === 2 && e.altKey ? 'zoom'
+        : e.button === 0 && canRotate ? 'rotate'
+          : null;
+    if (!kind) return;
+    const [x, y] = at(e);
+    gesture.current = { kind, x, y, pid: e.pointerId, view, theta, moved: false };
+    if (kind !== 'rotate') {
+      // middle-button autoscroll (and paste) and the right button's menu would both fight
+      // the gesture; a LEFT press is left alone, so it can still become a click
+      e.preventDefault();
+      svgRef.current?.setPointerCapture(e.pointerId);
+    }
+  };
+
+  const onPointerMove = (e: React.PointerEvent<SVGSVGElement>) => {
+    const g = gesture.current;
+    if (!g || e.pointerId !== g.pid) return;
+    const [x, y] = at(e);
+    const dx = x - g.x, dy = y - g.y;
+    if (!g.moved) {
+      if (!isDrag(dx, dy)) return;
+      g.moved = true;
+      // only now is this a drag rather than a click, so only now does the left button
+      // take the pointer with it
+      if (g.kind === 'rotate') svgRef.current?.setPointerCapture(g.pid);
+    }
+    if (g.kind === 'pan') setView(pan(g.view, dx, dy));
+    else if (g.kind === 'zoom') setView(zoomAbout(g.view, dragFactor(dy), g.x, g.y));
+    else onRotate?.(g.theta + rotationDelta(dx));
+  };
+
+  const endGesture = (e: React.PointerEvent<SVGSVGElement>) => {
+    const g = gesture.current;
+    if (!g || e.pointerId !== g.pid) return;
+    dragged.current = g.moved;
+    gesture.current = null;
+  };
+
+  // Screen px -> user units inside the drawn group: stroke widths, dot radii, rings,
+  // dashes and probe labels all keep the size they have at zoom 1, so zooming spreads the
+  // marks apart instead of inflating them. Done by division rather than with
+  // vector-effect="non-scaling-stroke", which would also reinterpret the chord draw-in --
+  // that animation normalises its dash pattern with pathLength=1.
+  const q = (v: number) => v / view.s;
+  const dashq = (d: string) => d.split(',').map((n) => q(Number(n))).join(',');
+
   const cx = size / 2, cy = size / 2, r = size / 2 - 34;
   const proj = makeProjector(k, theta, size, base);
   const vraw = Array.from({ length: k }, (_, i) => {
@@ -300,11 +429,29 @@ function MapSvg({
   })();
 
   return (
-    <svg width={size} height={size} style={{ background: '#0d0d20', borderRadius: 8,
-                                             touchAction: 'manipulation' }}>
+    <svg width={size} height={size} ref={svgRef} className="rx-focus" tabIndex={0}
+         onPointerDown={onPointerDown} onPointerMove={onPointerMove}
+         onPointerUp={endGesture} onPointerCancel={endGesture}
+         onLostPointerCapture={endGesture}
+         onPointerEnter={() => { hovering.current = true; }}
+         onPointerLeave={() => { hovering.current = false; }}
+         onClickCapture={(e) => {
+           // a drag is never a selection, however it started
+           if (dragged.current) e.stopPropagation();
+           dragged.current = false;
+         }}
+         onContextMenu={(e) => e.preventDefault()}
+         style={{ background: '#0d0d20', borderRadius: 8,
+                  touchAction: 'manipulation', userSelect: 'none' }}>
       <style>{KEYFRAMES}</style>
+      {/* Every layer below this line is drawn in the projection's own coordinates and
+          moved as one by the pan/zoom view; the vertex labels, badge, caption and hint
+          are outside it on purpose, so they stay the size they were written at. Children
+          keep their original indentation: the wrap is one transform, not a rewrite. */}
+      <g transform={svgTransform(view)}
+         style={{ '--cs-march': q(22) } as React.CSSProperties}>
       <polygon points={hullOrder.map(([, [x, y]]) => `${x},${y}`).join(' ')}
-               fill="#151538" stroke="#34346a" strokeWidth={1.5} />
+               fill="#151538" stroke="#34346a" strokeWidth={q(1.5)} />
       {(() => {
         const n = status.points.length;
         const stride = n > maxPts ? Math.ceil(n / maxPts) : 1;
@@ -315,7 +462,7 @@ function MapSvg({
           const hot = d !== null ? Math.min(1, d / 0.5) : 0;
           out.push(
             <circle key={`pt${i}`} cx={x} cy={y}
-                    r={(d !== null ? 2.4 + 1.8 * hot : 2.1) * (compact ? 0.8 : 1)}
+                    r={q((d !== null ? 2.4 + 1.8 * hot : 2.1) * (compact ? 0.8 : 1))}
                     fill={divColor(d)} fillOpacity={d !== null ? 0.9 : 0.6} />);
         }
         return out;
@@ -324,7 +471,7 @@ function MapSvg({
         const [x, y] = proj.project(w);
         return (
           <circle key={`ping${newFrom + i}`} className="cs-ping" cx={x} cy={y}
-                  r={2.4} fill="none" stroke="#9aa3e0" strokeWidth={1.5} />
+                  r={q(2.4)} fill="none" stroke="#9aa3e0" strokeWidth={q(1.5)} />
         );
       })}
       {/* Search chords. With the density overlay on, each one is drawn as its own station
@@ -354,7 +501,7 @@ function MapSvg({
                     stroke={svColor(sv.read(lane.values[j], lane.ranks[j],
                                             lane.uncovered[j]))}
                     strokeOpacity={op}
-                    strokeWidth={compact ? 2 : 2.8} strokeLinecap="butt" />);
+                    strokeWidth={q(compact ? 2 : 2.8)} strokeLinecap="butt" />);
           }
           return <g key={i}>{out}</g>;
         }
@@ -363,18 +510,19 @@ function MapSvg({
         return (
           <line key={i} className="cs-draw" x1={x1} y1={y1} x2={x2} y2={y2}
                 stroke="#4a4f8f" strokeOpacity={op}
-                strokeWidth={compact ? (gen ? 1.1 : 1.4) : (gen ? 1.5 : 2)} pathLength={1}
+                strokeWidth={q(compact ? (gen ? 1.1 : 1.4) : (gen ? 1.5 : 2))}
+                pathLength={1}
                 style={{ animationDelay: `${(i % 8) * 0.12}s` }} />
         );
       })}
       {(status.traces ?? []).map((tr, i) => (
         <g key={`tr${i}`} style={{ pointerEvents: 'none' }}>
           <polyline points={tr.points.map((w) => proj.project(w).join(',')).join(' ')}
-                    fill="none" stroke={ACCENT} strokeWidth={compact ? 1.3 : 1.9}
+                    fill="none" stroke={ACCENT} strokeWidth={q(compact ? 1.3 : 1.9)}
                     strokeOpacity={0.7} strokeLinejoin="round" />
           {tr.points.slice(1).map((w, j) => {
             const [x, y] = proj.project(w);
-            return <circle key={j} cx={x} cy={y} r={compact ? 1.5 : 2.1}
+            return <circle key={j} cx={x} cy={y} r={q(compact ? 1.5 : 2.1)}
                            fill={tr.cert && tr.cert[j] === false ? CERT_NO : ACCENT} />;
           })}
         </g>
@@ -383,20 +531,20 @@ function MapSvg({
         const [x1, y1] = proj.project(seg[0]);
         const [x2, y2] = proj.project(seg[1]);
         return <line key={`ws${i}`} x1={x1} y1={y1} x2={x2} y2={y2}
-                     stroke={WARN} strokeWidth={1.8} strokeOpacity={0.6} />;
+                     stroke={WARN} strokeWidth={q(1.8)} strokeOpacity={0.6} />;
       })}
       {status.patches.map((p) => {
         const c = status.crossings.find((x) => x.cid === p.cid);
         if (!c) return null;
         const [x, y] = proj.project(c.weights);
-        const h = compact ? 8 : 11;
+        const h = q(compact ? 8 : 11);
         const filling = running && p.grid.some((row) => row.some((t) => t < 0));
         return (
           <rect key={`p${p.region}`} x={x - h} y={y - h} width={2 * h} height={2 * h}
                 fill="none" stroke={filling ? WARN
                                     : p.significant ? ACCENT : '#8a93b8'}
-                strokeWidth={compact ? 1.6 : 2.2}
-                strokeDasharray={filling || p.exploration ? '4,3' : undefined}
+                strokeWidth={q(compact ? 1.6 : 2.2)}
+                strokeDasharray={filling || p.exploration ? dashq('4,3') : undefined}
                 className={filling ? 'cs-march cs-spulse' : undefined}
                 transform={`rotate(45 ${x} ${y})`} />
         );
@@ -414,10 +562,10 @@ function MapSvg({
             const [x, y] = proj.project(p[0]);
             if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
             return (
-              <circle key={`cl${c.cid}.${i}`} cx={x} cy={y} r={compact ? 1.3 : 1.7}
+              <circle key={`cl${c.cid}.${i}`} cx={x} cy={y} r={q(compact ? 1.3 : 1.7)}
                       fill={divColor(p[3] ?? null)} fillOpacity={0.9}
                       stroke={p[1] === 'other' ? WARN : p[1] === 'A' ? CLOUD_A : CLOUD_B}
-                      strokeWidth={0.6} />
+                      strokeWidth={q(0.6)} />
             );
           }))}
         </g>
@@ -425,8 +573,8 @@ function MapSvg({
       {status.crossings.map((c) => {
         const [x, y] = proj.project(c.weights);
         const scored = c.b !== null;
-        const rad = (scored ? 4.5 + 6 * Math.min(1, Math.max(0, c.b!)) : 4.5)
-          * (compact ? 0.75 : 1);
+        const rad = q((scored ? 4.5 + 6 * Math.min(1, Math.max(0, c.b!)) : 4.5)
+          * (compact ? 0.75 : 1));
         const open_ = running && !scored && c.bracket_w !== null
           && c.bracket_w > 0.014;
         // density overlay: the dot joins the chords on the SAME scale, and certification
@@ -440,14 +588,16 @@ function MapSvg({
         return (
           <g key={c.cid}>
             {open_ && (
+              // the ring's radius IS the bracket width, so that part keeps scaling with
+              // the view; only its floor and its stroke are screen-sized
               <circle className="cs-march" cx={x} cy={y}
-                      r={Math.max(9, c.bracket_w! * vscale * 4)}
-                      fill="none" stroke={WARN} strokeWidth={1.4}
-                      strokeDasharray="5,6" strokeOpacity={0.85} />
+                      r={Math.max(q(9), c.bracket_w! * vscale * 4)}
+                      fill="none" stroke={WARN} strokeWidth={q(1.4)}
+                      strokeDasharray={dashq('5,6')} strokeOpacity={0.85} />
             )}
             {!REDUCED && c.significant && (
               <circle key={`burst-${c.cid}-sig`} className="cs-burst" cx={x} cy={y}
-                      r={rad + 2} fill="none" stroke={ACCENT} strokeWidth={2} />
+                      r={rad + q(2)} fill="none" stroke={ACCENT} strokeWidth={q(2)} />
             )}
             <circle cx={x} cy={y} r={rad}
                     fill={svFill ?? (!scored ? '#7d84c8'
@@ -457,7 +607,7 @@ function MapSvg({
                             : (selGroup !== null && c.ridge_group === selGroup)
                               ? WARN
                               : svFill && c.significant ? ACCENT : '#0d0d20'}
-                    strokeWidth={sel === c.cid ? 2.2 : 1.2}
+                    strokeWidth={q(sel === c.cid ? 2.2 : 1.2)}
                     className={!scored && running ? 'cs-pulse' : undefined}
                     style={{ cursor: 'pointer' }}
                     onClick={() => onPick(sel === c.cid ? null : c.cid)} />
@@ -466,8 +616,8 @@ function MapSvg({
                 refinement reads as a property of the MEASUREMENT on top of it. Split children
                 are ordinary crossings and draw as such -- they carry this ring too. */}
             {c.hires && (
-              <circle cx={x} cy={y} r={rad + 2.6} fill="none" stroke="#fff"
-                      strokeWidth={compact ? 0.7 : 0.9} strokeOpacity={0.75}
+              <circle cx={x} cy={y} r={rad + q(2.6)} fill="none" stroke="#fff"
+                      strokeWidth={q(compact ? 0.7 : 0.9)} strokeOpacity={0.75}
                       style={{ pointerEvents: 'none' }} />
             )}
           </g>
@@ -477,12 +627,12 @@ function MapSvg({
         <g>
           <polyline className="cs-march"
                     points={walkPath.map((w) => proj.project(w).join(',')).join(' ')}
-                    fill="none" stroke={WARN} strokeWidth={2.6}
-                    strokeDasharray="6,5" />
+                    fill="none" stroke={WARN} strokeWidth={q(2.6)}
+                    strokeDasharray={dashq('6,5')} />
           {walkPath.map((w, i) => {
             const [x, y] = proj.project(w);
             return <circle key={`wk${i}`}
-                           cx={x} cy={y} r={i === walkPath.length - 1 ? 5 : 3.2}
+                           cx={x} cy={y} r={q(i === walkPath.length - 1 ? 5 : 3.2)}
                            fill={walkColors?.[i] ?? WARN} />;
           })}
         </g>
@@ -496,9 +646,11 @@ function MapSvg({
           {probes && status.crossings.map((c) => {
             const r = probes[c.cid];
             if (!r) return null;
-            const seg = probeSegment(proj.project, c.weights, r.normal_bary, size);
+            // the segment is solved for as a fraction of the MAP, which at zoom s is
+            // size/s of the projection it is being drawn into
+            const seg = probeSegment(proj.project, c.weights, r.normal_bary, q(size));
             if (!seg) return null;
-            const fs = compact ? 9 : 11;
+            const fs = q(compact ? 9 : 11);
             return (
               <g key={`probe-${c.cid}`}>
                 {seg.ends && (
@@ -506,17 +658,17 @@ function MapSvg({
                     {/* halo first, then the accent stroke on top of it */}
                     <line x1={seg.ends[0]} y1={seg.ends[1]}
                           x2={seg.ends[2]} y2={seg.ends[3]}
-                          stroke={HALO} strokeWidth={4.5} strokeLinecap="round"
+                          stroke={HALO} strokeWidth={q(4.5)} strokeLinecap="round"
                           opacity={0.85} />
                     <line x1={seg.ends[0]} y1={seg.ends[1]}
                           x2={seg.ends[2]} y2={seg.ends[3]}
-                          stroke={ACCENT} strokeWidth={2.5} strokeLinecap="round" />
+                          stroke={ACCENT} strokeWidth={q(2.5)} strokeLinecap="round" />
                   </>
                 )}
-                <circle cx={seg.cx} cy={seg.cy} r={compact ? 2.6 : 3.5}
-                        fill={ACCENT} stroke={HALO} strokeWidth={1} />
-                <text x={seg.cx + 7} y={seg.cy - 7} fontSize={fs} fill={ACCENT}
-                      stroke={HALO} strokeWidth={3} paintOrder="stroke"
+                <circle cx={seg.cx} cy={seg.cy} r={q(compact ? 2.6 : 3.5)}
+                        fill={ACCENT} stroke={HALO} strokeWidth={q(1)} />
+                <text x={seg.cx + q(7)} y={seg.cy - q(7)} fontSize={fs} fill={ACCENT}
+                      stroke={HALO} strokeWidth={q(3)} paintOrder="stroke"
                       style={{ fontFamily: 'system-ui' }}>
                   {seg.ends ? probeLabel(r) : `${probeLabel(r)} · edge-on`}
                 </text>
@@ -530,11 +682,11 @@ function MapSvg({
             if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
             return (
               <g>
-                <circle className="cs-march" cx={x} cy={y} r={compact ? 7 : 9}
-                        fill="none" stroke={ACCENT} strokeWidth={1.5}
-                        strokeDasharray="3,3" opacity={0.9} />
-                <text x={x + 13} y={y + 4} fontSize={compact ? 9 : 10} fill={ACCENT}
-                      stroke={HALO} strokeWidth={3} paintOrder="stroke"
+                <circle className="cs-march" cx={x} cy={y} r={q(compact ? 7 : 9)}
+                        fill="none" stroke={ACCENT} strokeWidth={q(1.5)}
+                        strokeDasharray={dashq('3,3')} opacity={0.9} />
+                <text x={x + q(13)} y={y + q(4)} fontSize={q(compact ? 9 : 10)}
+                      fill={ACCENT} stroke={HALO} strokeWidth={q(3)} paintOrder="stroke"
                       style={{ fontFamily: 'system-ui' }}>
                   probing…
                 </text>
@@ -543,9 +695,15 @@ function MapSvg({
           })()}
         </g>
       )}
-      {vs.map(([x, y], i) => {
+      </g>
+      {/* Prompt vertices: they MOVE with the view -- they are places in the space -- but
+          their dots and labels are drawn at screen size, so a zoomed-in map gets further
+          apart corners rather than bigger ones. The outward direction is read off the
+          projection, where the uniform view scale cancels. */}
+      {vs.map(([wx, wy], i) => {
         const outward = 14;
-        const dx = (x - cx) / r, dy = (y - cy) / r;
+        const dx = (wx - cx) / r, dy = (wy - cy) / r;
+        const [x, y] = toScreen(view, wx, wy);
         const anchor = Math.abs(dx) < 0.35 ? 'middle' : dx > 0 ? 'start' : 'end';
         return (
           <g key={i}>
@@ -568,6 +726,14 @@ function MapSvg({
       {showBeat && !REDUCED && (running || walking) && (
         <circle className="cs-beat" cx={16} cy={16} r={5}
                 fill={walking ? WARN : ACCENT} />
+      )}
+      {/* The view's own readout, unscaled. Without it a zoomed-in map is indistinguishable
+          from a sparse one, so it says where the view is and which key undoes it. */}
+      {!isHome(view) && (
+        <text x={showBeat ? 28 : 10} y={20} fill="#7d84c8" fontSize={10}
+              style={{ fontVariantNumeric: 'tabular-nums' }}>
+          {view.s.toFixed(2)}× · h: home
+        </text>
       )}
     </svg>
   );
@@ -726,6 +892,14 @@ export default function CascadeMap({
     setInternalSel(cid);
     onSelect?.(cid);
   };
+  // Dragging the shadow plane by hand takes over from the auto-rotation, the same way
+  // picking a crossing does -- otherwise the angle would snap back on the next tick. The
+  // angle is shared, so a drag in one split tile turns all of them; each tile's own
+  // pan/zoom is untouched, because that is a different transform.
+  const rotateTo = (t: number) => {
+    setSpin(false);
+    setTheta(wrapAngle(t));
+  };
   const patchByCid = new Map(status.patches.map((p) => [p.cid, p]));
   const selected = status.crossings.find((c) => c.cid === sel) ?? null;
   const nViews = k - 1;
@@ -746,7 +920,7 @@ export default function CascadeMap({
                     caption={`view ${b + 1}·${(b % nViews) + 2 > nViews ? 1 : b + 2}`}
                     showBeat={b === 0} compact
                     probes={probes} pendingCid={probePending} sv={sv}
-                    showClouds={showClouds} />
+                    showClouds={showClouds} onRotate={rotateTo} />
           ))}
         </div>
       ) : (
@@ -755,9 +929,24 @@ export default function CascadeMap({
                 walkColors={walkColors}
                 showBadge showBeat spin={spin}
                 probes={probes} pendingCid={probePending} sv={sv}
-                showClouds={showClouds} />
+                showClouds={showClouds} onRotate={rotateTo} />
       )}
       <div style={{ fontSize: 11, color: '#889', maxWidth: 190 }}>
+        {/* The view's controls, stated once. Rotation is only offered where there is a
+            shadow plane to turn: the k=3 triangle has no angle, so the left button there
+            is nothing but selection. */}
+        <div title={k > 3
+          ? 'left-drag turns the shadow plane (~0.5°/px) and pauses the auto-rotation; a'
+            + ' press that moves less than 4 px is still a click. Middle-drag pans,'
+            + ' the wheel zooms about the cursor, Alt+right-drag zooms by drag distance,'
+            + ' h returns the hovered map to pan 0 / zoom 1.'
+          : 'middle-drag pans, the wheel zooms about the cursor, Alt+right-drag zooms by'
+            + ' drag distance, h returns the hovered map to pan 0 / zoom 1. The k=3'
+            + ' triangle has no shadow plane to rotate.'}
+             style={{ color: '#667', marginBottom: 6 }}>
+          {k > 3 ? 'rotate: LMB drag · ' : ''}pan: MMB drag · zoom: wheel / Alt+RMB
+          {' '}· h: home
+        </div>
         {hasClouds && (
           <label className="rx-focus"
                  title="the hi-res pass's cloud points: every random probe it drew around a refined crossing, filled by its local divergence and ringed by the side it matched"

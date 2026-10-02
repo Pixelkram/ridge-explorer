@@ -230,6 +230,13 @@ generation is bit-identical afterwards (`tests/probe_e2e.py`). Routes: `POST /ap
 - **Ground-truth tooling** — `POST /api/cascade/{run}/render` renders any list of weight vectors through a run's own
   generation path and saves the DINOv2 embeddings (`tests/gt/`); `chord_seed` lets several surveys share one image
   field; `tests/walk_gt_lib.py` turns a dense k = 3 lattice into regions, ridges and chord-crossing weights.
+- **Navigating the map** — *rotate*: left-drag (k > 3 only; ≈ 0.5°/px, and it takes over from the auto-rotation);
+  *pan*: middle-drag; *zoom*: wheel about the cursor, or Alt + right-drag (160 px = 2×, range 0.25–20×); *h*:
+  home, which resets the pan/zoom of the map under the pointer and leaves the angle alone. A press that moves
+  less than 4 px is still a click, so the left button keeps selecting crossings, and at k = 3 — the exact
+  triangle, with no shadow plane to turn — that is all it does. Split-view tiles each keep their own pan/zoom
+  (their projections differ) but share one angle. The arithmetic is in `frontend/src/viewTransform.ts`;
+  `node test/viewTransform.test.mjs` covers it.
 - Fixed 2026-09-26: a walk from crossing 0 errored ("no tangent direction") whenever that crossing lay on chord 0 —
   the walk's tangent seed and chord 0's direction came from the same random stream. It now redraws; all other
   walks keep their exact plane.
