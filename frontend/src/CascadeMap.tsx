@@ -27,9 +27,11 @@ import type { CascadeProbeMap, LocalSvView } from './stores/probeStore';
 const ACCENT = '#4ecca3';
 const WARN = '#e94560';
 const CERT_NO = '#8a93b8';   // the grey of non-significant crossings, reused for stations that did not certify
-// Cloud points of the hi-res pass (one light / one dark neutral). A cloud point carries a LABEL --
-// which side it matched -- and not a measured divergence, so it stays off the blue->red ramp
-// rather than borrowing a scale that means something else; a third basin takes the map's existing
+// Side ring of a cloud point (one light / one dark neutral). A cloud point now carries BOTH a
+// measured divergence -- the mean distance to its k nearest neighbours, the same quantity the
+// chord probes are coloured by, so the fill goes on the shared blue->red ramp -- and a LABEL,
+// which side it matched. The label is only meaningful against this one crossing, so it takes the
+// thin ring and two neutrals that compete with no ramp; a third basin rings in the map's existing
 // warning token, the same colour the rest of the UI flags a junction hint in.
 const CLOUD_A = '#c9cfe8';
 const CLOUD_B = '#6b74a8';
@@ -400,19 +402,22 @@ function MapSvg({
         );
       })}
       {/* Cloud points of the hi-res pass: the ball of random probes drawn around a selected
-          crossing, each dot coloured by the side its image matched. Drawn UNDER the crossing dots
-          and with pointer-events off, so the cloud stays context for the dot it belongs to rather
-          than a layer of its own competing for clicks. No divergence colour: these points were
-          labelled against the crossing's side signatures, not stepped off a neighbour. */}
+          crossing. FILL = the point's measured divergence on the map's own blue->red ramp (mean
+          distance to its k nearest neighbours in the ball), so a cloud reads against the chord
+          probes around it; RING = the side its image matched, which only means anything against
+          this crossing's two signatures. Drawn UNDER the crossing dots and with pointer-events
+          off, so the cloud stays context for the dot it belongs to rather than a layer of its own
+          competing for clicks. */}
       {showClouds && (
         <g style={{ pointerEvents: 'none' }}>
           {status.crossings.map((c) => (c.cloud_pts ?? []).map((p, i) => {
             const [x, y] = proj.project(p[0]);
             if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
             return (
-              <circle key={`cl${c.cid}.${i}`} cx={x} cy={y} r={compact ? 1.1 : 1.5}
-                      fill={p[1] === 'other' ? WARN : p[1] === 'A' ? CLOUD_A : CLOUD_B}
-                      fillOpacity={0.9} />
+              <circle key={`cl${c.cid}.${i}`} cx={x} cy={y} r={compact ? 1.3 : 1.7}
+                      fill={divColor(p[3] ?? null)} fillOpacity={0.9}
+                      stroke={p[1] === 'other' ? WARN : p[1] === 'A' ? CLOUD_A : CLOUD_B}
+                      strokeWidth={0.6} />
             );
           }))}
         </g>
@@ -755,7 +760,7 @@ export default function CascadeMap({
       <div style={{ fontSize: 11, color: '#889', maxWidth: 190 }}>
         {hasClouds && (
           <label className="rx-focus"
-                 title="the hi-res pass's cloud points: every random probe it drew around a refined crossing, coloured by the side it matched"
+                 title="the hi-res pass's cloud points: every random probe it drew around a refined crossing, filled by its local divergence and ringed by the side it matched"
                  style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 6,
                           color: '#aeb6dd', cursor: 'pointer' }}>
             <input type="checkbox" checked={showClouds}
@@ -826,9 +831,13 @@ export default function CascadeMap({
                 and its normal
                 {hasClouds && (
                   <>
-                    <br /><span style={{ color: CLOUD_A }}>·</span>
-                    <span style={{ color: CLOUD_B }}>·</span> cloud points, light = side A, dark =
-                    side B · <span style={{ color: WARN }}>·</span> a third basin (junction hint)
+                    <br />cloud points — fill = local divergence over the{' '}
+                    {status.hires_cloud_k ?? 4} nearest neighbours, on the same{' '}
+                    <span style={{ color: '#5a64b0' }}>quiet</span> → <span
+                    style={{ color: WARN }}>hot</span> ramp as the probes; ring ={' '}
+                    <span style={{ color: CLOUD_A }}>◦</span> side A,{' '}
+                    <span style={{ color: CLOUD_B }}>◦</span> side B,{' '}
+                    <span style={{ color: WARN }}>◦</span> a third basin (junction hint)
                   </>
                 )}
               </>

@@ -62,8 +62,9 @@ class Crossing:
     # only mode; "cloud" = the ball of random probes below).
     hires_mode: str | None = None
     # CLOUD mode (_hires_cloud): the summary of that ball -- {n, r, frac_a, frac_b, frac_other,
-    # normal, mid_est, junction_hint} -- and the per-point record the map draws,
-    # [[weights...], side, image index]. Both None unless the cloud mode ran here.
+    # normal, mid_est, junction_hint, k, div_median, div_max, boundary_frac} -- and the per-point
+    # record the map draws, [[weights...], side, image index, divergence]. Both None unless the
+    # cloud mode ran here.
     cloud: dict | None = None
     cloud_pts: list | None = None
 
@@ -135,10 +136,13 @@ class CascadeRun:
     # ball of radius hires_cloud_r AROUND each selected crossing (_hires_cloud): it measures the
     # directions the chord says nothing about -- the local normal, a chord-free position
     # estimate, and a third basin (junction) a single line cannot see -- and leaves the bracket
-    # alone. hires_cloud_r is in tangent units (0.0236 = one fine cell).
+    # alone. hires_cloud_r is in tangent units (0.0236 = one fine cell). hires_cloud_k is how many
+    # nearest neighbours each cloud point averages its divergence over (_cloud_knn_div), the
+    # cloud's stand-in for the 4 grid neighbours of a lattice sensitivity.
     hires_mode: str = "bracket"
     hires_cloud_n: int = 12
     hires_cloud_r: float = 0.05
+    hires_cloud_k: int = 4
     # survey randomness (chords, background pairs, patches) apart from the image seed; None = seed. Lets several
     # surveys of ONE image field be compared against a single dense ground truth.
     chord_seed: int | None = None
@@ -480,6 +484,37 @@ def _cloud_normal(ws, sides):
     return d / nn, (ma + mb) / 2
 
 
+def _cloud_knn_div(pts_t, embs, k):
+    """Local divergence of every pool member: the mean cosine distance to its k NEAREST others.
+
+    The lattice fields (discover.sensitivity_field, hiker.sensitivity) read a point's divergence
+    off its 4 GRID neighbours -- a grid hands "neighbour" over for free. A cloud has no grid, so
+    the k nearest other members of the pool in tangent coordinates stand in for them. Same
+    quantity and same units as the lattice S and as the chord's probe-to-probe divergence, which
+    is why a cloud point can now join the map's divergence colouring.
+
+    `pts_t` / `embs` are the WHOLE pool: the cloud's own points plus the two bracket ends, which
+    anchor the cloud to the chord that found the crossing (without them a point sitting between
+    the two ends has no evidence of the boundary that runs between them, because the cloud alone
+    need not have sampled either basin nearby). k is clipped to len(pool) - 1, so a pool of 3 with
+    k=16 averages over the 2 others instead of failing. One divergence per entry is returned, in
+    order; the caller reads the cloud's own and drops the ends' -- an end is a neighbour, not a
+    measurement of this ball.
+    """
+    P = np.asarray(pts_t, dtype=float)
+    m = len(P)
+    if m < 2:
+        return [None] * m
+    kk = max(1, min(int(k), m - 1))
+    out = []
+    for i in range(m):
+        d = np.linalg.norm(P - P[i], axis=1)
+        d[i] = np.inf                     # a point is not its own neighbour
+        nb = np.argsort(d, kind="stable")[:kk]
+        out.append(float(np.mean([_cosd(embs[i], embs[j]) for j in nb])))
+    return out
+
+
 def _cloud_apply(x):
     """Hand a cloud crossing's geometry back to its cloud; True when it did.
 
@@ -509,9 +544,11 @@ def _hires_cloud(app, run, pool, sel_x, rng):
     a normal it also becomes the crossing's n and mid (_cloud_apply). wa/wb are untouched, so
     bisection and the detection-only finish still work from the bracket.
 
-    The cloud points are not chord probes -- no two of them are a known step apart along a
-    measured direction -- so none of them feeds the live divergence colouring (_set_div): a
-    ball's pairwise divergences would read on the map as a local gradient they are not.
+    Each point also carries a DIVERGENCE (_cloud_knn_div): the mean cosine distance to its
+    hires_cloud_k nearest neighbours among the cloud and the two bracket ends. That is the cloud's
+    analogue of the lattice sensitivity, so -- unlike the labels, which only exist against this
+    crossing's signatures -- it is the same reading the chord probes feed, and every cloud point
+    goes into the run's divergence colouring (_set_div) through it.
     """
     n, r = int(run.hires_cloud_n), float(run.hires_cloud_r)
     pts, meta, by_sel = [], [], {}
@@ -525,9 +562,9 @@ def _hires_cloud(app, run, pool, sel_x, rng):
         return
     for si, p, gi in zip(meta, pts, gh):
         by_sel.setdefault(si, []).append((p, gi))
-    n_norm, n_junc, coss = 0, 0, []
+    n_norm, n_junc, coss, all_div = 0, 0, [], []
     for si, x in enumerate(sel_x):
-        ws, sides, gis = [], [], []
+        ws, sides, gis, es = [], [], [], []
         for p, gi in by_sel.get(si, ()):
             e = run.embeddings.get(gi) if gi is not None else None
             if e is None:
@@ -535,6 +572,14 @@ def _hires_cloud(app, run, pool, sel_x, rng):
             ws.append(p)
             sides.append(_cloud_side(e, x.ea, x.eb))
             gis.append(gi)
+            es.append(e)
+        # the neighbour pool: the cloud plus the two bracket ends (the clip is the helper's own,
+        # repeated here only so the stored k is the one actually averaged over)
+        kk = max(1, min(int(run.hires_cloud_k), len(ws) + 1))
+        divs = _cloud_knn_div(ws + [x.wa, x.wb], es + [x.ea, x.eb], kk)[:len(ws)]
+        for gi, dv in zip(gis, divs):
+            _set_div(run, gi, dv)
+        all_div += divs
         nrm, mid = _cloud_normal(ws, sides)
         tot = max(len(sides), 1)          # an empty cloud reports zero of every side
         fa, fb, fo = (sides.count("A") / tot, sides.count("B") / tot,
@@ -543,9 +588,13 @@ def _hires_cloud(app, run, pool, sel_x, rng):
                    "frac_a": float(fa), "frac_b": float(fb), "frac_other": float(fo),
                    "normal": None if nrm is None else [float(v) for v in nrm],
                    "mid_est": None if mid is None else [float(v) for v in mid],
-                   "junction_hint": bool(fo > 0)}
-        x.cloud_pts = [[[float(v) for v in w], s, int(g)]
-                       for w, s, g in zip(ws, sides, gis)]
+                   "junction_hint": bool(fo > 0),
+                   "k": int(kk),
+                   "div_median": float(np.median(divs)) if divs else 0.0,
+                   "div_max": float(max(divs)) if divs else 0.0,
+                   "boundary_frac": float(sum(1 for d in divs if d > COS_T) / tot)}
+        x.cloud_pts = [[[float(v) for v in w], s, int(g), float(d)]
+                       for w, s, g, d in zip(ws, sides, gis, divs)]
         x.hires, x.hires_mode = True, "cloud"
         n_junc += 1 if x.cloud["junction_hint"] else 0
         if _cloud_apply(x):
@@ -555,10 +604,13 @@ def _hires_cloud(app, run, pool, sel_x, rng):
             if dn > 1e-12:
                 coss.append(abs(float(np.dot(nrm, d / dn))))
     run.notes.append(
-        f"hires cloud: {len(sel_x)} crossings (top {run.hires_top_pct} %), {n} pts @ {r:.3f}; "
-        f"normals for {n_norm}; junction hints {n_junc}; "
+        f"hires cloud: {len(sel_x)} crossings (top {run.hires_top_pct} %), {n} pts @ {r:.3f}, "
+        f"k={int(run.hires_cloud_k)}; normals for {n_norm}; junction hints {n_junc}; "
         f"median |cos(normal, chord dir)| "
-        + (f"{float(np.median(coss)):.2f}" if coss else "n/a"))
+        + (f"{float(np.median(coss)):.2f}" if coss else "n/a")
+        + "; median div "
+        + (f"{float(np.median(all_div)):.2f} · boundary frac "
+           f"{sum(1 for d in all_div if d > COS_T) / len(all_div):.2f}" if all_div else "n/a"))
 
 
 _EVAL_SEQ = [0]

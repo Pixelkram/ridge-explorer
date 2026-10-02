@@ -66,7 +66,7 @@ async def start(req: CascadeStartRequest, request: Request):
         branch=req.branch, depth=req.depth, branch_top_pct=req.branch_top_pct,
         hires=req.hires, hires_top_pct=req.hires_top_pct, hires_factor=req.hires_factor,
         hires_mode=req.hires_mode, hires_cloud_n=req.hires_cloud_n,
-        hires_cloud_r=req.hires_cloud_r,
+        hires_cloud_r=req.hires_cloud_r, hires_cloud_k=req.hires_cloud_k,
         chord_seed=req.chord_seed,
         trace=req.trace, trace_steps=req.trace_steps, trace_certify=req.trace_certify)
     run.thumbs = ThumbnailStore(app.state.cache)
@@ -136,6 +136,7 @@ async def status(run_id: str, request: Request):
         hires_mode=str(getattr(run, "hires_mode", "bracket")),
         hires_cloud_n=int(getattr(run, "hires_cloud_n", 12)),
         hires_cloud_r=float(getattr(run, "hires_cloud_r", 0.05)),
+        hires_cloud_k=int(getattr(run, "hires_cloud_k", 4)),
         certify=bool(getattr(run, "certify", True)),
         crossings=[CascadeCrossing(
             cid=x.cid, weights=[float(v) for v in x.mid] if x.mid is not None

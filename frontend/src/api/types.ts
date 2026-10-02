@@ -298,6 +298,9 @@ export interface CascadeStartRequest {
   hires_mode?: 'bracket' | 'cloud';
   hires_cloud_n?: number;
   hires_cloud_r?: number;
+  // nearest neighbours each cloud point averages its divergence over (the cloud's stand-in for
+  // the 4 grid neighbours of a lattice sensitivity)
+  hires_cloud_k?: number;
   // survey randomness apart from the image seed (null = seed)
   chord_seed?: number | null;
   // trace phase: walk every significant crossing both ways, certify, link crossings the walks reach
@@ -364,6 +367,13 @@ export interface CascadeCloud {
   mid_est?: number[] | null;
   // a third basin turned up in the ball: possibly a junction, where one normal is a poor summary
   junction_hint?: boolean;
+  // how many nearest neighbours each point's divergence averaged over (clipped to the pool), and
+  // that divergence summarised: median, max, and the share of points above the crossing threshold
+  // -- the share of the ball sitting ON a boundary rather than inside a basin
+  k?: number;
+  div_median?: number;
+  div_max?: number;
+  boundary_frac?: number;
 }
 
 export interface CascadeCrossing {
@@ -389,10 +399,10 @@ export interface CascadeCrossing {
   hires_width?: number | null;
   split_from?: number | null;
   // cloud mode of that pass: which mode refined this crossing ("cloud"; null in bracket mode),
-  // the ball's summary, and its points for the map -- [weights, side, image index] each
+  // the ball's summary, and its points for the map -- [weights, side, image index, divergence]
   hires_mode?: string | null;
   cloud?: CascadeCloud | null;
-  cloud_pts?: [number[], string, number][] | null;
+  cloud_pts?: [number[], string, number, number][] | null;
 }
 
 export interface CascadePatch {
@@ -440,6 +450,7 @@ export interface CascadeStatus {
   hires_mode?: string;
   hires_cloud_n?: number;
   hires_cloud_r?: number;
+  hires_cloud_k?: number;
   // false = detection only: the crossings were never bisected or scored, so their positions
   // carry bracket precision (+-stride/2) and b/significant mean nothing
   certify?: boolean;

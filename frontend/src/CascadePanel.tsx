@@ -68,7 +68,10 @@ const HIRES_TIP = 'after all chords are read, the top X % most divergent crossin
 const HIRES_CLOUD_TIP = 'around each selected crossing, x random points within radius r (cheap '
   + 'field): each point is labelled by the side it matches; the cloud re-estimates the boundary '
   + 'position and its local NORMAL (used for the scoring sides when certify is on); a third basin '
-  + 'in the cloud is flagged as a junction hint. Cost ≈ 0.5 image per point';
+  + 'in the cloud is flagged as a junction hint. Every point also gets a divergence — its mean '
+  + 'distance to its k nearest neighbours in the ball (the two bracket ends count), the cloud\'s '
+  + 'version of the lattice sensitivity — so the clouds join the map colouring. Cost ≈ 0.5 image '
+  + 'per point';
 
 // The pipeline as the user should read it; keys match backend phase names.
 const PHASES: [string, string][] = [
@@ -145,7 +148,9 @@ function CrossingCard({ c, runId, selected, uncertified, onClick }: {
                   title={c.cloud
                     ? `cloud of ${c.cloud.n} points within ${c.cloud.r.toFixed(3)}: `
                       + `${Math.round(c.cloud.frac_a * 100)}/${Math.round(c.cloud.frac_b * 100)}`
-                      + `/${Math.round(c.cloud.frac_other * 100)} % side A/B/other`
+                      + `/${Math.round(c.cloud.frac_other * 100)} % side A/B/other; median div `
+                      + `${(c.cloud.div_median ?? 0).toFixed(2)} over k=${c.cloud.k ?? 4}, `
+                      + `boundary frac ${(c.cloud.boundary_frac ?? 0).toFixed(2)}`
                       + (c.cloud.normal != null
                         ? ' — position and normal re-estimated from it'
                         : ' — too few points on a side to name a normal; bracket kept')
@@ -235,6 +240,7 @@ export default function CascadePanel() {
   const [hiresMode, setHiresMode] = useState<'bracket' | 'cloud'>('bracket');
   const [hiresCloudN, setHiresCloudN] = useState(12);
   const [hiresCloudR, setHiresCloudR] = useState(0.05);
+  const [hiresCloudK, setHiresCloudK] = useState(4);
   const [trace, setTrace] = useState(false);
   const [certify, setCertify] = useState(false);
   const [nPatches, setNPatches] = useState(4);
@@ -298,6 +304,7 @@ export default function CascadePanel() {
         hires_mode: hiresMode,
         hires_cloud_n: hiresCloudN,
         hires_cloud_r: hiresCloudR,
+        hires_cloud_k: hiresCloudK,
         seed,
         focus: weights,
         trace,
@@ -378,6 +385,7 @@ export default function CascadePanel() {
         hires_mode: hiresMode,
         hires_cloud_n: hiresCloudN,
         hires_cloud_r: hiresCloudR,
+        hires_cloud_k: hiresCloudK,
         seed,
         trace,
       });
@@ -575,6 +583,15 @@ export default function CascadePanel() {
                     {hiresCloudR.toFixed(3)} · ≈{(hiresCloudR / CELL).toFixed(1)} cells
                   </span>
                 </label>
+                {/* k = the cloud's stand-in for the 4 grid neighbours of a lattice sensitivity,
+                    which is why 4 is the default */}
+                <label title={HIRES_CLOUD_TIP}
+                       style={{ color: hires ? undefined : '#667' }}>
+                  div k <input style={NUM} type="number" min={1} max={16} value={hiresCloudK}
+                               disabled={!hires}
+                               onChange={(e) => setHiresCloudK(
+                                 Math.max(1, Math.min(16, Number(e.target.value))))} />
+                </label>
               </>
             )}
             <label className="rx-focus" title={CERTIFY_TIP}
@@ -687,16 +704,30 @@ export default function CascadePanel() {
                     branch {status.branch} · depth {status.depth ?? 0} · top {status.branch_top_pct ?? 20} %
                   </span>
                 )}
-                {status.hires && status.hires_mode === 'cloud' && (
-                  <span title={HIRES_CLOUD_TIP}>
-                    hi‑res cloud · {status.hires_cloud_n ?? 12} pts @{' '}
-                    {(status.hires_cloud_r ?? 0.05).toFixed(3)}
-                    {' · '}
-                    {status.crossings.filter((c) => c.cloud?.normal != null).length} normals
-                    {' · '}
-                    {status.crossings.filter((c) => c.cloud?.junction_hint).length} junction hints
-                  </span>
-                )}
+                {status.hires && status.hires_mode === 'cloud' && (() => {
+                  // the run-level divergence the summary note quotes: the median over ALL cloud
+                  // points, and the share of them above the crossing threshold (point-weighted,
+                  // so a crossing whose ball came out short counts for less)
+                  const divs = status.crossings
+                    .flatMap((c) => (c.cloud_pts ?? []).map((p) => p[3] ?? 0))
+                    .sort((a, b) => a - b);
+                  const med = divs.length ? divs[divs.length >> 1] : 0;
+                  const npts = status.crossings.reduce((s, c) => s + (c.cloud?.n ?? 0), 0);
+                  const bf = npts ? status.crossings.reduce(
+                    (s, c) => s + (c.cloud?.boundary_frac ?? 0) * (c.cloud?.n ?? 0), 0) / npts : 0;
+                  return (
+                    <span title={HIRES_CLOUD_TIP}>
+                      hi‑res cloud · {status.hires_cloud_n ?? 12} pts @{' '}
+                      {(status.hires_cloud_r ?? 0.05).toFixed(3)}
+                      {' · '}
+                      {status.crossings.filter((c) => c.cloud?.normal != null).length} normals
+                      {' · '}
+                      {status.crossings.filter((c) => c.cloud?.junction_hint).length} junction hints
+                      {' · '}
+                      median div {med.toFixed(2)} · boundary frac {bf.toFixed(2)}
+                    </span>
+                  );
+                })()}
                 {status.hires && status.hires_mode !== 'cloud' && (
                   <span title={HIRES_TIP}>
                     hi‑res ×{status.hires_factor ?? 4} · top {status.hires_top_pct ?? 20} %

@@ -479,10 +479,13 @@ class CascadeStartRequest(BaseModel):
     # local NORMAL between the two side means, a chord-free position estimate, and a junction hint
     # when a third basin shows up -- all directions the chord says nothing about, at the price of
     # leaving the bracket as it was. hires_cloud_r is in tangent units (0.0236 = one fine cell);
-    # the cloud costs ~0.5 image per point (cheap field).
+    # the cloud costs ~0.5 image per point (cheap field). hires_cloud_k is how many nearest
+    # neighbours (cloud points and the two bracket ends) each cloud point averages its divergence
+    # over -- the cloud's stand-in for the 4 grid neighbours of a lattice sensitivity.
     hires_mode: Literal["bracket", "cloud"] = "bracket"
     hires_cloud_n: int = Field(12, ge=4, le=64)
     hires_cloud_r: float = Field(0.05, ge=0.01, le=0.30)
+    hires_cloud_k: int = Field(4, ge=1, le=16)
     seed: int = 42
     # survey randomness (chords, background, patches) apart from the image seed; null = seed
     chord_seed: int | None = None
@@ -547,6 +550,13 @@ class CascadeCloud(BaseModel):
     # a third basin showed up in the ball: this may be a junction, where one direction is a poor
     # summary of the boundary
     junction_hint: bool = False
+    # how many nearest neighbours each point's divergence averaged over (clipped to the pool), and
+    # that per-point divergence summarised: median, max, and the share of points above the crossing
+    # threshold -- the share of the ball that sits ON a boundary rather than inside a basin
+    k: int = 4
+    div_median: float = 0.0
+    div_max: float = 0.0
+    boundary_frac: float = 0.0
 
 
 class CascadeCrossing(BaseModel):
@@ -577,8 +587,8 @@ class CascadeCrossing(BaseModel):
     hires_width: float | None = None
     split_from: int | None = None
     # CLOUD mode of that pass: which mode refined this crossing ("cloud"; null in bracket mode),
-    # the ball's summary, and its points for the map -- [[weights...], side, image index] each,
-    # side being "A" / "B" / "other".
+    # the ball's summary, and its points for the map -- [[weights...], side, image index,
+    # divergence] each, side being "A" / "B" / "other".
     hires_mode: str | None = None
     cloud: CascadeCloud | None = None
     cloud_pts: list | None = None
@@ -682,10 +692,12 @@ class CascadeStatus(BaseModel):
     hires_top_pct: int = 20
     hires_factor: int = 4
     # which mode it ran in ("bracket" = finer along the chord, "cloud" = a ball around the
-    # crossing) and, for the cloud, how many points per crossing at what radius
+    # crossing) and, for the cloud, how many points per crossing at what radius, over how many
+    # nearest neighbours each point's divergence was averaged
     hires_mode: str = "bracket"
     hires_cloud_n: int = 12
     hires_cloud_r: float = 0.05
+    hires_cloud_k: int = 4
     # False = detection only: the crossings below were never bisected or scored, so their
     # positions carry bracket precision (+-stride/2) and b/significant mean nothing. The
     # default here is the back-compatible reading (a status without the field predates the

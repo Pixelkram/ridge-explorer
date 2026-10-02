@@ -152,7 +152,11 @@ class _StopAt(Exception):
 
 def _stub_evaluate(run, field, rounds, stop_at=None):
     """Stand-in for cascade.evaluate: embeds every weight vector through the analytic field and
-    records (label, weights, steps) per GPU round, optionally stopping at a round label."""
+    records (label, weights, steps) per GPU round, optionally stopping at a round label.
+
+    Registers each arrival in probe_geo / probe_div / _geo_pos exactly as the real evaluate does,
+    so _set_div has somewhere to write and the live map colouring can be checked offline.
+    """
     def stub(app, r, pool, weights, seed, label, ctl=None, on_arrival=None, steps=None):
         base = label.split(".")[0]
         rounds.append((base, [np.asarray(w, dtype=float) for w in weights], steps))
@@ -164,6 +168,9 @@ def _stub_evaluate(run, field, rounds, stop_at=None):
             run.next_idx += 1
             run.embeddings[gi] = field(w)
             run.generated += 1
+            run._geo_pos[gi] = len(run.probe_geo)
+            run.probe_geo.append([float(v) for v in w])
+            run.probe_div.append(None)
             idxs.append(gi)
         for li, gi in enumerate(idxs):
             if on_arrival is not None:
@@ -173,15 +180,15 @@ def _stub_evaluate(run, field, rounds, stop_at=None):
 
 
 def _survey(k=4, n_chords=4, seed=11, certify=False, probe_steps=4, hires=False,
-            hires_mode="cloud", hires_cloud_n=12, hires_cloud_r=0.05, hires_top_pct=20,
-            period=None, stop_at=None):
+            hires_mode="cloud", hires_cloud_n=12, hires_cloud_r=0.05, hires_cloud_k=4,
+            hires_top_pct=20, period=None, stop_at=None):
     """One stubbed survey; returns (run, [(round label, weights, steps)])."""
     run = cs.CascadeRun(
         run_id="hc", prompts=[f"p{i}" for i in range(k)], seed=seed, steps=8, height=64,
         width=64, guidance_scale=3.5, n_chords=n_chords, n_patches=2,
         probe_steps=probe_steps, certify=certify,
         hires=hires, hires_mode=hires_mode, hires_cloud_n=hires_cloud_n,
-        hires_cloud_r=hires_cloud_r, hires_top_pct=hires_top_pct)
+        hires_cloud_r=hires_cloud_r, hires_cloud_k=hires_cloud_k, hires_top_pct=hires_top_pct)
     rounds = []
     field = _band_field(k) if period is None else _band_field(k, period)
     orig = cs.evaluate
@@ -231,7 +238,7 @@ def part_d():
     check(kept, "wa/wb stay exactly where the chord phase left them")
     shapes = all(
         set(x.cloud) == {"n", "r", "frac_a", "frac_b", "frac_other", "normal", "mid_est",
-                         "junction_hint"}
+                         "junction_hint", "k", "div_median", "div_max", "boundary_frac"}
         and x.cloud["r"] == run.hires_cloud_r
         and x.cloud["n"] == len(x.cloud_pts)
         and abs(x.cloud["frac_a"] + x.cloud["frac_b"] + x.cloud["frac_other"] - 1.0) < 1e-9
@@ -239,10 +246,12 @@ def part_d():
     check(shapes, "each cloud reports n/r, three side fractions summing to 1, and its points",
           f"{clouded[0].cloud['frac_a']:.2f}/{clouded[0].cloud['frac_b']:.2f}/"
           f"{clouded[0].cloud['frac_other']:.2f}" if clouded else "none")
-    pts_ok = all(len(p) == 3 and len(p[0]) == run.k and p[1] in ("A", "B", "other")
+    pts_ok = all(len(p) == 4 and len(p[0]) == run.k and p[1] in ("A", "B", "other")
                  and isinstance(p[2], int) and p[2] in run.embeddings
+                 and isinstance(p[3], float)
                  for x in clouded for p in x.cloud_pts)
-    check(pts_ok, "every stored point is [[weights...], side, image index] of a rendered image")
+    check(pts_ok,
+          "every stored point is [[weights...], side, image index, divergence] of a rendered image")
     with_n = [x for x in clouded if x.cloud["normal"] is not None]
     check(len(with_n) > 0
           and all(np.allclose(x.n, x.cloud["normal"]) for x in with_n)
@@ -264,9 +273,10 @@ def part_d():
           f"median |cos| {float(np.median(coss)):.3f} over {len(coss)} normals")
     note = next((n for n in run.notes if n.startswith("hires cloud:")), "MISSING")
     check("crossings" in note and "pts @" in note and "normals for" in note
-          and "junction hints" in note and "median |cos(normal, chord dir)|" in note,
-          "the summary note reports the count, the ball, the normals and the junction hints",
-          note)
+          and "junction hints" in note and "median |cos(normal, chord dir)|" in note
+          and "median div" in note and "boundary frac" in note,
+          "the summary note reports the count, the ball, the normals, the junction hints and the "
+          "divergence", note)
     check(not any(n.startswith("hires: refined") for n in run.notes),
           "cloud mode does not also run the bracket sweep")
 
@@ -326,9 +336,10 @@ def part_d2(run):
           f"HTTP {r.status_code}, {len(xs)} clouds")
     ok = all(x["hires_mode"] == "cloud" and x["hires"] is True
              and set(x["cloud"]) >= {"n", "r", "frac_a", "frac_b", "frac_other", "normal",
-                                     "mid_est", "junction_hint"}
+                                     "mid_est", "junction_hint", "k", "div_median", "div_max",
+                                     "boundary_frac"}
              and len(x["cloud_pts"]) == x["cloud"]["n"]
-             and all(len(p) == 3 and p[1] in ("A", "B", "other") for p in x["cloud_pts"])
+             and all(len(p) == 4 and p[1] in ("A", "B", "other") for p in x["cloud_pts"])
              for x in xs)
     check(bool(xs) and ok, "each served crossing carries hires_mode, the summary and its points")
     wmid = all(np.allclose(x["weights"], x["cloud"]["mid_est"])
