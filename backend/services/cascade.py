@@ -48,6 +48,16 @@ class Crossing:
     # generation of the chord this crossing was found on: 0 = the fair root survey, >= 1 =
     # a branching child ray. Only generation 0 may feed fair-area statistics.
     gen: int = 0
+    # final high-resolution pass (_hires_refine): the bracket was re-probed at stride/factor.
+    # hires_width = the sub-bracket spacing the position is now quoted at (None when the pass
+    # kept the original bracket); hires_profile = the divergences along the refined sequence
+    # (kept in memory, not served); hires_note = "diffuse" when no sub-step cleared COS_T;
+    # split_from = the crossing this one was split out of (a second boundary in one bracket).
+    hires: bool = False
+    hires_width: float | None = None
+    hires_profile: list | None = None
+    hires_note: str | None = None
+    split_from: int | None = None
 
 
 @dataclass
@@ -102,6 +112,16 @@ class CascadeRun:
     # which crossings of a generation become the next generation's origins: the top this-many %
     # by probe-to-probe divergence (_branch_origins).
     branch_top_pct: int = 20
+    # final high-resolution pass. After the WHOLE chord phase (all generations), the top
+    # hires_top_pct % of all detected crossings by divergence get hires_factor - 1 extra cheap
+    # probes evenly spaced inside their bracket, and the bracket is re-detected at
+    # stride/hires_factor: the position sharpens by the factor, and a jump that hid several
+    # boundaries splits into several crossings. Off by default. No new chord is laid down --
+    # the probes sit on the chord that found the crossing -- so chords_geo/chords_meta and the
+    # fair-area certificate's generation-0 filter are untouched.
+    hires: bool = False
+    hires_top_pct: int = 20
+    hires_factor: int = 4
     # survey randomness (chords, background pairs, patches) apart from the image seed; None = seed. Lets several
     # surveys of ONE image field be compared against a single dense ground truth.
     chord_seed: int | None = None
@@ -294,6 +314,80 @@ def _branch_origins(crossings, pct):
     # stable sort: equally divergent crossings keep their detection order (cid), so the fans a
     # given survey spawns do not depend on how numpy happened to break a tie
     return sorted(xs, key=lambda x: _cosd(x.ea, x.eb), reverse=True)[:n]
+
+
+# Final high-resolution pass (owner, 2026-10-02). The chord phase quotes every crossing at ONE
+# stride, so a bracket straddling two boundaries closer together than that reads as a single
+# strong jump, and the position carries +-stride/2. Re-probing the most divergent brackets is the
+# cheapest refinement in the cascade: the extra probes sit INSIDE a bracket of a chord that
+# already exists, on the same cheap field, so nothing has to be re-aimed -- no new chord, no new
+# direction, no bisection -- and the position sharpens by the factor for (factor - 1) probes.
+
+
+def _hires_points(wa, wb, factor):
+    """The factor - 1 probe positions evenly spaced strictly inside the bracket [wa, wb].
+
+    Spacing is |wb - wa| / factor, so the refined sequence [wa, p1, ..., p_{f-1}, wb] has f
+    sub-steps and re-detection localises a crossing to stride/factor. The bracket ends lie on
+    the chord, so every interpolated point does too.
+    """
+    a = np.asarray(wa, dtype=float)
+    b = np.asarray(wb, dtype=float)
+    return [a + (i / factor) * (b - a) for i in range(1, factor)]
+
+
+def _hires_select(crossings, pct):
+    """Which crossings the high-resolution pass refines: the top `pct` % of ALL crossings by
+    probe-to-probe divergence, at least one, strongest first.
+
+    The branching selection rule (_branch_origins) applied ONCE over every generation instead of
+    per generation: the pass runs after the whole chord phase, so a child ray's crossing competes
+    with a root's on the same evidence.
+    """
+    return _branch_origins(crossings, pct)
+
+
+def _hires_refine(x, seq, em, width, gis=None):
+    """Re-detect inside one refined bracket and move the crossing onto the sub-bracket it found.
+
+    seq   -- [wa, p1, ..., p_{f-1}, wb], the refined positions along the chord.
+    em    -- their embeddings in the same order (None where a probe never arrived).
+    width -- the sub-bracket spacing stride/factor, recorded as the new position precision.
+    gis   -- the probes' global image indices (None at the ends, which were rendered earlier),
+             for the detection-only thumbnail convention.
+
+    Consecutive pairs above COS_T are the boundaries inside the bracket. The strongest becomes
+    this crossing; any further one is a SECOND boundary the one-stride probe had merged into the
+    same jump, returned as a new crossing with split_from set (same chord, same generation, cid
+    unassigned). None above COS_T means the change was spread over the bracket -- "diffuse": no
+    sub-step is evidence of a boundary on its own, so the original bracket is the sharpest honest
+    statement and stands.
+    """
+    prof = [None if em[i] is None or em[i + 1] is None else _cosd(em[i], em[i + 1])
+            for i in range(len(em) - 1)]
+    # strongest first; ties keep the lower sub-bracket, so the pass is order-deterministic
+    subs = sorted(((d, i) for i, d in enumerate(prof) if d is not None and d > COS_T),
+                  key=lambda t: (-t[0], t[1]))
+    x.hires = True
+    x.hires_profile = [None if d is None else round(float(d), 4) for d in prof]
+    if not subs:
+        x.hires_note = "diffuse"
+        return []
+    extra = []
+    for rank, (_d, i) in enumerate(subs):
+        t = x if rank == 0 else Crossing(cid=-1, wa=x.wa, wb=x.wb, gen=x.gen, thumb=x.thumb,
+                                         hires=True, split_from=x.cid)
+        t.wa = np.asarray(seq[i], dtype=float)
+        t.wb = np.asarray(seq[i + 1], dtype=float)
+        t.ea, t.eb = em[i], em[i + 1]
+        t.hires_width = float(width)
+        if gis is not None and x.thumb >= 0:
+            # detection-only runs quote a bracket END as the thumbnail (both ends sit one
+            # half-bracket from the position): keep that, now on the refined bracket
+            t.thumb = next((g for g in (gis[i], gis[i + 1]) if g is not None), x.thumb)
+        if rank:
+            extra.append(t)
+    return extra
 
 
 _EVAL_SEQ = [0]
@@ -1255,6 +1349,77 @@ def run_cascade(app, run, pool):
             f"({n_rootx} on roots); the coverage certificate uses the roots only "
             "-- child rays are preferential samples"
             + (f"; chord cap {max_chords} reached" if len(chords) >= max_chords else ""))
+
+    # ---------------- phase 1b: final high-resolution pass (optional, cheap field)
+    # Runs on the finished chord phase and BEFORE anything in the certify half, so bisection
+    # starts from the refined bracket and the detection-only finish quotes the refined centre.
+    hires_width = None
+    if cand and run.hires and run.hires_factor >= 2 and run.status == "running":
+        run.phase = "hires"
+        f = int(run.hires_factor)
+        n_before = len(cand)
+        sel_x = _hires_select(cand, run.hires_top_pct)
+        w_before = [float(np.linalg.norm(x.wa - x.wb)) for x in sel_x]
+        pts, meta, ins_by = [], [], []     # meta: (index in sel_x, index among its probes)
+        for si, x in enumerate(sel_x):
+            ins = [np.clip(p, 0, None) for p in _hires_points(x.wa, x.wb, f)]
+            ins_by.append(ins)
+            for ii, p in enumerate(ins):
+                pts.append(p)
+                meta.append((si, ii))
+        run.phase_total, run.phase_done = len(pts), 0
+        arrived = {}
+
+        def _live_hires(li, gi, _meta=meta, _arrived=arrived):
+            """Live colouring as in the chord phase: two neighbouring probes of ONE refined
+            bracket colour each other the moment both exist. The sub-steps touching the bracket
+            ENDS are set after the batch -- the ends were rendered a phase ago and this run no
+            longer holds their image indices."""
+            _arrived[li] = gi
+            si, ii = _meta[li]
+            for nb in (li - 1, li + 1):
+                gj = _arrived.get(nb)
+                if gj is None or _meta[nb][0] != si or abs(_meta[nb][1] - ii) != 1:
+                    continue
+                e1, e2 = run.embeddings.get(gi), run.embeddings.get(gj)
+                if e1 is not None and e2 is not None:
+                    dd = _cosd(e1, e2)
+                    _set_div(run, gi, dd)
+                    _set_div(run, gj, dd)
+
+        gh = evaluate(app, run, pool, pts, run.seed, "hires",
+                      on_arrival=_live_hires, steps=run.probe_steps)
+        if run.status != "running":
+            return
+        by_sel = {}
+        for (si, _ii), gi in zip(meta, gh):
+            by_sel.setdefault(si, []).append(gi)
+        hires_width = run.stride / f
+        n_split, n_diffuse, w_after = 0, 0, []
+        for si, x in enumerate(sel_x):
+            gis = [None] + by_sel.get(si, [None] * (f - 1)) + [None]
+            em = ([x.ea] + [run.embeddings.get(g) if g is not None else None
+                            for g in gis[1:-1]] + [x.eb])
+            seq = [x.wa] + ins_by[si] + [x.wb]
+            for xx in _hires_refine(x, seq, em, hires_width, gis):
+                xx.cid = len(cand)
+                cand.append(xx)
+                n_split += 1
+            n_diffuse += 1 if x.hires_note == "diffuse" else 0
+            w_after.append(float(np.linalg.norm(x.wa - x.wb)))
+            # the refined probes are cloud points too: colour them by the sub-steps they end
+            for i, d in enumerate(x.hires_profile or []):
+                if d is None:
+                    continue
+                _set_div(run, gis[i], d)
+                _set_div(run, gis[i + 1], d)
+        mb = float(np.median(w_before)) if w_before else 0.0
+        ma = float(np.median(w_after)) if w_after else 0.0
+        run.notes.append(
+            f"hires: refined {len(sel_x)} of {n_before} crossings "
+            f"(top {run.hires_top_pct} %), ×{f}, {n_split} split, {n_diffuse} diffuse; "
+            f"median width {mb:.4f}→{ma:.4f}")
+
     if cand and run.certify and run.probe_steps is not None and run.probe_steps != run.steps:
         # detection ran on the cheap field; hand bisection full-fidelity side images
         ws = []
@@ -1288,7 +1453,10 @@ def run_cascade(app, run, pool):
             x.n = d / nn if nn > 1e-9 else _iso_dir(k, rng)
             x.b, x.significant = None, False
         run.notes.append("detection only: crossings uncertified, positions at bracket "
-                         "precision (±stride/2); no patches")
+                         "precision (±stride/2"
+                         + (f"; ±{hires_width / 2:.4f} where the high-resolution pass refined"
+                            if hires_width else "")
+                         + "); no patches")
         if run.trace:
             run.notes.append("trace phase skipped: it walks certified crossings only")
         run.phase = "done"
@@ -1299,8 +1467,10 @@ def run_cascade(app, run, pool):
     # ---------------- phase 2: bisection (parallel rounds)
     run.phase = "bisect"
     # progress denominator only: at a stride below BRACKET the brackets already arrive
-    # narrow enough and the loop below runs zero rounds (the bar jumps straight to done)
-    est_rounds = max(1, math.ceil(math.log2(run.stride / BRACKET)))
+    # narrow enough and the loop below runs zero rounds (the bar jumps straight to done).
+    # The high-resolution pass hands bisection brackets of stride/factor, so it counts from
+    # there -- at the default stride, a x4 pass already lands under BRACKET on its own.
+    est_rounds = max(1, math.ceil(math.log2((hires_width or run.stride) / BRACKET)))
     run.phase_total = len(cand) * est_rounds
     run.phase_done = 0
     while run.status == "running":

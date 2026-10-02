@@ -430,6 +430,15 @@ function MapSvg({
                     className={!scored && running ? 'cs-pulse' : undefined}
                     style={{ cursor: 'pointer' }}
                     onClick={() => onPick(sel === c.cid ? null : c.cid)} />
+            {/* refined by the final high-resolution pass: a hairline ring, not a colour, so
+                the dot keeps saying what it said (density, certification, selection) and the
+                refinement reads as a property of the MEASUREMENT on top of it. Split children
+                are ordinary crossings and draw as such -- they carry this ring too. */}
+            {c.hires && (
+              <circle cx={x} cy={y} r={rad + 2.6} fill="none" stroke="#fff"
+                      strokeWidth={compact ? 0.7 : 0.9} strokeOpacity={0.75}
+                      style={{ pointerEvents: 'none' }} />
+            )}
           </g>
         );
       })}
@@ -766,6 +775,13 @@ export default function CascadeMap({
           still being worked on)
           <br /><span style={{ color: ACCENT }}>●</span> certified — beats the run's own
           background; size = strength
+          {status.crossings.some((c) => c.hires) && (
+            <>
+              <br /><span style={{ color: '#fff' }}>◌</span> thin white ring = sharpened by the
+              final high-res pass (position quoted at a {status.hires_factor ?? 4}× finer
+              spacing); where one bracket hid two boundaries, the extra dots are the split
+            </>
+          )}
           <br /><span style={{ color: ACCENT }}>◇</span> refined patch
           {' '}<span style={{ color: '#8a93b8' }}>(dashed = exploration slot)</span>
           <br /><span style={{ color: WARN }}>◦</span> same ridge as selection ·{' '}

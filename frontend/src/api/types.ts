@@ -286,6 +286,12 @@ export interface CascadeStartRequest {
   // which crossings of a generation spawn the next: the top this-many % by probe-to-probe
   // divergence, at least one (1-100, default 20; 100 = every crossing branches)
   branch_top_pct?: number;
+  // final high-resolution pass: after the whole chord phase, the top hires_top_pct % of all
+  // crossings get hires_factor - 1 extra cheap probes inside their bracket, re-detected at
+  // stride/hires_factor (sharper positions; a bracket hiding several boundaries splits)
+  hires?: boolean;
+  hires_top_pct?: number;
+  hires_factor?: number;
   // survey randomness apart from the image seed (null = seed)
   chord_seed?: number | null;
   // trace phase: walk every significant crossing both ways, certify, link crossings the walks reach
@@ -350,6 +356,12 @@ export interface CascadeCrossing {
   bracket_w: number | null;
   // ridge group with the trace phase's walk links added (null without a trace phase)
   traced_group?: number | null;
+  // final high-resolution pass: this bracket was re-probed at stride/hires_factor.
+  // hires_width = the spacing the position is now quoted at (null when the pass found the change
+  // spread over the bracket and kept it); split_from = the crossing this one was split out of
+  hires?: boolean;
+  hires_width?: number | null;
+  split_from?: number | null;
 }
 
 export interface CascadePatch {
@@ -387,6 +399,11 @@ export interface CascadeStatus {
   branch?: number;
   depth?: number;
   branch_top_pct?: number;
+  // the final high-resolution pass this run was started with: whether it ran, the divergence
+  // percentile of crossings it refined, and how much finer it probed their brackets
+  hires?: boolean;
+  hires_top_pct?: number;
+  hires_factor?: number;
   // false = detection only: the crossings were never bisected or scored, so their positions
   // carry bracket precision (+-stride/2) and b/significant mean nothing
   certify?: boolean;

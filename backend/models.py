@@ -461,6 +461,16 @@ class CascadeStartRequest(BaseModel):
     # divergence (always at least one). 100 = every crossing branches; 20 (default) spends the
     # branching budget on the fifth of the evidence that diverged most.
     branch_top_pct: int = Field(20, ge=1, le=100)
+    # final high-resolution pass: after the WHOLE chord phase, the top hires_top_pct % of all
+    # detected crossings get hires_factor - 1 extra cheap probes evenly spaced inside their
+    # bracket, and the bracket is re-detected at stride/hires_factor. Sharpens the quoted
+    # position by the factor, and a bracket that hid several boundaries splits into several
+    # crossings. Off by default; costs ~0.5 image per extra probe (probes run on the cheap
+    # field), and works with certify either way -- with it on, bisection starts from the
+    # sharper bracket.
+    hires: bool = False
+    hires_top_pct: int = Field(20, ge=1, le=100)
+    hires_factor: int = Field(4, ge=2, le=8)
     seed: int = 42
     # survey randomness (chords, background, patches) apart from the image seed; null = seed
     chord_seed: int | None = None
@@ -525,6 +535,14 @@ class CascadeCrossing(BaseModel):
     bracket_w: float | None = None
     # ridge group with the trace phase's links added (None without a trace phase)
     traced_group: int | None = None
+    # final high-resolution pass: this bracket was re-probed at stride/hires_factor.
+    # hires_width is the sub-bracket spacing the position is now quoted at, or None when the
+    # pass found the change spread over the whole bracket (no single sub-step cleared the
+    # crossing threshold) and kept the original bracket. split_from names the crossing this one
+    # was split out of -- a SECOND boundary inside one chord-stride bracket.
+    hires: bool = False
+    hires_width: float | None = None
+    split_from: int | None = None
 
 
 class CascadePatch(BaseModel):
@@ -619,6 +637,11 @@ class CascadeStatus(BaseModel):
     branch: int = 0
     depth: int = 0
     branch_top_pct: int = 20
+    # the final high-resolution pass this run was started with: whether it ran at all, the
+    # divergence percentile of crossings it refined, and how much finer it probed their brackets
+    hires: bool = False
+    hires_top_pct: int = 20
+    hires_factor: int = 4
     # False = detection only: the crossings below were never bisected or scored, so their
     # positions carry bracket precision (+-stride/2) and b/significant mean nothing. The
     # default here is the back-compatible reading (a status without the field predates the

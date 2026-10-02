@@ -59,17 +59,27 @@ const PRESETS = Array.from({ length: 14 }, (_, i) => {
                   + (k > 9 ? ' · beyond calibrated range' : '') };
 });
 
+const HIRES_TIP = 'after all chords are read, the top X % most divergent crossings get '
+  + '(×finer − 1) extra probes inside their bracket on the cheap field: positions sharpen from '
+  + 'one stride to stride/finer, jumps that hide several boundaries split into several '
+  + 'crossings. Costs ~0.5 image per extra probe; works with certify on or off (on: bisection '
+  + 'starts from the sharper bracket)';
+
 // The pipeline as the user should read it; keys match backend phase names.
 const PHASES: [string, string][] = [
   ['chords', 'isolate'],
+  ['hires', 'sharpen'],
   ['bisect', 'pin'],
   ['score', 'certify'],
   ['patches', 'refine'],
 ];
 
 function PhaseBar({ status }: { status: CascadeStatus }) {
-  // a detection-only run stops after the chords: the phases it never runs must not light up
-  const phases = status.certify === false ? PHASES.slice(0, 1) : PHASES;
+  // a run only shows the steps it will actually run: 'sharpen' when the high-resolution pass
+  // was asked for, and the certify half (pin/certify/refine) only with certify on
+  const phases = PHASES.filter(([p]) =>
+    (p !== 'hires' || status.hires === true)
+    && (status.certify !== false || p === 'chords' || p === 'hires'));
   const idx = phases.findIndex(([p]) => p === status.phase);
   const done = status.phase === 'done' || status.status === 'complete';
   return (
@@ -122,6 +132,14 @@ function CrossingCard({ c, runId, selected, uncertified, onClick }: {
                       fontSize: 10, color: c.significant ? ACCENT : '#8a93b8' }}>
           <span>{scored ? `B ${c.b!.toFixed(2)}`
                         : uncertified ? 'uncertified' : 'pinning…'}</span>
+          {c.hires && (
+            <span style={{ color: '#667' }}
+                  title={c.hires_width != null
+                    ? `refined by the final high-res pass: position quoted at ±${(c.hires_width / 2).toFixed(4)}`
+                    : 'the high-res pass found the change spread over the whole bracket and kept it'}>
+              hi‑res
+            </span>
+          )}
           {c.ridge_group !== null && (
             <span style={{ color: '#667' }}>r{c.ridge_group}</span>
           )}
@@ -188,6 +206,9 @@ export default function CascadePanel() {
   const [branch, setBranch] = useState(0);
   const [depth, setDepth] = useState(0);
   const [branchTopPct, setBranchTopPct] = useState(20);
+  const [hires, setHires] = useState(false);
+  const [hiresTopPct, setHiresTopPct] = useState(20);
+  const [hiresFactor, setHiresFactor] = useState(4);
   const [trace, setTrace] = useState(false);
   const [certify, setCertify] = useState(false);
   const [nPatches, setNPatches] = useState(4);
@@ -245,6 +266,9 @@ export default function CascadePanel() {
         branch,
         depth,
         branch_top_pct: branchTopPct,
+        hires,
+        hires_top_pct: hiresTopPct,
+        hires_factor: hiresFactor,
         seed,
         focus: weights,
         trace,
@@ -319,6 +343,9 @@ export default function CascadePanel() {
         branch,
         depth,
         branch_top_pct: branchTopPct,
+        hires,
+        hires_top_pct: hiresTopPct,
+        hires_factor: hiresFactor,
         seed,
         trace,
       });
@@ -460,6 +487,25 @@ export default function CascadePanel() {
                 ≤ {chordCap(nChords, branch, depth)} chords
               </span>
             )}
+            <label className="rx-focus" title={HIRES_TIP}
+                   style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+              <input type="checkbox" checked={hires}
+                     onChange={(e) => setHires(e.target.checked)} /> final high-res pass
+            </label>
+            <label title={HIRES_TIP}
+                   style={{ color: hires ? undefined : '#667' }}>
+              top % <input style={NUM} type="number" min={1} max={100} value={hiresTopPct}
+                           disabled={!hires}
+                           onChange={(e) => setHiresTopPct(
+                             Math.max(1, Math.min(100, Number(e.target.value))))} />
+            </label>
+            <label title={HIRES_TIP}
+                   style={{ color: hires ? undefined : '#667' }}>
+              × finer <input style={NUM} type="number" min={2} max={8} value={hiresFactor}
+                             disabled={!hires}
+                             onChange={(e) => setHiresFactor(
+                               Math.max(2, Math.min(8, Number(e.target.value))))} />
+            </label>
             <label className="rx-focus" title={CERTIFY_TIP}
                    style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
               <input type="checkbox" checked={certify}
@@ -511,11 +557,17 @@ export default function CascadePanel() {
             const cross = Math.max(1, Math.round((chordTotal * 7) / k));
             // 110/k probes per chord is measured AT the stride of record; the count is ~1/stride
             const probeImgs = ((chordTotal * 110) / k) * (STRIDE_REF / stride);
+            // the high-res pass renders (finer - 1) extra cheap probes inside each selected
+            // bracket, and a cheap probe is ~half an image (4 of 8 denoising steps)
+            const hiresImgs = hires
+              ? 0.5 * (hiresFactor - 1)
+                * Math.max(1, Math.round((cross * hiresTopPct) / 100))
+              : 0;
             // detection only: the probes are the whole bill -- nothing is rebracketed,
             // bisected, scored or refined
-            const imgs = Math.round(certify
+            const imgs = Math.round(hiresImgs + (certify
               ? probeImgs + cross * 4 + (cross + 12) * 8 + nPatches * 25
-              : probeImgs);
+              : probeImgs));
             // probes run at 4 denoising steps (gated: 93%/94% recall) ~ half price
             const mins = Math.max(1, Math.round((imgs - probeImgs * 0.5) / 8 / 60));
             return (
@@ -523,6 +575,8 @@ export default function CascadePanel() {
                 estimate: ≤~{imgs} images · ≤~{mins} min · ~{cross} crossings
                 {!certify && ' — detection only: uncertified, bracket-precision positions,'
                   + ' no patches and no walks'}
+                {hires && ` — final high-res pass: the top ${hiresTopPct} % of crossings`
+                  + ` re-probed ×${hiresFactor} (position to ±${(stride / hiresFactor / 2).toFixed(4)})`}
                 {certify && cross < 3 * nPatches &&
                   ' — few crossings per patch; consider more chords'}
                 {branch > 0 && ' — upper bound: child rays are half-length and only spawn'
@@ -555,6 +609,17 @@ export default function CascadePanel() {
                 {(status.branch ?? 0) > 0 && (
                   <span title="branching this run was started with: rays per selected crossing, generations of them, and the divergence percentile that picked the origins (at least one crossing per generation)">
                     branch {status.branch} · depth {status.depth ?? 0} · top {status.branch_top_pct ?? 20} %
+                  </span>
+                )}
+                {status.hires && (
+                  <span title={HIRES_TIP}>
+                    hi‑res ×{status.hires_factor ?? 4} · top {status.hires_top_pct ?? 20} %
+                    {' · '}
+                    {status.crossings.filter((c) => c.hires).length} refined
+                    {(() => {
+                      const sp = status.crossings.filter((c) => c.split_from != null).length;
+                      return sp > 0 ? ` · ${sp} split` : '';
+                    })()}
                   </span>
                 )}
                 {status.bg_p95 !== null && (

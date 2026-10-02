@@ -64,6 +64,7 @@ async def start(req: CascadeStartRequest, request: Request):
         n_patches=req.n_patches, focus=req.focus, focus_radius=req.focus_radius,
         probe_steps=req.probe_steps, stride=req.stride, certify=req.certify,
         branch=req.branch, depth=req.depth, branch_top_pct=req.branch_top_pct,
+        hires=req.hires, hires_top_pct=req.hires_top_pct, hires_factor=req.hires_factor,
         chord_seed=req.chord_seed,
         trace=req.trace, trace_steps=req.trace_steps, trace_certify=req.trace_certify)
     run.thumbs = ThumbnailStore(app.state.cache)
@@ -127,6 +128,9 @@ async def status(run_id: str, request: Request):
         stride=float(getattr(run, "stride", cs.STRIDE)),
         branch=int(getattr(run, "branch", 0)), depth=int(getattr(run, "depth", 0)),
         branch_top_pct=int(getattr(run, "branch_top_pct", 20)),
+        hires=bool(getattr(run, "hires", False)),
+        hires_top_pct=int(getattr(run, "hires_top_pct", 20)),
+        hires_factor=int(getattr(run, "hires_factor", 4)),
         certify=bool(getattr(run, "certify", True)),
         crossings=[CascadeCrossing(
             cid=x.cid, weights=[float(v) for v in x.mid] if x.mid is not None
@@ -135,6 +139,9 @@ async def status(run_id: str, request: Request):
             gen=int(getattr(x, "gen", 0)),
             ridge_group=(grp[3] or {}).get(x.cid),
             traced_group=(grp_t[3] or {}).get(x.cid),
+            hires=bool(getattr(x, "hires", False)),
+            hires_width=getattr(x, "hires_width", None),
+            split_from=getattr(x, "split_from", None),
             bracket_w=float(np.linalg.norm(x.wa - x.wb))
             if x.wa is not None and x.wb is not None else None)
             for x in run.crossings],
