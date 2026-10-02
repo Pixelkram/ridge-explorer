@@ -24,6 +24,7 @@ export type Feature =
   | 'hikers'      // HikePanel — population ridge-walk across chained simplices
   | 'cascade'     // CascadePanel + CascadeMap
   | 'amr'         // AmrPanel + AmrMap — octree/AMR adaptive refinement (k<=4)
+  | 'metro'       // MetroPanel + MetroMap — Metropolis sampler on the sharpness field
   | 'discovery'   // DiscoverPanel
   | 'itinerary'   // ItineraryPanel — ridge graph as walkable arcs
   | 'mfscan'      // the MF Scan button (multi-fidelity GP detection)
@@ -35,7 +36,7 @@ export type Feature =
   | 'threed';     // the 2D/3D mode selector
 
 export const ALL_FEATURES: Feature[] = [
-  'hikers', 'cascade', 'amr', 'discovery', 'itinerary', 'mfscan',
+  'hikers', 'cascade', 'amr', 'metro', 'discovery', 'itinerary', 'mfscan',
   'surprise', 'explore', 'fastscan', 'refine', 'seeds', 'threed',
 ];
 
@@ -45,6 +46,7 @@ const ALIASES: Record<string, Feature> = {
   discover: 'discovery', discoverpanel: 'discovery',
   cascadepanel: 'cascade',
   amrpanel: 'amr', octree: 'amr', refinement: 'amr', adaptive: 'amr',
+  metropanel: 'metro', mcmc: 'metro', metropolis: 'metro', sampler: 'metro',
   mf: 'mfscan', mfscan: 'mfscan',
   ridgeitinerary: 'itinerary', arcs: 'itinerary',
   surpriseslider: 'surprise',
@@ -59,7 +61,8 @@ const ALIASES: Record<string, Feature> = {
  * the original tool. Add `explore` to the list by hand if a take wants Fast Scan alone.
  */
 const PRESETS: Record<string, Feature[]> = {
-  og: ['hikers', 'cascade', 'amr', 'discovery', 'itinerary', 'mfscan', 'surprise'],
+  og: ['hikers', 'cascade', 'amr', 'metro', 'discovery', 'itinerary', 'mfscan',
+       'surprise'],
   none: [],
   all: ALL_FEATURES,
 };

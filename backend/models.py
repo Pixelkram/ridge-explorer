@@ -904,6 +904,176 @@ class AmrExport(BaseModel):
     notes: list[str] = []
 
 
+# ---- Metropolis ridge sampler (services/metro.py) ----
+# A chain whose stationary law is the sharpness field itself: pi ~ S(w)^beta, with
+# S(w) = mean over m random tangent directions of the divergence at the chord stride.
+# Validated in search_problem h25a (replicated): beta = 1 reproduces the S-weighted law
+# under single-seed noise (on-boundary 0.673 vs the ideal 0.677, KS 0.083); beta = 2 does
+# NOT (KS 0.19-0.28), which is why beta is capped below 1.5 and the UI warns above 1.
+class MetroStartRequest(BaseModel):
+    """Defaults are the study's ERPT design: 60 chains x 50 steps, beta 1, sigma 0.03, m 2,
+    seeded at the crossings of 20 fresh IUR chords.
+
+    Note on `steps` vs `chain_steps`: `steps` is the denoising-step count of a full image,
+    as in every other request here, and `chain_steps` is the MCMC chain length L.
+    """
+    prompts: list[str] = Field(..., min_length=3, max_length=12)
+    # target exponent. 1.0 is of record; above BETA_WARN the single-seed KS degrades, and
+    # 2.0 is known to fail, so the schema stops at 1.5 rather than at "whatever you type".
+    beta: float = Field(1.0, ge=0.5, le=1.5)
+    # random-walk step in tangent (weight-space) units. 0.03 is the best LAW cell with m=2;
+    # bigger mixes faster and samples the law less tightly (h25a: sigma 0.12 best IAT).
+    sigma: float = Field(0.03, gt=0.0, le=0.2)
+    # tangent directions one energy averages. 2 is of record; 1 is cheaper and noisier.
+    m: int = Field(2, ge=1, le=4)
+    chains: int = Field(60, ge=1, le=200)
+    chain_steps: int = Field(50, ge=1, le=200)
+    # where the chains start: fresh IUR chords drawn by the sampler, or the crossings of a
+    # finished Cascade run (its midpoints), which must have the same k
+    seed_mode: Literal["cascade", "iur"] = "iur"
+    cascade_run_id: str | None = None
+    n_seed_chords: int = Field(20, ge=1, le=200)
+    seed: int = 42
+    steps: int = Field(config.DEFAULT_NUM_INFERENCE_STEPS, ge=1, le=50)
+    # probes (states and their energy fan) run on the cheap field, as the Cascade's chord
+    # probes do; null probes at full fidelity and doubles the cost per probe
+    probe_steps: int | None = Field(4, ge=1, le=50)
+    # optional post-pass: re-render every distinct accepted state at `steps`, 1 image each
+    render_full: bool = False
+    height: int = Field(config.DEFAULT_HEIGHT, ge=64, le=1024)
+    width: int = Field(config.DEFAULT_WIDTH, ge=64, le=1024)
+    guidance_scale: float = Field(config.DEFAULT_GUIDANCE_SCALE, ge=0.0, le=20.0)
+
+
+class MetroStartResponse(BaseModel):
+    run_id: str
+    status: str
+    error: str | None = None
+
+
+class MetroSample(BaseModel):
+    """One ACCEPTED state. `image` is the cheap-field probe rendered at it (the gallery
+    thumbnail); `full_image` is its full-fidelity re-render when that pass ran."""
+    chain: int
+    step: int                    # the round it was accepted at
+    weights: list[float]
+    s: float                     # its energy, the quantity the map and the gallery sort by
+    image: int
+    full_image: int | None = None
+
+
+class MetroChainStat(BaseModel):
+    """One chain: where it started, where it is, and how it behaved."""
+    chain: int
+    weights: list[float]
+    s: float | None = None
+    image: int = -1
+    seed_weights: list[float] = []
+    seed_s: float | None = None
+    seed_image: int = -1
+    n_propose: int = 0
+    n_accept: int = 0
+    # proposals that left the simplex and were rejected without rendering anything
+    n_outside: int = 0
+    moved: bool = False
+
+
+class MetroSummary(BaseModel):
+    """Quoted over the ACCEPTED states (what the gallery shows), not over the chains' time
+    average with repeats -- a statistic of this sample, not an estimate of the law."""
+    n_samples: int = 0
+    mean_s: float | None = None
+    # the mean energy of the states the chains STARTED from, i.e. of their seed crossings
+    seed_mean_s: float | None = None
+    # share of samples past COS_T = 0.35: the "on-boundary proxy" (h25a reports 0.67 at
+    # beta = 1 against 0.26 for uniform sampling)
+    on_boundary_frac: float | None = None
+    acceptance: float | None = None
+    n_propose: int = 0
+    n_accept: int = 0
+    n_outside: int = 0
+    # chains that never left their start: the seed sheets the run kept (h25a: 1-5 %)
+    chains_never_moved: int = 0
+    n_chains: int = 0
+    n_seed_crossings: int = 0
+    n_chords: int = 0
+    n_probes: int = 0
+    n_full: int = 0
+    rounds_done: int = 0
+    cost_image_eq: float = 0.0
+
+
+class MetroStatus(BaseModel):
+    run_id: str
+    status: str
+    phase: str = ""
+    k: int = 0
+    prompts: list[str] = []
+    beta: float = 1.0
+    sigma: float = 0.03
+    m: int = 2
+    chains: int = 60
+    chain_steps: int = 50
+    delta: float = 0.025
+    seed_mode: str = "iur"
+    cascade_run_id: str | None = None
+    n_seed_chords: int = 20
+    probe_steps: int | None = 4
+    render_full: bool = False
+    seed: int = 42
+    steps: int = 0
+    generated: int = 0
+    phase_done: int = 0
+    phase_total: int = 0
+    round_done: int = 0
+    recent_thumbs: list[int] = []
+    # the crossings the chains were seeded at, as weight vectors + the divergence ACROSS the
+    # bracket that found each (reported, never used as an energy)
+    seeds: list[list[float]] = []
+    seed_divs: list[float | None] = []
+    chains_stats: list[MetroChainStat] = []
+    samples: list[MetroSample] = []
+    summary: MetroSummary = Field(default_factory=MetroSummary)
+    notes: list[str] = []
+    error: str | None = None
+
+
+class MetroExport(BaseModel):
+    """samples.json: the accepted states as self-describing records, with the settings they
+    were drawn under, so a stimulus set can be reproduced outside this tool."""
+    run_id: str
+    status: str
+    k: int
+    prompts: list[str] = []
+    beta: float = 1.0
+    sigma: float = 0.03
+    m: int = 2
+    delta: float = 0.025
+    chains: int = 60
+    chain_steps: int = 50
+    seed_mode: str = "iur"
+    cascade_run_id: str | None = None
+    seed: int = 42
+    steps: int = 0
+    probe_steps: int | None = None
+    cos_t: float = 0.35
+    seeds: list[list[float]] = []
+    samples: list[MetroSample] = []
+    chains_stats: list[MetroChainStat] = []
+    summary: MetroSummary = Field(default_factory=MetroSummary)
+    notes: list[str] = []
+
+
+class MetroCascadeRun(BaseModel):
+    """One candidate seed source for `seed_mode = "cascade"`."""
+    run_id: str
+    status: str
+    k: int
+    prompts: list[str] = []
+    n_crossings: int = 0
+    certify: bool = False
+
+
 # ---- exact-JVP probes (services/jvp_probe.py) ----
 class JvpProbeRequest(BaseModel):
     alpha: float = Field(..., ge=0.0, le=1.0)

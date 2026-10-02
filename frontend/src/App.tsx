@@ -7,6 +7,7 @@ import { loadResume, saveResume, onResumeVisible } from './resume';
 import DiscoverPanel from './DiscoverPanel';
 import CascadePanel from './CascadePanel';
 import AmrPanel from './AmrPanel';
+import MetroPanel from './MetroPanel';
 import SurpriseSlider from './components/SurpriseSlider';
 import { feature } from './featureFlags';
 
@@ -2520,6 +2521,10 @@ export default function App() {
       {/* the other way to spend a boundary budget on the same simplex: a refined lattice
           instead of chords. Sits next to the Cascade because they are alternatives. */}
       {feature('amr') && <AmrPanel />}
+      {/* and the third way: not a search at all. The Metropolis sampler DRAWS recipes in
+          proportion to the sharpness of the field, so its gallery is a fair sample of the
+          ridges rather than a tour of the ones a survey happened to find (h25a). */}
+      {feature('metro') && <MetroPanel />}
       <MainViewport />
       <ExportOverlay />
     </div>

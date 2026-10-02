@@ -386,6 +386,59 @@ export function amrPointsUrl(runId: string): string {
   return `${BASE}/api/amr/${runId}/points.json`;
 }
 
+// ---- Metropolis ridge sampler ----
+// The AMR shape again. `start` can fail with a 4xx that carries the reason: a projected cost
+// past the ceiling (400), or a cascade seed source that cannot be honoured (404 unknown,
+// 409 still running, 400 wrong k / no crossings). Those details are the useful answer, so
+// they are lifted out rather than reported as a bare status.
+export async function metroStart(
+  req: import('./types').MetroStartRequest,
+): Promise<import('./types').MetroStartResponse> {
+  const r = await fetchRetry(`${BASE}/api/metro/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  if (!r.ok) {
+    let detail = `metroStart failed: HTTP ${r.status}`;
+    try {
+      const j = await r.json();
+      if (typeof j?.detail === 'string') detail = j.detail;
+      else if (Array.isArray(j?.detail) && j.detail[0]?.msg) detail = j.detail[0].msg;
+      else if (j?.error) detail = j.error;
+    } catch { /* keep the HTTP line */ }
+    throw new Error(detail);
+  }
+  return r.json();
+}
+
+export async function metroStatus(runId: string): Promise<import('./types').MetroStatus> {
+  // bare fetch on purpose: retrying a poll just delays the next one
+  const r = await fetch(`${BASE}/api/metro/${runId}/status`);
+  return r.json();
+}
+
+export async function metroCancel(runId: string): Promise<void> {
+  await fetch(`${BASE}/api/metro/${runId}/cancel`, { method: 'POST' });
+}
+
+// Finished Cascade runs this sampler can seed from, optionally of one arity only. Geometry
+// only -- it reads the runs already in memory and generates nothing.
+export async function metroCascadeRuns(
+  k?: number,
+): Promise<import('./types').MetroCascadeRun[]> {
+  const r = await fetchRetry(`${BASE}/api/metro/cascade-runs${k ? `?k=${k}` : ''}`);
+  return jsonOrThrow(r, 'metroCascadeRuns');
+}
+
+export function metroImageUrl(runId: string, index: number): string {
+  return `${BASE}/api/metro/${runId}/image/${index}`;
+}
+
+export function metroSamplesUrl(runId: string): string {
+  return `${BASE}/api/metro/${runId}/samples.json`;
+}
+
 // Local boundary density over the run's own chords -- geometry only, no images, so it is
 // cheap enough to ask for on a toggle. 404 while the survey has laid down no chords yet.
 export async function cascadeLocalSv(

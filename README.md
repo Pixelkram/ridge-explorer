@@ -112,8 +112,8 @@ VITE_RIDGE_HIDE=og npm run dev        # every tab opens on the original surface
 | `?hide=og&show=itinerary` | preset minus one |
 | `?hide=none` | everything back, even if `VITE_RIDGE_HIDE` hid it |
 
-Individually gateable: `hikers`, `cascade`, `discovery`, `itinerary`, `mfscan`,
-`surprise`, `explore`, `fastscan`, `refine`, `seeds`, `threed`. The `og` preset keeps
+Individually gateable: `hikers`, `cascade`, `amr`, `metro`, `discovery`, `itinerary`,
+`mfscan`, `surprise`, `explore`, `fastscan`, `refine`, `seeds`, `threed`. The `og` preset keeps
 Explore, Fast Scan, Refine, the seed controls and the 2D/3D selector — add them by name
 (`?hide=og,explore`) to strip further. Names are case- and separator-insensitive
 (`MF-Scan` = `mfscan`) and a few aliases work (`hike`, `discover`, `3d`); an unrecognised

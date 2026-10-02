@@ -552,6 +552,125 @@ export interface AmrStatus {
   error?: string | null;
 }
 
+// ---- Metropolis ridge sampler (backend/services/metro.py) ----
+// A chain whose stationary law is the sharpness field itself: pi ~ S(w)^beta, with
+// S(w) = the mean divergence at the chord stride over m random tangent directions.
+// Validated in search_problem h25a (replicated): beta = 1 reproduces the S-weighted law
+// under single-seed noise (on-boundary 0.673 against the ideal 0.677, KS 0.083, a 2.3-2.6x
+// enrichment over uniform sampling); beta = 2 does NOT (KS 0.19-0.28), because squaring an
+// m-direction estimate of S amplifies the estimator noise -- hence the 1.5 cap and the
+// warning above 1. It is a SAMPLER, not a search: at equal cost it finds 0.91-1.05x the
+// distinct boundaries plain IUR chords do, so the Cascade stays the instrument for
+// "where are the boundaries".
+
+export interface MetroStartRequest {
+  prompts: string[];                 // 3 or more
+  beta?: number;                     // target exponent, 0.5..1.5 (1 = of record)
+  sigma?: number;                    // random-walk step in weight-space units (0.03)
+  m?: number;                        // tangent directions one energy averages (2)
+  chains?: number;                   // C (60)
+  chain_steps?: number;              // L -- the MCMC chain length, NOT the denoising steps
+  seed_mode?: 'cascade' | 'iur';
+  cascade_run_id?: string | null;
+  n_seed_chords?: number;            // IUR mode: chords drawn to find the seed crossings
+  seed?: number;
+  steps?: number;                    // denoising steps of a full image
+  probe_steps?: number | null;       // probes on the cheap field (null = full fidelity)
+  render_full?: boolean;             // re-render every distinct accepted state at `steps`
+}
+
+export interface MetroStartResponse {
+  run_id: string;
+  status: string;
+  error?: string | null;
+}
+
+export interface MetroSample {
+  chain: number;
+  step: number;                      // the round it was accepted at
+  weights: number[];
+  s: number;                         // its energy -- what the map and the gallery sort by
+  image: number;                     // the cheap-field probe rendered at it
+  full_image?: number | null;        // its full-fidelity re-render, when that pass ran
+}
+
+export interface MetroChainStat {
+  chain: number;
+  weights: number[];
+  s?: number | null;
+  image: number;
+  seed_weights: number[];
+  seed_s?: number | null;
+  seed_image: number;
+  n_propose: number;
+  n_accept: number;
+  n_outside: number;                 // proposals that left the simplex (rejected for free)
+  moved: boolean;
+}
+
+// Every field here is quoted over the ACCEPTED states (what the gallery shows), not over the
+// chains' time average with repeats: a statistic of this sample, not an estimate of the law.
+export interface MetroSummary {
+  n_samples: number;
+  mean_s?: number | null;
+  seed_mean_s?: number | null;       // mean energy of the crossings the chains started on
+  on_boundary_frac?: number | null;  // share past COS_T = 0.35 (h25a: 0.67 vs 0.26 uniform)
+  acceptance?: number | null;
+  n_propose: number;
+  n_accept: number;
+  n_outside: number;
+  chains_never_moved: number;        // seed sheets the run kept (h25a: 1-5 % of chains)
+  n_chains: number;
+  n_seed_crossings: number;
+  n_chords: number;
+  n_probes: number;
+  n_full: number;
+  rounds_done: number;
+  cost_image_eq: number;
+}
+
+export interface MetroStatus {
+  run_id: string;
+  status: string;
+  phase: string;
+  k: number;
+  prompts: string[];
+  beta: number;
+  sigma: number;
+  m: number;
+  chains: number;
+  chain_steps: number;
+  delta: number;                     // the stride the energy is read at (0.025)
+  seed_mode: string;
+  cascade_run_id?: string | null;
+  n_seed_chords: number;
+  probe_steps?: number | null;
+  render_full: boolean;
+  seed: number;
+  steps: number;
+  generated: number;
+  phase_done: number;
+  phase_total: number;
+  round_done: number;
+  recent_thumbs: number[];
+  seeds: number[][];                 // the crossings the chains were seeded at
+  seed_divs: (number | null)[];      // divergence ACROSS each bracket (reported, not an S)
+  chains_stats: MetroChainStat[];
+  samples: MetroSample[];
+  summary: MetroSummary;
+  notes: string[];
+  error?: string | null;
+}
+
+export interface MetroCascadeRun {
+  run_id: string;
+  status: string;
+  k: number;
+  prompts: string[];
+  n_crossings: number;
+  certify: boolean;
+}
+
 // ---- Local boundary density: kernel-smoothed Crofton S_V over the run's own chords ----
 // The survey's chords already sample boundary AREA fairly, so crossings per unit chord
 // length convert to boundary area per unit volume; smoothing that ratio locally turns one
