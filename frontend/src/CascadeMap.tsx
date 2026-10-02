@@ -47,8 +47,11 @@ const HALO = '#0a0a12';
 const REDUCED = typeof window !== 'undefined'
   && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
 
-// blue (quiet) -> violet -> red (hot) ramp for local divergence
-function divColor(d: number | null): string {
+// blue (quiet) -> violet -> red (hot) ramp for local divergence.
+// Exported so AmrMap colours a lattice cell's divergence on the SAME ramp as a chord probe
+// here: it is the same measured quantity (1 - cos to the neighbours), and two ramps for one
+// quantity would read as two different measurements.
+export function divColor(d: number | null): string {
   if (d === null) return '#565e93';
   const t = Math.min(1, Math.max(0, d / 0.5));
   const lerp = (a: number, b: number) => Math.round(a + (b - a) * t);
@@ -111,8 +114,11 @@ function helmert(k: number): number[][] {
  * and rotating toward (base+2, base+3); when the rotation partners would collide with
  * the anchors (small k), v stays fixed to keep u ⊥ v exact -- a sheared shadow would
  * lie about distances.
+ *
+ * Exported for AmrMap: the AMR lattice lives in the same simplex, so it must be drawn by
+ * the same projection -- a second one would put the same recipe in two places.
  */
-function makeProjector(k: number, theta: number, size: number, base = 0) {
+export function makeProjector(k: number, theta: number, size: number, base = 0) {
   const cx = size / 2, cy = size / 2, r = size / 2 - 34;
   if (k === 3) {
     const vs = vertexPositions(3, r, cx, cy);

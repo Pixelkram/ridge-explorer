@@ -342,6 +342,50 @@ export async function cascadePointInfo(
   return r.json();
 }
 
+// ---- AMR (adaptive refinement) ----
+// Same shape as the cascade's calls: one POST to start, a bare-fetch status poll, a cancel,
+// an image by index, plus a points.json export. The start can legitimately fail with a 400
+// (k >= 5, or a ladder past the cell ceiling) whose body carries the projected cost, so that
+// detail is lifted out rather than reported as a bare status.
+export async function amrStart(
+  req: import('./types').AmrStartRequest,
+): Promise<import('./types').AmrStartResponse> {
+  const r = await fetchRetry(`${BASE}/api/amr/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  if (!r.ok) {
+    let detail = `amrStart failed: HTTP ${r.status}`;
+    try {
+      const j = await r.json();
+      if (typeof j?.detail === 'string') detail = j.detail;
+      else if (Array.isArray(j?.detail) && j.detail[0]?.msg) detail = j.detail[0].msg;
+      else if (j?.error) detail = j.error;
+    } catch { /* keep the HTTP line */ }
+    throw new Error(detail);
+  }
+  return r.json();
+}
+
+export async function amrStatus(runId: string): Promise<import('./types').AmrStatus> {
+  // bare fetch on purpose: retrying a poll just delays the next one
+  const r = await fetch(`${BASE}/api/amr/${runId}/status`);
+  return r.json();
+}
+
+export async function amrCancel(runId: string): Promise<void> {
+  await fetch(`${BASE}/api/amr/${runId}/cancel`, { method: 'POST' });
+}
+
+export function amrImageUrl(runId: string, index: number): string {
+  return `${BASE}/api/amr/${runId}/image/${index}`;
+}
+
+export function amrPointsUrl(runId: string): string {
+  return `${BASE}/api/amr/${runId}/points.json`;
+}
+
 // Local boundary density over the run's own chords -- geometry only, no images, so it is
 // cheap enough to ask for on a toggle. 404 while the survey has laid down no chords yet.
 export async function cascadeLocalSv(

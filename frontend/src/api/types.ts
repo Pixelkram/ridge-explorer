@@ -476,6 +476,82 @@ export interface CascadeStatus {
   error?: string | null;
 }
 
+// ---- AMR: nested barycentric lattices, refined around detected boundary edges ----
+// Validated in search_problem h25f: at k=4 it reaches the full-lattice ceiling at 55 % of
+// exhaustive cost (7x cheaper than chords for the same coverage), and it does NOT scale --
+// the fan-out is factor^(k-1), so the backend supports k in {3, 4} and refuses k >= 5 with
+// the projected probe count.
+
+export interface AmrStartRequest {
+  // 3 or 4 prompts; more is accepted by the schema only to be refused with the cost
+  prompts: string[];
+  // points per simplex edge at the coarsest level (evaluated in full)
+  base?: number;
+  // rungs in the ladder, including the coarsest
+  levels?: number;
+  // each rung is this many times finer than the last
+  factor?: 2 | 3;
+  // refinement radius around a detected boundary edge, in coarse cells (1 = of record)
+  r_ref?: 1 | 2;
+  seed?: number;
+  steps?: number;
+  // lattice probes on the cheap field (null = full fidelity, double the cost per cell)
+  probe_steps?: number | null;
+}
+
+export interface AmrStartResponse {
+  run_id: string;
+  status: string;
+  error?: string | null;
+}
+
+export interface AmrLevelStat {
+  level: number;              // points per simplex edge
+  cells: number;              // the full lattice at this level, C(level+k-1, k-1)
+  // cells evaluated at this level: the refined set plus the ones carried over from a
+  // coarser level (nested lattices, so those cost nothing again)
+  n_candidates: number;
+  n_evaluated: number;        // NEW probes rendered here -- what the cost is charged on
+  n_edges: number;
+  cost_image_eq: number;      // 0.5 per cheap probe, 1.0 at full steps
+}
+
+// Points and edges arrive as parallel arrays (as CascadeStatus serves its probe cloud): the
+// map draws thousands of them and wants positions and readings in the same order.
+export interface AmrStatus {
+  run_id: string;
+  status: string;
+  phase: string;
+  k: number;
+  prompts: string[];
+  schedule: number[];
+  base: number;
+  levels: number;
+  factor: number;
+  r_ref: number;
+  probe_steps?: number | null;
+  generated: number;
+  phase_done: number;
+  phase_total: number;
+  recent_thumbs: number[];
+  // evaluated cells: weights, the level that paid for each, its thumbnail index, and its
+  // local divergence (max 1-cos over its measured lattice neighbours). A cell's index in
+  // these arrays is the point id the edges refer to.
+  points: number[][];
+  point_levels: number[];
+  point_images: number[];
+  point_divs: (number | null)[];
+  // boundary edges as point-id pairs, with the level they were found at and the cosine
+  // distance across them (> 0.35, the Cascade's crossing threshold)
+  edges: [number, number][];
+  edge_levels: number[];
+  edge_divs: number[];
+  levels_stats: AmrLevelStat[];
+  cost_image_eq: number;
+  notes: string[];
+  error?: string | null;
+}
+
 // ---- Local boundary density: kernel-smoothed Crofton S_V over the run's own chords ----
 // The survey's chords already sample boundary AREA fairly, so crossings per unit chord
 // length convert to boundary area per unit volume; smoothing that ratio locally turns one

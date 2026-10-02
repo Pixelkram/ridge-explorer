@@ -781,6 +781,129 @@ class LocalSvMap(BaseModel):
     error: str | None = None
 
 
+# ---- Adaptive refinement (services/amr.py) ----
+# Nested barycentric lattices refined only around detected boundary edges. Supported at
+# k in {3, 4}; k >= 5 is refused by the router with the projected probe count, because the
+# refinement fans out as factor^(k-1) (h25f: 4.8e9 probes at k=9).
+class AmrStartRequest(BaseModel):
+    """Bounds follow the h25f ladder of record (base 5, factor 2, 4 levels -> 5/10/20/40).
+
+    `prompts` accepts up to 12 entries although only 3 and 4 are SUPPORTED: a 5-prompt
+    request is answered with a 400 naming the projected cost, which is the useful answer,
+    where a length limit here would only produce an anonymous 422.
+    """
+    prompts: list[str] = Field(..., min_length=3, max_length=12)
+    # points per simplex edge at the coarsest level, which is evaluated in full
+    base: int = Field(5, ge=3, le=10)
+    # how many lattices the ladder has, including the coarsest
+    levels: int = Field(4, ge=1, le=5)
+    # each level is this many times finer than the last; 2 (of record) or 3
+    factor: Literal[2, 3] = 2
+    # refinement radius around a detected boundary edge, in COARSE cells. 1 is of record:
+    # at k=4 it lost nothing against 2 (same pairs, same M2) for 22 % fewer probes.
+    r_ref: Literal[1, 2] = 1
+    seed: int = 42
+    steps: int = Field(config.DEFAULT_NUM_INFERENCE_STEPS, ge=1, le=50)
+    # lattice probes run on the cheap field, as the Cascade's chord probes do (gated at
+    # 93 %/94 % recall); null probes at full fidelity and doubles the cost per cell
+    probe_steps: int | None = Field(4, ge=1, le=50)
+    height: int = Field(config.DEFAULT_HEIGHT, ge=64, le=1024)
+    width: int = Field(config.DEFAULT_WIDTH, ge=64, le=1024)
+    guidance_scale: float = Field(config.DEFAULT_GUIDANCE_SCALE, ge=0.0, le=20.0)
+
+
+class AmrStartResponse(BaseModel):
+    run_id: str
+    status: str
+    error: str | None = None
+
+
+class AmrLevelStat(BaseModel):
+    """One rung of the ladder."""
+    level: int                   # points per simplex edge
+    cells: int                   # the full lattice at this level, C(level+k-1, k-1)
+    # cells this level evaluated: the refined set plus every cell carried over from a
+    # coarser level (the lattices are nested, so those cost nothing again)
+    n_candidates: int
+    # NEW probes rendered at this level -- what the cost below is charged on
+    n_evaluated: int
+    n_edges: int                 # boundary edges detected among evaluated adjacent pairs
+    cost_image_eq: float         # 0.5 per cheap probe (h25f convention), 1.0 at full steps
+
+
+class AmrStatus(BaseModel):
+    """A run's whole state. Points and edges are parallel arrays, as CascadeStatus serves
+    its probe cloud: the map draws thousands of them and wants positions and readings in
+    the same order, not objects."""
+    run_id: str
+    status: str
+    phase: str = ""
+    k: int = 0
+    prompts: list[str] = []
+    # the ladder this run was started with, and the settings behind it
+    schedule: list[int] = []
+    base: int = 5
+    levels: int = 4
+    factor: int = 2
+    r_ref: int = 1
+    probe_steps: int | None = 4
+    generated: int = 0
+    phase_done: int = 0
+    phase_total: int = 0
+    recent_thumbs: list[int] = []
+    # evaluated cells: weight vectors, the level that paid for each, its thumbnail index,
+    # and its local divergence (max 1-cos over its measured lattice neighbours; null where
+    # no neighbour of it was ever evaluated). All four are aligned, and a cell's index in
+    # them is the point id the edges below refer to.
+    points: list[list[float]] = []
+    point_levels: list[int] = []
+    point_images: list[int] = []
+    point_divs: list[float | None] = []
+    # detected boundary edges as point-id pairs, with the level they were found at and the
+    # cosine distance across them (> 0.35, the Cascade's crossing threshold)
+    edges: list[list[int]] = []
+    edge_levels: list[int] = []
+    edge_divs: list[float] = []
+    levels_stats: list[AmrLevelStat] = []
+    cost_image_eq: float = 0.0
+    notes: list[str] = []
+    error: str | None = None
+
+
+class AmrPointExport(BaseModel):
+    id: int
+    weights: list[float]
+    level: int
+    image: int
+    div: float | None = None
+
+
+class AmrEdgeExport(BaseModel):
+    a: int
+    b: int
+    level: int
+    divergence: float
+
+
+class AmrExport(BaseModel):
+    """points.json: the finished lattice as self-describing records, so another tool can
+    reuse the survey without re-deriving which parallel array meant what."""
+    run_id: str
+    status: str
+    k: int
+    prompts: list[str] = []
+    schedule: list[int] = []
+    r_ref: int = 1
+    seed: int = 42
+    steps: int = 0
+    probe_steps: int | None = None
+    points: list[AmrPointExport] = []
+    edges: list[AmrEdgeExport] = []
+    levels_stats: list[AmrLevelStat] = []
+    cost_image_eq: float = 0.0
+    notes: list[str] = []
+
+
 # ---- exact-JVP probes (services/jvp_probe.py) ----
 class JvpProbeRequest(BaseModel):
     alpha: float = Field(..., ge=0.0, le=1.0)

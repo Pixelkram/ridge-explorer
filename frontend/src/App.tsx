@@ -6,6 +6,7 @@ import * as api from './api/client';
 import { loadResume, saveResume, onResumeVisible } from './resume';
 import DiscoverPanel from './DiscoverPanel';
 import CascadePanel from './CascadePanel';
+import AmrPanel from './AmrPanel';
 import SurpriseSlider from './components/SurpriseSlider';
 import { feature } from './featureFlags';
 
@@ -2516,6 +2517,9 @@ export default function App() {
       {feature('hikers') && <HikePanel />}
       {feature('discovery') && <DiscoverPanel />}
       {feature('cascade') && <CascadePanel />}
+      {/* the other way to spend a boundary budget on the same simplex: a refined lattice
+          instead of chords. Sits next to the Cascade because they are alternatives. */}
+      {feature('amr') && <AmrPanel />}
       <MainViewport />
       <ExportOverlay />
     </div>

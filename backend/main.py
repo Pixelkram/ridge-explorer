@@ -13,7 +13,7 @@ from backend.services.gpu_pool import GPUPool, CellResult, LatentResult, LatentB
 from backend.services.ridge_detector import compute_sensitivity, compute_clusters, classify_ridges, measured_mask
 from backend.services.visualization import render_heatmap, assemble_image_grid, render_overlay, render_clusters
 from backend.cache.thumbnail_cache import ThumbnailCache
-from backend.routers import health, grid, discover, cascade, probe
+from backend.routers import health, grid, discover, cascade, amr, probe
 
 import numpy as np
 
@@ -803,4 +803,5 @@ app.include_router(health.router)
 app.include_router(grid.router)
 app.include_router(discover.router)
 app.include_router(cascade.router)
+app.include_router(amr.router)
 app.include_router(probe.router)

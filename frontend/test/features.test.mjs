@@ -30,7 +30,7 @@ function check(name, actual, expected) {
   }
 }
 
-const OG = ['cascade', 'discovery', 'hikers', 'itinerary', 'mfscan', 'surprise'];
+const OG = ['amr', 'cascade', 'discovery', 'hikers', 'itinerary', 'mfscan', 'surprise'];
 
 console.log('featureFlags');
 check('nothing set → nothing hidden', set('', undefined), []);
