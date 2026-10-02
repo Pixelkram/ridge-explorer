@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, Field, model_validator
 from backend import config
 
@@ -471,6 +473,16 @@ class CascadeStartRequest(BaseModel):
     hires: bool = False
     hires_top_pct: int = Field(20, ge=1, le=100)
     hires_factor: int = Field(4, ge=2, le=8)
+    # which mode the pass spends its probes in. "bracket" (default) is the finer sweep along the
+    # chord above: a sharper POSITION. "cloud" draws hires_cloud_n random points in the tangent
+    # ball of radius hires_cloud_r around each selected crossing instead: side fractions, the
+    # local NORMAL between the two side means, a chord-free position estimate, and a junction hint
+    # when a third basin shows up -- all directions the chord says nothing about, at the price of
+    # leaving the bracket as it was. hires_cloud_r is in tangent units (0.0236 = one fine cell);
+    # the cloud costs ~0.5 image per point (cheap field).
+    hires_mode: Literal["bracket", "cloud"] = "bracket"
+    hires_cloud_n: int = Field(12, ge=4, le=64)
+    hires_cloud_r: float = Field(0.05, ge=0.01, le=0.30)
     seed: int = 42
     # survey randomness (chords, background, patches) apart from the image seed; null = seed
     chord_seed: int | None = None
@@ -516,6 +528,27 @@ class CascadeChordMeta(BaseModel):
     n_near: int = 0
 
 
+class CascadeCloud(BaseModel):
+    """CLOUD mode of the high-resolution pass, around ONE crossing: n random points that arrived
+    out of the ball of radius r (tangent units), what share of them matched each side, and what
+    the two side clusters say about the boundary here."""
+    n: int
+    r: float
+    # shares of the cloud on side A, side B, and in neither basin (further than the crossing
+    # threshold from both signatures)
+    frac_a: float = 0.0
+    frac_b: float = 0.0
+    frac_other: float = 0.0
+    # unit weight-space direction mean_B - mean_A and the midpoint (mean_A + mean_B)/2; both null
+    # unless at least 2 cloud points landed on each side. Where present they REPLACE the bracket
+    # chord as the crossing's normal and position (the scoring sides read this normal).
+    normal: list[float] | None = None
+    mid_est: list[float] | None = None
+    # a third basin showed up in the ball: this may be a junction, where one direction is a poor
+    # summary of the boundary
+    junction_hint: bool = False
+
+
 class CascadeCrossing(BaseModel):
     cid: int
     weights: list[float]
@@ -543,6 +576,12 @@ class CascadeCrossing(BaseModel):
     hires: bool = False
     hires_width: float | None = None
     split_from: int | None = None
+    # CLOUD mode of that pass: which mode refined this crossing ("cloud"; null in bracket mode),
+    # the ball's summary, and its points for the map -- [[weights...], side, image index] each,
+    # side being "A" / "B" / "other".
+    hires_mode: str | None = None
+    cloud: CascadeCloud | None = None
+    cloud_pts: list | None = None
 
 
 class CascadePatch(BaseModel):
@@ -642,6 +681,11 @@ class CascadeStatus(BaseModel):
     hires: bool = False
     hires_top_pct: int = 20
     hires_factor: int = 4
+    # which mode it ran in ("bracket" = finer along the chord, "cloud" = a ball around the
+    # crossing) and, for the cloud, how many points per crossing at what radius
+    hires_mode: str = "bracket"
+    hires_cloud_n: int = 12
+    hires_cloud_r: float = 0.05
     # False = detection only: the crossings below were never bisected or scored, so their
     # positions carry bracket precision (+-stride/2) and b/significant mean nothing. The
     # default here is the back-compatible reading (a status without the field predates the

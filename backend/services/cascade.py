@@ -58,6 +58,14 @@ class Crossing:
     hires_profile: list | None = None
     hires_note: str | None = None
     split_from: int | None = None
+    # which mode of the pass touched this crossing ("bracket" leaves it None, as it was the
+    # only mode; "cloud" = the ball of random probes below).
+    hires_mode: str | None = None
+    # CLOUD mode (_hires_cloud): the summary of that ball -- {n, r, frac_a, frac_b, frac_other,
+    # normal, mid_est, junction_hint} -- and the per-point record the map draws,
+    # [[weights...], side, image index]. Both None unless the cloud mode ran here.
+    cloud: dict | None = None
+    cloud_pts: list | None = None
 
 
 @dataclass
@@ -122,6 +130,15 @@ class CascadeRun:
     hires: bool = False
     hires_top_pct: int = 20
     hires_factor: int = 4
+    # which mode the pass spends those probes in. "bracket" (default) is the sweep along the
+    # chord described above. "cloud" instead draws hires_cloud_n random points in the tangent
+    # ball of radius hires_cloud_r AROUND each selected crossing (_hires_cloud): it measures the
+    # directions the chord says nothing about -- the local normal, a chord-free position
+    # estimate, and a third basin (junction) a single line cannot see -- and leaves the bracket
+    # alone. hires_cloud_r is in tangent units (0.0236 = one fine cell).
+    hires_mode: str = "bracket"
+    hires_cloud_n: int = 12
+    hires_cloud_r: float = 0.05
     # survey randomness (chords, background pairs, patches) apart from the image seed; None = seed. Lets several
     # surveys of ONE image field be compared against a single dense ground truth.
     chord_seed: int | None = None
@@ -388,6 +405,160 @@ def _hires_refine(x, seq, em, width, gis=None):
         if rank:
             extra.append(t)
     return extra
+
+
+# CLOUD mode of the pass (owner, 2026-10-02). The bracket mode above sharpens a crossing ALONG
+# the chord that found it -- the one direction the survey has already measured. A cloud spends
+# the same cheap probes AROUND it instead: random points in the tangent ball of radius r, each
+# labelled by the side it matches. That buys what no single line can report: the local NORMAL
+# (the direction between the two side means), a position estimate not tied to the chord, and the
+# first evidence of a THIRD basin, i.e. a junction. It is a measurement of orientation, not of
+# position precision, so the bracket is left exactly as the chord phase quoted it.
+
+
+def _cloud_points(centre, r, n, rng, tries=20):
+    """Up to n points drawn uniformly in the tangent-space ball of radius r around `centre`.
+
+    Uniform in the (k-1)-dimensional ball the simplex's affine hull really has: an isotropic
+    sum-zero direction times radius r*U^(1/(k-1)) (the radial inverse-CDF; a uniform radius would
+    crowd the centre). The offsets are sum-zero, so the weights keep summing to 1 and only
+    non-negativity can fail -- a point outside the simplex is REDRAWN, never clipped, because
+    clipping piles points onto the faces and biases the very means the normal is built from. Up to
+    `tries` draws per point, then that point is given up on: close to a face most of the ball lies
+    outside the simplex, and a short cloud is honest where a stretched one is not. Deterministic
+    in `rng`.
+    """
+    c = np.asarray(centre, dtype=float)
+    k = len(c)
+    out = []
+    for _ in range(int(n)):
+        for _t in range(tries):
+            u = rng.standard_normal(k)
+            u -= u.mean()
+            nn = np.linalg.norm(u)
+            if nn < 1e-12:
+                continue
+            w = c + (r * rng.random() ** (1.0 / max(k - 1, 1))) * (u / nn)
+            if w.min() >= 0:
+                out.append(w)
+                break
+    return out
+
+
+def _cloud_side(e, ea, eb):
+    """Which side of the crossing one cloud image fell on: "A", "B" or "other".
+
+    The nearer of the two side signatures -- except that a point further than COS_T from BOTH is
+    on neither side. That is a third basin, the one thing a cloud sees and a chord cannot, so
+    calling it the nearer of two strangers would hide a junction inside frac_a/frac_b.
+    """
+    da, db = _cosd(e, ea), _cosd(e, eb)
+    if min(da, db) > COS_T:
+        return "other"
+    return "A" if da < db else "B"
+
+
+def _cloud_normal(ws, sides):
+    """(unit normal, midpoint estimate) of a labelled cloud, or (None, None).
+
+    The normal is mean_B - mean_A, normalised: the direction the boundary separates, measured
+    from points on both sides of it rather than along one chord, and sum-zero by construction
+    (both means sum to 1) so it is a tangent direction. The midpoint is (mean_A + mean_B)/2.
+    Needs at least 2 points per side -- one point names a direction with no evidence of its
+    spread -- and "other" points enter neither mean: a third basin is not a side of THIS
+    boundary.
+    """
+    a = [w for w, s in zip(ws, sides) if s == "A"]
+    b = [w for w, s in zip(ws, sides) if s == "B"]
+    if len(a) < 2 or len(b) < 2:
+        return None, None
+    ma, mb = np.mean(np.stack(a), axis=0), np.mean(np.stack(b), axis=0)
+    d = mb - ma
+    nn = np.linalg.norm(d)
+    if nn < 1e-12:
+        return None, None
+    return d / nn, (ma + mb) / 2
+
+
+def _cloud_apply(x):
+    """Hand a cloud crossing's geometry back to its cloud; True when it did.
+
+    PRECEDENCE: the cloud normal is a local estimate of how the boundary is ORIENTED, measured in
+    every tangent direction; the bracket chord is merely the line the survey happened to cross on.
+    So the cloud wins -- but both places that derive mid/n from the bracket (the detection-only
+    finish and the end of bisection, which legitimately re-reads the bracket it narrowed) run
+    AFTER the pass, which is why this is re-applied there instead of only at cloud time. A
+    bracket-mode crossing, or a cloud with too few points on a side to name a normal, keeps the
+    bracket geometry.
+    """
+    c = getattr(x, "cloud", None)
+    if not c or c.get("normal") is None:
+        return False
+    x.n = np.asarray(c["normal"], dtype=float)
+    if c.get("mid_est") is not None:
+        x.mid = np.asarray(c["mid_est"], dtype=float)
+    return True
+
+
+def _hires_cloud(app, run, pool, sel_x, rng):
+    """CLOUD mode: one ball of random cheap probes around each selected crossing, in ONE batch.
+
+    Per crossing, hires_cloud_n points in the tangent ball of radius hires_cloud_r around the
+    centre of its bracket, each labelled against the crossing's OWN side signatures. The summary
+    lands on x.cloud and the per-point record on x.cloud_pts (for the map); where the cloud names
+    a normal it also becomes the crossing's n and mid (_cloud_apply). wa/wb are untouched, so
+    bisection and the detection-only finish still work from the bracket.
+
+    The cloud points are not chord probes -- no two of them are a known step apart along a
+    measured direction -- so none of them feeds the live divergence colouring (_set_div): a
+    ball's pairwise divergences would read on the map as a local gradient they are not.
+    """
+    n, r = int(run.hires_cloud_n), float(run.hires_cloud_r)
+    pts, meta, by_sel = [], [], {}
+    for si, x in enumerate(sel_x):
+        for p in _cloud_points(np.clip((x.wa + x.wb) / 2, 0, None), r, n, rng):
+            pts.append(p)
+            meta.append(si)
+    run.phase_total, run.phase_done = len(pts), 0
+    gh = evaluate(app, run, pool, pts, run.seed, "hires", steps=run.probe_steps)
+    if run.status != "running":
+        return
+    for si, p, gi in zip(meta, pts, gh):
+        by_sel.setdefault(si, []).append((p, gi))
+    n_norm, n_junc, coss = 0, 0, []
+    for si, x in enumerate(sel_x):
+        ws, sides, gis = [], [], []
+        for p, gi in by_sel.get(si, ()):
+            e = run.embeddings.get(gi) if gi is not None else None
+            if e is None:
+                continue                  # a probe that never arrived labels nothing
+            ws.append(p)
+            sides.append(_cloud_side(e, x.ea, x.eb))
+            gis.append(gi)
+        nrm, mid = _cloud_normal(ws, sides)
+        tot = max(len(sides), 1)          # an empty cloud reports zero of every side
+        fa, fb, fo = (sides.count("A") / tot, sides.count("B") / tot,
+                      sides.count("other") / tot)
+        x.cloud = {"n": len(sides), "r": r,
+                   "frac_a": float(fa), "frac_b": float(fb), "frac_other": float(fo),
+                   "normal": None if nrm is None else [float(v) for v in nrm],
+                   "mid_est": None if mid is None else [float(v) for v in mid],
+                   "junction_hint": bool(fo > 0)}
+        x.cloud_pts = [[[float(v) for v in w], s, int(g)]
+                       for w, s, g in zip(ws, sides, gis)]
+        x.hires, x.hires_mode = True, "cloud"
+        n_junc += 1 if x.cloud["junction_hint"] else 0
+        if _cloud_apply(x):
+            n_norm += 1
+            d = x.wb - x.wa
+            dn = float(np.linalg.norm(d))
+            if dn > 1e-12:
+                coss.append(abs(float(np.dot(nrm, d / dn))))
+    run.notes.append(
+        f"hires cloud: {len(sel_x)} crossings (top {run.hires_top_pct} %), {n} pts @ {r:.3f}; "
+        f"normals for {n_norm}; junction hints {n_junc}; "
+        f"median |cos(normal, chord dir)| "
+        + (f"{float(np.median(coss)):.2f}" if coss else "n/a"))
 
 
 _EVAL_SEQ = [0]
@@ -1353,8 +1524,16 @@ def run_cascade(app, run, pool):
     # ---------------- phase 1b: final high-resolution pass (optional, cheap field)
     # Runs on the finished chord phase and BEFORE anything in the certify half, so bisection
     # starts from the refined bracket and the detection-only finish quotes the refined centre.
+    # Two modes over the SAME top-% selection: "bracket" probes finer along the chord (sharper
+    # position), "cloud" probes a ball around the crossing (orientation, junctions) and leaves the
+    # bracket -- so the width the certify half reads below stays None in cloud mode.
     hires_width = None
-    if cand and run.hires and run.hires_factor >= 2 and run.status == "running":
+    if cand and run.hires and run.hires_mode == "cloud" and run.status == "running":
+        run.phase = "hires"
+        _hires_cloud(app, run, pool, _hires_select(cand, run.hires_top_pct), rng)
+        if run.status != "running":
+            return
+    elif cand and run.hires and run.hires_factor >= 2 and run.status == "running":
         run.phase = "hires"
         f = int(run.hires_factor)
         n_before = len(cand)
@@ -1452,6 +1631,7 @@ def run_cascade(app, run, pool):
             nn = np.linalg.norm(d)
             x.n = d / nn if nn > 1e-9 else _iso_dir(k, rng)
             x.b, x.significant = None, False
+            _cloud_apply(x)      # a cloud outranks the bracket chord (see _cloud_apply)
         run.notes.append("detection only: crossings uncertified, positions at bracket "
                          "precision (±stride/2"
                          + (f"; ±{hires_width / 2:.4f} where the high-resolution pass refined"
@@ -1497,6 +1677,10 @@ def run_cascade(app, run, pool):
         d = x.wb - x.wa
         nn = np.linalg.norm(d)
         x.n = d / nn if nn > 1e-9 else _iso_dir(k, rng)
+        # bisection narrowed the bracket, so its chord direction is the sharpest TRANSVERSAL it
+        # has -- but a cloud measured the orientation itself, so it takes the normal (and the
+        # position it estimated) back here. Precedence documented in _cloud_apply.
+        _cloud_apply(x)
     if run.status != "running":
         return
 

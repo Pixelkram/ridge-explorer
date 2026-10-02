@@ -27,6 +27,12 @@ import type { CascadeProbeMap, LocalSvView } from './stores/probeStore';
 const ACCENT = '#4ecca3';
 const WARN = '#e94560';
 const CERT_NO = '#8a93b8';   // the grey of non-significant crossings, reused for stations that did not certify
+// Cloud points of the hi-res pass (one light / one dark neutral). A cloud point carries a LABEL --
+// which side it matched -- and not a measured divergence, so it stays off the blue->red ramp
+// rather than borrowing a scale that means something else; a third basin takes the map's existing
+// warning token, the same colour the rest of the UI flags a junction hint in.
+const CLOUD_A = '#c9cfe8';
+const CLOUD_B = '#6b74a8';
 // dark outline behind probe strokes and their labels, so a measured direction stays
 // readable where it crosses the bright sampling cloud
 const HALO = '#0a0a12';
@@ -232,7 +238,7 @@ const KEYFRAMES = `
 /** One rendered shadow of the space; used once in single view, per-anchor in split. */
 function MapSvg({
   status, size, theta, base, sel, onPick, walkPath, walkSegs, walkColors,
-  caption, showBadge, showBeat, spin, compact, probes, pendingCid, sv,
+  caption, showBadge, showBeat, spin, compact, probes, pendingCid, sv, showClouds,
 }: {
   status: CascadeStatus;
   size: number;
@@ -255,6 +261,8 @@ function MapSvg({
   pendingCid?: number | null;
   /** boundary-density overlay, or null when it is off */
   sv?: SvOverlay | null;
+  /** draw the hi-res pass's cloud points around the crossings it sampled */
+  showClouds?: boolean;
 }) {
   const prevLen = useRef(0);
   const newFrom = prevLen.current;
@@ -391,6 +399,24 @@ function MapSvg({
                 transform={`rotate(45 ${x} ${y})`} />
         );
       })}
+      {/* Cloud points of the hi-res pass: the ball of random probes drawn around a selected
+          crossing, each dot coloured by the side its image matched. Drawn UNDER the crossing dots
+          and with pointer-events off, so the cloud stays context for the dot it belongs to rather
+          than a layer of its own competing for clicks. No divergence colour: these points were
+          labelled against the crossing's side signatures, not stepped off a neighbour. */}
+      {showClouds && (
+        <g style={{ pointerEvents: 'none' }}>
+          {status.crossings.map((c) => (c.cloud_pts ?? []).map((p, i) => {
+            const [x, y] = proj.project(p[0]);
+            if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+            return (
+              <circle key={`cl${c.cid}.${i}`} cx={x} cy={y} r={compact ? 1.1 : 1.5}
+                      fill={p[1] === 'other' ? WARN : p[1] === 'A' ? CLOUD_A : CLOUD_B}
+                      fillOpacity={0.9} />
+            );
+          }))}
+        </g>
+      )}
       {status.crossings.map((c) => {
         const [x, y] = proj.project(c.weights);
         const scored = c.b !== null;
@@ -625,6 +651,9 @@ export default function CascadeMap({
   const [spin, setSpin] = useState(!REDUCED);
   const [basePair, setBasePair] = useState(0);
   const [split, setSplit] = useState(false);
+  // hi-res cloud points: on by default, and the toggle only appears on a run that HAS clouds
+  // (nothing to hide otherwise), so the default reads as "show what was measured"
+  const [showClouds, setShowClouds] = useState(true);
   // draggable view scale: the divider below the map sets this; persisted so the
   // preferred size survives reloads (same spirit as resume.ts, but a plain number)
   const [mapSize, setMapSize] = useState(() => {
@@ -683,6 +712,8 @@ export default function CascadeMap({
     return { map: svMap, view, read, byCid, vmax };
   }, [svOn, svMap, svViewSel]);
 
+  const hasClouds = status.crossings.some((c) => (c.cloud_pts?.length ?? 0) > 0);
+
   if (k < 3) return null;
 
   const pick = (cid: number | null) => {
@@ -709,7 +740,8 @@ export default function CascadeMap({
                     walkColors={walkColors}
                     caption={`view ${b + 1}·${(b % nViews) + 2 > nViews ? 1 : b + 2}`}
                     showBeat={b === 0} compact
-                    probes={probes} pendingCid={probePending} sv={sv} />
+                    probes={probes} pendingCid={probePending} sv={sv}
+                    showClouds={showClouds} />
           ))}
         </div>
       ) : (
@@ -717,9 +749,19 @@ export default function CascadeMap({
                 sel={sel} onPick={pick} walkPath={walkPath} walkSegs={walkSegs}
                 walkColors={walkColors}
                 showBadge showBeat spin={spin}
-                probes={probes} pendingCid={probePending} sv={sv} />
+                probes={probes} pendingCid={probePending} sv={sv}
+                showClouds={showClouds} />
       )}
       <div style={{ fontSize: 11, color: '#889', maxWidth: 190 }}>
+        {hasClouds && (
+          <label className="rx-focus"
+                 title="the hi-res pass's cloud points: every random probe it drew around a refined crossing, coloured by the side it matched"
+                 style={{ display: 'flex', alignItems: 'center', gap: 4, marginBottom: 6,
+                          color: '#aeb6dd', cursor: 'pointer' }}>
+            <input type="checkbox" checked={showClouds}
+                   onChange={(e) => setShowClouds(e.target.checked)} /> clouds
+          </label>
+        )}
         {sv && (
           <div style={{ marginBottom: 8, paddingBottom: 8,
                         borderBottom: '1px solid #23234d' }}>
@@ -776,11 +818,27 @@ export default function CascadeMap({
           <br /><span style={{ color: ACCENT }}>●</span> certified — beats the run's own
           background; size = strength
           {status.crossings.some((c) => c.hires) && (
-            <>
-              <br /><span style={{ color: '#fff' }}>◌</span> thin white ring = sharpened by the
-              final high-res pass (position quoted at a {status.hires_factor ?? 4}× finer
-              spacing); where one bracket hid two boundaries, the extra dots are the split
-            </>
+            status.hires_mode === 'cloud' ? (
+              <>
+                <br /><span style={{ color: '#fff' }}>◌</span> thin white ring = sampled by the
+                final high-res pass — a cloud of {status.hires_cloud_n ?? 12} random points within{' '}
+                {(status.hires_cloud_r ?? 0.05).toFixed(3)} of it, which re-estimates its position
+                and its normal
+                {hasClouds && (
+                  <>
+                    <br /><span style={{ color: CLOUD_A }}>·</span>
+                    <span style={{ color: CLOUD_B }}>·</span> cloud points, light = side A, dark =
+                    side B · <span style={{ color: WARN }}>·</span> a third basin (junction hint)
+                  </>
+                )}
+              </>
+            ) : (
+              <>
+                <br /><span style={{ color: '#fff' }}>◌</span> thin white ring = sharpened by the
+                final high-res pass (position quoted at a {status.hires_factor ?? 4}× finer
+                spacing); where one bracket hid two boundaries, the extra dots are the split
+              </>
+            )
           )}
           <br /><span style={{ color: ACCENT }}>◇</span> refined patch
           {' '}<span style={{ color: '#8a93b8' }}>(dashed = exploration slot)</span>

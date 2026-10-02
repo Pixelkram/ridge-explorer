@@ -64,6 +64,11 @@ const HIRES_TIP = 'after all chords are read, the top X % most divergent crossin
   + 'one stride to stride/finer, jumps that hide several boundaries split into several '
   + 'crossings. Costs ~0.5 image per extra probe; works with certify on or off (on: bisection '
   + 'starts from the sharper bracket)';
+// The second mode spends the same budget AROUND the crossing instead of along its chord.
+const HIRES_CLOUD_TIP = 'around each selected crossing, x random points within radius r (cheap '
+  + 'field): each point is labelled by the side it matches; the cloud re-estimates the boundary '
+  + 'position and its local NORMAL (used for the scoring sides when certify is on); a third basin '
+  + 'in the cloud is flagged as a junction hint. Cost ≈ 0.5 image per point';
 
 // The pipeline as the user should read it; keys match backend phase names.
 const PHASES: [string, string][] = [
@@ -128,16 +133,34 @@ function CrossingCard({ c, runId, selected, uncertified, onClick }: {
                       justifyContent: 'center', color: '#555' }}>…</div>
       )}
       <div style={{ padding: '3px 5px 5px' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between',
-                      fontSize: 10, color: c.significant ? ACCENT : '#8a93b8' }}>
+        {/* wraps: a cloud crossing can carry three tags (cloud · junction? · ridge group) and
+            96 px of card is not enough to squeeze them onto one line */}
+        <div style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap',
+                      columnGap: 4, fontSize: 10,
+                      color: c.significant ? ACCENT : '#8a93b8' }}>
           <span>{scored ? `B ${c.b!.toFixed(2)}`
                         : uncertified ? 'uncertified' : 'pinning…'}</span>
           {c.hires && (
             <span style={{ color: '#667' }}
-                  title={c.hires_width != null
-                    ? `refined by the final high-res pass: position quoted at ±${(c.hires_width / 2).toFixed(4)}`
-                    : 'the high-res pass found the change spread over the whole bracket and kept it'}>
-              hi‑res
+                  title={c.cloud
+                    ? `cloud of ${c.cloud.n} points within ${c.cloud.r.toFixed(3)}: `
+                      + `${Math.round(c.cloud.frac_a * 100)}/${Math.round(c.cloud.frac_b * 100)}`
+                      + `/${Math.round(c.cloud.frac_other * 100)} % side A/B/other`
+                      + (c.cloud.normal != null
+                        ? ' — position and normal re-estimated from it'
+                        : ' — too few points on a side to name a normal; bracket kept')
+                    : c.hires_width != null
+                      ? `refined by the final high-res pass: position quoted at ±${(c.hires_width / 2).toFixed(4)}`
+                      : 'the high-res pass found the change spread over the whole bracket and kept it'}>
+              {c.cloud ? 'cloud' : 'hi‑res'}
+            </span>
+          )}
+          {c.cloud?.junction_hint && (
+            <span style={{ color: WARN }}
+                  title={'a third basin turned up in this crossing\'s cloud '
+                    + `(${Math.round(c.cloud.frac_other * 100)} % of its points): possibly a `
+                    + 'junction, where one normal is a poor summary of the boundary'}>
+              junction?
             </span>
           )}
           {c.ridge_group !== null && (
@@ -209,6 +232,9 @@ export default function CascadePanel() {
   const [hires, setHires] = useState(false);
   const [hiresTopPct, setHiresTopPct] = useState(20);
   const [hiresFactor, setHiresFactor] = useState(4);
+  const [hiresMode, setHiresMode] = useState<'bracket' | 'cloud'>('bracket');
+  const [hiresCloudN, setHiresCloudN] = useState(12);
+  const [hiresCloudR, setHiresCloudR] = useState(0.05);
   const [trace, setTrace] = useState(false);
   const [certify, setCertify] = useState(false);
   const [nPatches, setNPatches] = useState(4);
@@ -269,6 +295,9 @@ export default function CascadePanel() {
         hires,
         hires_top_pct: hiresTopPct,
         hires_factor: hiresFactor,
+        hires_mode: hiresMode,
+        hires_cloud_n: hiresCloudN,
+        hires_cloud_r: hiresCloudR,
         seed,
         focus: weights,
         trace,
@@ -346,6 +375,9 @@ export default function CascadePanel() {
         hires,
         hires_top_pct: hiresTopPct,
         hires_factor: hiresFactor,
+        hires_mode: hiresMode,
+        hires_cloud_n: hiresCloudN,
+        hires_cloud_r: hiresCloudR,
         seed,
         trace,
       });
@@ -492,20 +524,59 @@ export default function CascadePanel() {
               <input type="checkbox" checked={hires}
                      onChange={(e) => setHires(e.target.checked)} /> final high-res pass
             </label>
-            <label title={HIRES_TIP}
+            {/* both modes refine the SAME selection (the top % by divergence); they differ in
+                where the probes go -- along the chord, or in a ball around the crossing */}
+            <label title={hiresMode === 'cloud' ? HIRES_CLOUD_TIP : HIRES_TIP}
+                   style={{ display: 'inline-flex', alignItems: 'center', gap: 4,
+                            color: hires ? undefined : '#667' }}>
+              mode
+              <select value={hiresMode} disabled={!hires}
+                      onChange={(e) => setHiresMode(e.target.value as 'bracket' | 'cloud')}
+                      style={{ background: '#0a0a1a', color: '#8a9',
+                               border: '1px solid #444', borderRadius: 3,
+                               padding: '2px 4px', fontSize: 12 }}>
+                <option value="bracket">bracket (× finer)</option>
+                <option value="cloud">cloud (x pts within r)</option>
+              </select>
+            </label>
+            <label title={hiresMode === 'cloud' ? HIRES_CLOUD_TIP : HIRES_TIP}
                    style={{ color: hires ? undefined : '#667' }}>
               top % <input style={NUM} type="number" min={1} max={100} value={hiresTopPct}
                            disabled={!hires}
                            onChange={(e) => setHiresTopPct(
                              Math.max(1, Math.min(100, Number(e.target.value))))} />
             </label>
-            <label title={HIRES_TIP}
-                   style={{ color: hires ? undefined : '#667' }}>
-              × finer <input style={NUM} type="number" min={2} max={8} value={hiresFactor}
-                             disabled={!hires}
-                             onChange={(e) => setHiresFactor(
-                               Math.max(2, Math.min(8, Number(e.target.value))))} />
-            </label>
+            {hiresMode === 'bracket' ? (
+              <label title={HIRES_TIP}
+                     style={{ color: hires ? undefined : '#667' }}>
+                × finer <input style={NUM} type="number" min={2} max={8} value={hiresFactor}
+                               disabled={!hires}
+                               onChange={(e) => setHiresFactor(
+                                 Math.max(2, Math.min(8, Number(e.target.value))))} />
+              </label>
+            ) : (
+              <>
+                <label title={HIRES_CLOUD_TIP}
+                       style={{ color: hires ? undefined : '#667' }}>
+                  points <input style={NUM} type="number" min={4} max={64} value={hiresCloudN}
+                                disabled={!hires}
+                                onChange={(e) => setHiresCloudN(
+                                  Math.max(4, Math.min(64, Number(e.target.value))))} />
+                </label>
+                <label title={HIRES_CLOUD_TIP}
+                       style={{ display: 'inline-flex', alignItems: 'center', gap: 4,
+                                color: hires ? undefined : '#667' }}>
+                  radius
+                  <input type="range" min={0.01} max={0.3} step={0.005} value={hiresCloudR}
+                         disabled={!hires}
+                         onChange={(e) => setHiresCloudR(Number(e.target.value))}
+                         style={{ width: 78 }} />
+                  <span style={{ color: hires ? '#8a9' : '#667' }}>
+                    {hiresCloudR.toFixed(3)} · ≈{(hiresCloudR / CELL).toFixed(1)} cells
+                  </span>
+                </label>
+              </>
+            )}
             <label className="rx-focus" title={CERTIFY_TIP}
                    style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
               <input type="checkbox" checked={certify}
@@ -557,11 +628,12 @@ export default function CascadePanel() {
             const cross = Math.max(1, Math.round((chordTotal * 7) / k));
             // 110/k probes per chord is measured AT the stride of record; the count is ~1/stride
             const probeImgs = ((chordTotal * 110) / k) * (STRIDE_REF / stride);
-            // the high-res pass renders (finer - 1) extra cheap probes inside each selected
-            // bracket, and a cheap probe is ~half an image (4 of 8 denoising steps)
+            // the high-res pass renders extra cheap probes per selected crossing -- (finer - 1)
+            // inside the bracket, or the whole cloud around it -- and a cheap probe is ~half an
+            // image (4 of 8 denoising steps)
+            const hiresSel = Math.max(1, Math.round((cross * hiresTopPct) / 100));
             const hiresImgs = hires
-              ? 0.5 * (hiresFactor - 1)
-                * Math.max(1, Math.round((cross * hiresTopPct) / 100))
+              ? 0.5 * hiresSel * (hiresMode === 'cloud' ? hiresCloudN : hiresFactor - 1)
               : 0;
             // detection only: the probes are the whole bill -- nothing is rebracketed,
             // bisected, scored or refined
@@ -575,8 +647,12 @@ export default function CascadePanel() {
                 estimate: ≤~{imgs} images · ≤~{mins} min · ~{cross} crossings
                 {!certify && ' — detection only: uncertified, bracket-precision positions,'
                   + ' no patches and no walks'}
-                {hires && ` — final high-res pass: the top ${hiresTopPct} % of crossings`
-                  + ` re-probed ×${hiresFactor} (position to ±${(stride / hiresFactor / 2).toFixed(4)})`}
+                {hires && (hiresMode === 'cloud'
+                  ? ` — final high-res pass: ${hiresCloudN} random points within`
+                    + ` ${hiresCloudR.toFixed(3)} of the top ${hiresTopPct} % of crossings`
+                    + ' (local normal, junction hints; bracket unchanged)'
+                  : ` — final high-res pass: the top ${hiresTopPct} % of crossings`
+                    + ` re-probed ×${hiresFactor} (position to ±${(stride / hiresFactor / 2).toFixed(4)})`)}
                 {certify && cross < 3 * nPatches &&
                   ' — few crossings per patch; consider more chords'}
                 {branch > 0 && ' — upper bound: child rays are half-length and only spawn'
@@ -611,7 +687,17 @@ export default function CascadePanel() {
                     branch {status.branch} · depth {status.depth ?? 0} · top {status.branch_top_pct ?? 20} %
                   </span>
                 )}
-                {status.hires && (
+                {status.hires && status.hires_mode === 'cloud' && (
+                  <span title={HIRES_CLOUD_TIP}>
+                    hi‑res cloud · {status.hires_cloud_n ?? 12} pts @{' '}
+                    {(status.hires_cloud_r ?? 0.05).toFixed(3)}
+                    {' · '}
+                    {status.crossings.filter((c) => c.cloud?.normal != null).length} normals
+                    {' · '}
+                    {status.crossings.filter((c) => c.cloud?.junction_hint).length} junction hints
+                  </span>
+                )}
+                {status.hires && status.hires_mode !== 'cloud' && (
                   <span title={HIRES_TIP}>
                     hi‑res ×{status.hires_factor ?? 4} · top {status.hires_top_pct ?? 20} %
                     {' · '}

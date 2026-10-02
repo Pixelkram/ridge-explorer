@@ -292,6 +292,12 @@ export interface CascadeStartRequest {
   hires?: boolean;
   hires_top_pct?: number;
   hires_factor?: number;
+  // how those probes are spent: "bracket" (default) = finer along the chord, a sharper position;
+  // "cloud" = hires_cloud_n random points in the tangent ball of radius hires_cloud_r around each
+  // selected crossing, which measures the local normal, a chord-free position and junction hints
+  hires_mode?: 'bracket' | 'cloud';
+  hires_cloud_n?: number;
+  hires_cloud_r?: number;
   // survey randomness apart from the image seed (null = seed)
   chord_seed?: number | null;
   // trace phase: walk every significant crossing both ways, certify, link crossings the walks reach
@@ -340,6 +346,26 @@ export interface CascadeChordMeta {
   n_near?: number;
 }
 
+// CLOUD mode of the high-resolution pass, around one crossing: the ball that was drawn, how its
+// points split between the two sides, and what the two clusters say about the boundary here
+export interface CascadeCloud {
+  // points that arrived, and the ball's radius in tangent units
+  n: number;
+  r: number;
+  // shares on side A, on side B, and in neither basin (further than the crossing threshold
+  // from both side signatures)
+  frac_a: number;
+  frac_b: number;
+  frac_other: number;
+  // unit weight-space direction mean_B - mean_A and the midpoint of the two means; null unless
+  // at least 2 points landed on each side. Where present they REPLACE the bracket chord as the
+  // crossing's normal and position (so the scoring sides are taken across this normal)
+  normal?: number[] | null;
+  mid_est?: number[] | null;
+  // a third basin turned up in the ball: possibly a junction, where one normal is a poor summary
+  junction_hint?: boolean;
+}
+
 export interface CascadeCrossing {
   cid: number;
   weights: number[];
@@ -362,6 +388,11 @@ export interface CascadeCrossing {
   hires?: boolean;
   hires_width?: number | null;
   split_from?: number | null;
+  // cloud mode of that pass: which mode refined this crossing ("cloud"; null in bracket mode),
+  // the ball's summary, and its points for the map -- [weights, side, image index] each
+  hires_mode?: string | null;
+  cloud?: CascadeCloud | null;
+  cloud_pts?: [number[], string, number][] | null;
 }
 
 export interface CascadePatch {
@@ -404,6 +435,11 @@ export interface CascadeStatus {
   hires?: boolean;
   hires_top_pct?: number;
   hires_factor?: number;
+  // which mode it ran in ("bracket" = finer along the chord, "cloud" = a ball around the
+  // crossing), and for the cloud how many points per crossing at what radius
+  hires_mode?: string;
+  hires_cloud_n?: number;
+  hires_cloud_r?: number;
   // false = detection only: the crossings were never bisected or scored, so their positions
   // carry bracket precision (+-stride/2) and b/significant mean nothing
   certify?: boolean;
