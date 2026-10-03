@@ -98,9 +98,11 @@ class CascadeRun:
     # focused exploration: confine the survey to a ball around this recipe
     focus: list | None = None
     focus_radius: float = 0.18
-    # tier-1 detection at fewer denoising steps (gated 2026-08-23: 93% crossing
-    # recall, 94% certified recall vs full steps, 1 spurious; bracket endpoints
-    # are re-rendered at full fidelity before bisection). None = full steps.
+    # tier-1 detection at fewer denoising steps; bracket endpoints are re-rendered at full
+    # fidelity before bisection. None = full steps. CORRECTED 2026-10-03: the earlier
+    # "gated 2026-08-23: 93% / 94% recall" note had no results file; h27 (search_problem/outputs/h27_staged_probes/RESULTS.md)
+    # measured that 4-step probes at COS_T detect only 23% (k=4) / 20% (k=9) of FULL-fidelity
+    # crossings (precision 0.47): the 4-step render changes less across boundaries.
     probe_steps: int | None = 4
     # how chord probes read their label (services/staged.py). "steps" = a complete probe_steps
     # image per probe (the behaviour above, unchanged). "staged" = the full schedule to step

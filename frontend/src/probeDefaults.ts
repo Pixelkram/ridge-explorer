@@ -11,8 +11,10 @@
  *   'staged' -- the full 8-step schedule up to step t, DINOv2 of the PREDICTED clean image x̂0;
  *               segments whose two readouts are >= theta apart (cosine distance) are resumed
  *               from the cached latent to the full image, so their labels are exact. Crossings
- *               are only ever claimed between two finished probes. theta = 0.10 is provisional
- *               until the h27 calibration replaces it.
+ *               are only ever claimed between two finished probes. theta = 0.047 is the h27
+ *               calibration at t = 4 (k = 4: ~90% of full-fidelity crossings at ~0.72 of a full
+ *               image per probe; today's 4-step probes find ~23% at ~0.58). The DEFAULT mode stays
+ *               'steps' by h27's pre-registered rule (staged missed its AUC bar) until the owner decides.
  */
 export type ProbeMode = 'steps' | 'staged';
 
@@ -27,7 +29,7 @@ export interface ProbeDefaults {
 export const PROBE_DEFAULTS: ProbeDefaults = {
   mode: 'steps',
   stagedT: 4,
-  stagedTheta: 0.10,
+  stagedTheta: 0.047,
 };
 
 export const PROBE_MODES: { value: ProbeMode; label: string }[] = [
@@ -39,7 +41,8 @@ export const PROBE_MODES: { value: ProbeMode; label: string }[] = [
 export const STAGED_EXPLAINER =
   'Staged: each probe runs the full schedule to step t and reads the predicted image; only '
   + 'neighbours whose readouts differ by ≥ θ are finished (exact full-fidelity labels), and '
-  + 'crossings are claimed between finished probes only. θ is provisional (h27).';
+  + 'crossings are claimed between finished probes only. θ = 0.047 from h27: ~90% of full-fidelity '
+  + 'crossings at k = 4, vs ~23% for 4-step probes.';
 
 /** Nominal image-eq of a staged probe: readout t/S, plus (S - t)/S when it is finished. */
 export function stagedProbeCost(t: number, steps: number, resumedShare: number): number {

@@ -445,17 +445,18 @@ class CascadeStartRequest(BaseModel):
     # (requires pinned prompts so the weights refer to a known basis)
     focus: list[float] | None = None
     focus_radius: float = Field(0.18, gt=0.02, le=1.0)
-    # tier-1 detection steps (gated: 93%/94% recall at 4 vs 8; ~2x faster probes).
-    # null = probe at full fidelity.
+    # tier-1 detection steps (~2x faster probes; null = probe at full fidelity). NOTE h27
+    # (2026-10-03): at COS_T these 4-step probes find only ~23% of full-fidelity crossings;
+    # the old "93%/94% recall" note was unsourced. probe_mode "staged" is the exact alternative.
     probe_steps: int | None = Field(4, ge=1, le=50)
     # how chord probes read their label. "steps" (default, unchanged): a complete probe_steps-step
     # image per probe. "staged": the full-fidelity schedule up to step staged_t, DINOv2 of the
     # predicted clean image x̂0; segments whose x̂0 readouts are >= staged_theta apart are resumed
     # from the cached latent to the full image (exact labels) and only those are tested for
-    # crossings (services/staged.py). staged_theta is provisional until the h27 calibration.
+    # crossings (services/staged.py). staged_theta 0.047 = the h27 calibration at t = 4 (~90% recall at k = 4).
     probe_mode: Literal["steps", "staged"] = "steps"
     staged_t: int = Field(4, ge=1, le=49)
-    staged_theta: float = Field(0.10, gt=0.0, lt=2.0)
+    staged_theta: float = Field(0.047, gt=0.0, lt=2.0)
     # chord probe spacing in weight space; 0.025 (~1 fine cell) is the protocol of record.
     # Finer resolves boundaries closer together than one stride at a cost ~1/stride; coarser
     # merges them. Detection only -- the continuation walk's corrector spacing is unaffected.
@@ -1432,7 +1433,7 @@ class DeskStartRequest(BaseModel):
     # schedule, resume only the segments whose x̂0 readouts differ by >= staged_theta
     probe_mode: Literal["steps", "staged"] = "steps"
     staged_t: int = Field(4, ge=1, le=49)
-    staged_theta: float = Field(0.10, gt=0.0, lt=2.0)
+    staged_theta: float = Field(0.047, gt=0.0, lt=2.0)
     height: int = Field(config.DEFAULT_HEIGHT, ge=64, le=1024)
     width: int = Field(config.DEFAULT_WIDTH, ge=64, le=1024)
     guidance_scale: float = Field(config.DEFAULT_GUIDANCE_SCALE, ge=0.0, le=20.0)
