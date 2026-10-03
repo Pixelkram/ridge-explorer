@@ -24,6 +24,8 @@ import type { DeskStatus, DeskLine } from './api/types';
 import { divColor } from './CascadeMap';
 import { useHandoff } from './stores/handoffStore';
 import { feature } from './featureFlags';
+import ProbeModeControl from './components/ProbeModeControl';
+import { PROBE_DEFAULTS, type ProbeMode } from './probeDefaults';
 
 const BOX: React.CSSProperties = {
   background: '#16213e', border: '1px solid #333', borderRadius: 4,
@@ -49,6 +51,7 @@ const TRACK_H = 46;
 const PROBE_COST = 0.5;
 const REFINE_MAX_PER_LINE = 4;
 const REFINE_IMAGES = 5;
+const REFINE_ROUNDS = 3;
 const MAX_REQUEST = 300;
 const READOUT_LABEL = 'exploratory — calibration pending (h26a)';
 
@@ -72,15 +75,23 @@ function linePoint(w0: number[], i: number, a: number): number[] {
   return w;
 }
 
-/** desk.projected_cost: k x samples cheap probes + the mix, + refine's worst case. */
+/** desk.projected_cost: k x samples cheap probes + the mix, + refine's worst case. Staged:
+ *  every sample read out (t/S) and, worst case, finished ((S-t)/S), the mix read out and
+ *  finished, refine = its REFINE_ROUNDS midpoints (the change's ends are finished already). */
 function projection(k: number, dalpha: number, refine: boolean, cheap: boolean,
-                    cachedLines = 0) {
+                    cachedLines = 0, staged: { t: number; steps: number } | null = null) {
   const n = Math.ceil(1 / dalpha - 1e-9) + 1;
-  const unit = cheap ? PROBE_COST : 1;
   const lines = Math.max(0, k - cachedLines);
+  if (staged) {
+    const probes = lines * n + 1;     // t/S + (S-t)/S per sample, worst case, + the mix
+    const ref = refine ? lines * REFINE_MAX_PER_LINE * REFINE_ROUNDS : 0;
+    return { n, probes, ref, total: probes + ref,
+             readouts: (lines * n * staged.t) / staged.steps };
+  }
+  const unit = cheap ? PROBE_COST : 1;
   const probes = unit * (lines * n + 1);
   const ref = refine ? lines * REFINE_MAX_PER_LINE * REFINE_IMAGES : 0;
-  return { n, probes, ref, total: probes + ref };
+  return { n, probes, ref, total: probes + ref, readouts: 0 };
 }
 
 function parseWeights(text: string, k: number): { w: number[] | null; err: string | null } {
@@ -171,15 +182,22 @@ function Slider({ line, deskId, drag, onDrag, onRelease, onImage }: {
       {/* sample-to-sample divergence, on the maps' own ramp */}
       {line.divs.map((d, t) => (
         <div key={`d${t}`}
+             title={line.resumed && line.resumed.length
+               ? (line.resumed[t] && line.resumed[t + 1] ? 'exact (both samples finished)'
+                 : 'x̂0 readout only (not finished)') : undefined}
              style={{ position: 'absolute', left: x(line.alphas[t]), top: TRACK_H + 2,
                       width: Math.max(1, x(line.alphas[t + 1]) - x(line.alphas[t])), height: 4,
-                      background: d === null ? '#1a1a2e' : divColor(d) }} />
+                      background: d === null ? '#1a1a2e' : divColor(d),
+                      // staged: a faint bar is the x̂0 readout of unfinished samples
+                      opacity: line.resumed && line.resumed.length
+                        && !(line.resumed[t] && line.resumed[t + 1]) ? 0.45 : 1 }} />
       ))}
       {/* WeightLifter's switch lines */}
       {line.flips.map((f, j) => (
         <div key={`f${j}`}
              title={`change at α ${f.alpha.toFixed(3)} (±${(f.width / 2).toFixed(3)}): 1 − cos `
-                    + `${f.div.toFixed(2)} on the cheap field`
+                    + `${f.div.toFixed(2)} ${line.resumed && line.resumed.length
+                      ? 'between finished samples (exact labels)' : 'on the cheap field'}`
                     + (f.refined ? `; full fidelity ${f.full_div?.toFixed(2) ?? '—'}`
                       + (f.confirmed === false ? ' — NOT confirmed at full fidelity' : '') : '')}
              style={{ position: 'absolute', left: x(f.alpha) - 2, top: -2, width: 4,
@@ -216,6 +234,9 @@ export default function DeskPanel() {
   const [seed, setSeed] = useState(42);
   const [steps, setSteps] = useState(8);
   const [cheap, setCheap] = useState(true);
+  const [probeMode, setProbeMode] = useState<ProbeMode>(PROBE_DEFAULTS.mode);
+  const [stagedT, setStagedT] = useState(PROBE_DEFAULTS.stagedT);
+  const [stagedTheta, setStagedTheta] = useState(PROBE_DEFAULTS.stagedTheta);
   const [deskId, setDeskId] = useState<string | null>(null);
   const [status, setStatus] = useState<DeskStatus | null>(null);
   const [kick, setKick] = useState(0);
@@ -250,7 +271,9 @@ export default function DeskPanel() {
 
   const prompts = promptText.split('\n').map((t) => t.trim()).filter(Boolean);
   const mix = parseWeights(mixText, k);
-  const proj = projection(k, dalpha, refine, cheap);
+  const stagedNow = probeMode === 'staged'
+    ? { t: Math.min(stagedT, Math.max(1, steps - 1)), steps } : null;
+  const proj = projection(k, dalpha, refine, cheap, 0, stagedNow);
   const tooBig = proj.total > MAX_REQUEST;
   const running = status?.status === 'running' || status?.status === 'pending';
 
@@ -261,7 +284,9 @@ export default function DeskPanel() {
     if (mix.err) { setErr(mix.err); return; }
     try {
       const r = await deskStart({ prompts, w0: mix.w, dalpha, refine, seed, steps,
-                                  probe_steps: cheap ? 4 : null });
+                                  probe_steps: cheap ? 4 : null, probe_mode: probeMode,
+                                  staged_t: stagedNow ? stagedNow.t : stagedT,
+                                  staged_theta: stagedTheta });
       setStatus(null);
       setDeskId(r.desk_id);
       setKick((x) => x + 1);
@@ -286,8 +311,11 @@ export default function DeskPanel() {
 
   const lines = status?.lines ?? [];
   const sk = status?.k ?? k;
+  const runStaged = status
+    ? (status.probe_mode === 'staged' ? { t: status.staged_t ?? stagedT, steps: status.steps } : null)
+    : stagedNow;
   const moveProj = projection(sk, status?.dalpha ?? dalpha, refine,
-                              status ? status.probe_steps !== null : cheap, 1);
+                              status ? status.probe_steps !== null : cheap, 1, runStaged);
   const preview = drag && status ? linePoint(status.w0, drag.line, drag.alpha) : null;
 
   return (
@@ -331,11 +359,16 @@ export default function DeskPanel() {
                            onChange={(e) => setSteps(Math.max(1, Math.min(50,
                              Number(e.target.value))))} />
             </label>
-            <label className="rx-focus" title="samples on the cheap field (4 denoising steps), as the Cascade's chord probes are; off = full fidelity, double the cost"
-                   style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-              <input type="checkbox" checked={cheap} onChange={(e) => setCheap(e.target.checked)} />
+            <label className="rx-focus" title={"samples on the cheap field (4 denoising steps), as the Cascade's chord probes are; off = full fidelity, double the cost"
+                                               + (probeMode === 'staged' ? ' — unused in staged mode' : '')}
+                   style={{ display: 'inline-flex', alignItems: 'center', gap: 4,
+                            color: probeMode === 'staged' ? '#667' : undefined }}>
+              <input type="checkbox" checked={cheap} disabled={probeMode === 'staged'}
+                     onChange={(e) => setCheap(e.target.checked)} />
               cheap probes
             </label>
+            <ProbeModeControl mode={probeMode} t={stagedT} theta={stagedTheta} steps={steps}
+                              onMode={setProbeMode} onT={setStagedT} onTheta={setStagedTheta} />
             <button onClick={start} disabled={tooBig}
                     style={{ background: tooBig ? '#333' : '#0f3460', color: '#fff',
                              border: `1px solid ${ACCENT}`, borderRadius: 3, padding: '3px 12px',
@@ -372,8 +405,10 @@ export default function DeskPanel() {
           <div style={{ color: '#667', marginTop: 4, fontSize: 11 }}>
             estimate: {k} sliders × {proj.n} samples + the mix ={' '}
             <span style={{ color: tooBig ? WARN : '#aeb6dd' }}>
-              ≈{proj.probes.toFixed(1)} image-eq
+              {stagedNow ? '≤' : '≈'}{proj.probes.toFixed(1)} image-eq
             </span>
+            {stagedNow && ` (staged: readouts ≈${proj.readouts.toFixed(1)}, the rest only if every `
+                         + 'segment were flagged)'}
             {refine && ` + refine ≤ ${proj.ref} full images (at most ${REFINE_MAX_PER_LINE} changes `
                        + `per slider × ${REFINE_IMAGES})`}
             {' '}· each later move ≤ {moveProj.total.toFixed(1)} (the dragged slider is kept)
@@ -399,6 +434,15 @@ export default function DeskPanel() {
                   {' '}(this mix {status.position_cost.toFixed(1)})
                 </span>
                 <span>Δα {status.dalpha}{status.refine ? ' · refined to Δα/8' : ''}</span>
+                {status.probe_mode === 'staged' && status.staged && (
+                  <span title="staged readout: every sample read at step t of the full schedule; samples of segments whose readouts differ by ≥ θ (and the mix) finished from their cached latent — changes are claimed between finished samples only">
+                    staged t {status.staged_t}/{status.steps} · θ {status.staged_theta}
+                    {' · '}finished {status.staged.resumed + status.staged.from_scratch}/
+                    {status.staged.readouts}
+                    {status.staged.resumed_share !== null
+                      && ` (${Math.round(100 * status.staged.resumed_share)} %)`}
+                  </span>
+                )}
                 {msg && <span style={{ color: ACCENT }}>{msg}</span>}
                 {feature('microscope') && status.w0.length > 0 && (
                   <button className="rx-focus"

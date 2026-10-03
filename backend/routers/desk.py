@@ -27,6 +27,7 @@ from backend.models import (DeskStartRequest, DeskMoveRequest, DeskStartResponse
                             DeskPositionRef)
 from backend.services import desk as dk
 from backend.services import gridfree as gf
+from backend.services import staged as st
 from backend.services.cascade import COS_T
 from backend.cache.thumbnail_cache import ThumbnailStore
 
@@ -75,13 +76,16 @@ async def start(req: DeskStartRequest, request: Request):
     k = len(req.prompts)
     w0 = np.full(k, 1.0 / k) if req.w0 is None else _recipe(req.w0, k)
     n = len(dk.alpha_grid(req.dalpha))
-    total, rows = dk.projected_cost(k, n, req.refine, req.probe_steps)
+    total, rows = dk.projected_cost(k, n, req.refine, req.probe_steps, probe_mode=req.probe_mode,
+                                    staged_t=req.staged_t, steps=req.steps)
     if total > dk.MAX_REQUEST_IMAGE_EQ:
         raise HTTPException(status_code=400, detail=_refuse(total, rows, "this desk"))
     rid = uuid.uuid4().hex[:8]
     run = dk.DeskRun(run_id=rid, prompts=list(req.prompts), seed=req.seed, steps=req.steps,
                      height=req.height, width=req.width, guidance_scale=req.guidance_scale,
-                     probe_steps=req.probe_steps, dalpha=req.dalpha, refine=req.refine)
+                     probe_steps=req.probe_steps, dalpha=req.dalpha, refine=req.refine,
+                     probe_mode=req.probe_mode, staged_t=req.staged_t,
+                     staged_theta=req.staged_theta)
     run.thumbs = ThumbnailStore(app.state.cache)
     pos, _ = dk.add_position(run, w0, req.dalpha, req.refine)
     _runs(app)[rid] = run
@@ -121,8 +125,7 @@ async def move(desk_id: str, req: DeskMoveRequest, request: Request):
         return DeskStartResponse(desk_id=desk_id, status="complete", position=old.pid,
                                  cost_image_eq=0.0, cached_lines=k)
     n_cached = run.cached_lines(w0, dalpha, refine)
-    total, rows = dk.projected_cost(k, len(dk.alpha_grid(dalpha)), refine, run.probe_steps,
-                                    n_cached_lines=n_cached, w0_cached=run.w0_cached(w0))
+    total, rows = run.projected(w0, dalpha, refine, n_cached)
     if total > dk.MAX_REQUEST_IMAGE_EQ:
         raise HTTPException(status_code=400, detail=_refuse(total, rows, "this move"))
     if run.cost_image_eq + total > dk.MAX_SESSION_IMAGE_EQ:
@@ -144,7 +147,8 @@ def _line(run, pos, ln, cached):
         degenerate=bool(ln["degenerate"]), cached=bool(cached), status=ln["status"],
         alphas=list(ln["alphas"]), images=list(ln["images"]), divs=list(ln["divs"]),
         flips=[DeskFlip(**f) for f in ln["flips"]],
-        segments=[DeskSegment(**s) for s in ln["segments"]])
+        segments=[DeskSegment(**s) for s in ln["segments"]],
+        resumed=list(ln.get("resumed", [])), flagged=list(ln.get("flagged", [])))
 
 
 @router.get("/{desk_id}/status", response_model=DeskStatus)
@@ -164,6 +168,10 @@ async def status(desk_id: str, request: Request):
     return DeskStatus(
         desk_id=run.run_id, status=run.status, k=run.k, prompts=list(run.prompts),
         seed=run.seed, steps=run.steps, probe_steps=run.probe_steps,
+        probe_mode=run.probe_mode,
+        staged_t=int(run.staged_t) if run.staged else None,
+        staged_theta=float(run.staged_theta) if run.staged else None,
+        staged=st.ledger(run).report() if run.staged else None,
         position=pos.pid if pos else -1, w0=list(pos.w0) if pos else [],
         w0_image=pos.w0_image if pos else -1, dalpha=pos.dalpha if pos else run.dalpha,
         refine=pos.refine if pos else run.refine, lines=lines, readout=readout,

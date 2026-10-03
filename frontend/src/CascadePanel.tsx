@@ -18,6 +18,8 @@ import CascadeMap from './CascadeMap';
 import { useProbeStore } from './stores/probeStore';
 import { useHandoff } from './stores/handoffStore';
 import { feature } from './featureFlags';
+import ProbeModeControl from './components/ProbeModeControl';
+import { PROBE_DEFAULTS, type ProbeMode } from './probeDefaults';
 
 const BOX: React.CSSProperties = {
   background: '#16213e', border: '1px solid #333', borderRadius: 4,
@@ -28,6 +30,9 @@ const NUM: React.CSSProperties = {
   borderRadius: 3, padding: '2px 4px', fontSize: 12,
 };
 const ACCENT = '#4ecca3';
+/** the Cascade's full-fidelity schedule (config.DEFAULT_NUM_INFERENCE_STEPS; the panel never
+ *  overrides it), which a staged probe reads part-way down */
+const FULL_STEPS = 8;
 const WARN = '#e94560';
 const CELL = 0.0236;         // one fine patch cell -- the unit the stride slider reads out in
 const STRIDE_REF = 0.025;    // chord probe spacing of record; the cost model below is quoted at it
@@ -245,6 +250,9 @@ export default function CascadePanel() {
   const [hiresCloudK, setHiresCloudK] = useState(4);
   const [trace, setTrace] = useState(false);
   const [certify, setCertify] = useState(false);
+  const [probeMode, setProbeMode] = useState<ProbeMode>(PROBE_DEFAULTS.mode);
+  const [stagedT, setStagedT] = useState(PROBE_DEFAULTS.stagedT);
+  const [stagedTheta, setStagedTheta] = useState(PROBE_DEFAULTS.stagedTheta);
   const [nPatches, setNPatches] = useState(4);
   const [seed, setSeed] = useState(42);
   const [promptText, setPromptText] = useState('');
@@ -272,11 +280,12 @@ export default function CascadePanel() {
     setDetail({ thumb, title, rows, weights: null, loading: true });
     try {
       const info = await cascadePointInfo(runId, thumb);
+      const extra: [string, string][] = [];
+      if (info.div !== null) extra.push(['local divergence', info.div.toFixed(2)]);
+      // staged runs: an unfinished probe's image is its x̂0 readout, not a finished image
+      if (info.preview) extra.push(['image', 'x̂0 preview (probe not finished — no label)']);
       setDetail((d) => d && d.thumb === thumb
-        ? { ...d, weights: info.weights,
-            rows: info.div !== null
-              ? [...rows, ['local divergence', info.div.toFixed(2)]] : rows,
-            loading: false }
+        ? { ...d, weights: info.weights, rows: [...rows, ...extra], loading: false }
         : d);
     } catch {
       setDetail((d) => d && d.thumb === thumb ? { ...d, loading: false } : d);
@@ -296,6 +305,9 @@ export default function CascadePanel() {
         n_chords: nChords,
         n_patches: nPatches,
         certify,
+        probe_mode: probeMode,
+        staged_t: stagedT,
+        staged_theta: stagedTheta,
         stride,
         branch,
         depth,
@@ -377,6 +389,9 @@ export default function CascadePanel() {
         n_chords: nChords,
         n_patches: nPatches,
         certify,
+        probe_mode: probeMode,
+        staged_t: stagedT,
+        staged_theta: stagedTheta,
         stride,
         branch,
         depth,
@@ -606,6 +621,9 @@ export default function CascadePanel() {
                 </label>
               </>
             )}
+            <ProbeModeControl mode={probeMode} t={stagedT} theta={stagedTheta}
+                              steps={FULL_STEPS} onMode={setProbeMode} onT={setStagedT}
+                              onTheta={setStagedTheta} />
             <label className="rx-focus" title={CERTIFY_TIP}
                    style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
               <input type="checkbox" checked={certify}
@@ -665,17 +683,24 @@ export default function CascadePanel() {
               ? 0.5 * hiresSel * (hiresMode === 'cloud' ? hiresCloudN : hiresFactor - 1)
               : 0;
             // detection only: the probes are the whole bill -- nothing is rebracketed,
-            // bisected, scored or refined
-            const imgs = Math.round(hiresImgs + (certify
-              ? probeImgs + cross * 4 + (cross + 12) * 8 + nPatches * 25
+            // bisected, scored or refined. Staged: nothing is rebracketed either (the bracket
+            // ends are finished probes), and the high-res pass renders at full fidelity
+            const staged = probeMode === 'staged';
+            const imgs = Math.round((staged ? 2 : 1) * hiresImgs + (certify
+              ? probeImgs + (staged ? 0 : cross * 4) + (cross + 12) * 8 + nPatches * 25
               : probeImgs));
-            // probes run at 4 denoising steps (gated: 93%/94% recall) ~ half price
-            const mins = Math.max(1, Math.round((imgs - probeImgs * 0.5) / 8 / 60));
+            // steps: probes run at 4 denoising steps (gated: 93%/94% recall) ~ half price.
+            // staged: a probe costs t/S to read and (S-t)/S more if finished -- quoted at the
+            // upper end (every probe finished) since the finished share depends on the field
+            const mins = Math.max(1, Math.round((imgs - (staged ? 0 : probeImgs * 0.5)) / 8 / 60));
             return (
               <div style={{ color: '#667', marginTop: 4, fontSize: 11 }}>
                 estimate: ≤~{imgs} images · ≤~{mins} min · ~{cross} crossings
                 {!certify && ' — detection only: uncertified, bracket-precision positions,'
                   + ' no patches and no walks'}
+                {probeMode === 'staged' && ` — staged probes: time quoted as if every probe were`
+                  + ` finished; the readouts alone are ≈${Math.round(probeImgs * stagedT / FULL_STEPS)}`
+                  + ` image-eq, each finished probe adds ${((FULL_STEPS - stagedT) / FULL_STEPS).toFixed(2)}`}
                 {hires && (hiresMode === 'cloud'
                   ? ` — final high-res pass: ${hiresCloudN} random points within`
                     + ` ${hiresCloudR.toFixed(3)} of the top ${hiresTopPct} % of crossings`
@@ -749,6 +774,21 @@ export default function CascadePanel() {
                       const sp = status.crossings.filter((c) => c.split_from != null).length;
                       return sp > 0 ? ` · ${sp} split` : '';
                     })()}
+                  </span>
+                )}
+                {status.probe_mode === 'staged' && status.staged && (
+                  <span title={'staged readout: every probe read at step t of the full schedule; '
+                               + 'probes of segments whose readouts differ by ≥ θ finished from '
+                               + 'their cached latent (exact labels). image-eq = measured worker '
+                               + 'time over one full image' + (status.staged.rebracket_skipped
+                                 ? `; ${status.staged.rebracket_skipped} rebracket renders skipped`
+                                 : '')}>
+                    staged t {status.staged_t}/{status.staged.steps} · θ {status.staged_theta}
+                    {' · '}finished {status.staged.resumed + status.staged.from_scratch}/
+                    {status.staged.readouts}
+                    {status.staged.resumed_share !== null
+                      && ` (${Math.round(100 * status.staged.resumed_share)} %)`}
+                    {' · '}{status.staged.image_eq.toFixed(1)} image-eq
                   </span>
                 )}
                 {status.bg_p95 !== null && (

@@ -277,6 +277,23 @@ not grow with k.
   or `line` + `alpha`), `GET /api/desk/{desk}/status`, `POST /api/desk/{desk}/cancel`,
   `GET /api/desk/{desk}/image/{index}`; `tests/desk_test.py`.
 
+## Staged early-readout probes (Cascade chords, desk lines)
+
+`probe_mode` on `POST /api/cascade/start` and `POST /api/desk/start`: `"steps"` (default, unchanged)
+renders a complete 4-step-schedule image per probe; `"staged"` (`backend/services/staged.py`) runs
+the full 8-step schedule only to step `staged_t` (4), reads DINOv2 of the predicted clean image
+x̂0 = x_t − σ_t·v̂_t, and caches the latent (main-process LRU, 2 GiB). Neighbouring probes whose
+readouts are ≥ `staged_theta` apart (0.10, provisional until the h27 calibration) are resumed from
+the cached latent to step 8 — exactly the full-fidelity image (`tests/staged_parity_cpu.py`,
+bit-identical to `pipe()` on CPU) — and crossings are tested with COS_T between finished probes
+only; unflagged segments are never finished. With certify on, those brackets skip the rebracket.
+Status reports the readouts, the resumed share and the image-eq spent (measured worker time).
+The panels' default mode lives in `frontend/src/probeDefaults.ts`. Research routes for h27:
+`POST /api/probe/staged-trace` (one chord: x̂0 readouts after every step, the final image, the
+4-step image, the Fast-Scan 1-pass distances, per-component timings), `POST /api/probe/staged-parity`
+(readout → cached latent → resume vs the direct run), their `GET …/{job_id}` polls, and
+`GET /api/probe/staged-cache`; formats in `backend/routers/staged.py`; `tests/staged_test.py`.
+
 ## Architecture
 
 See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the full design. In brief:

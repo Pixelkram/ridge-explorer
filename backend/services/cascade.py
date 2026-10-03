@@ -21,6 +21,7 @@ import time
 import numpy as np
 
 from backend.services.gpu_pool import DiscoverTask
+from backend.services import staged as st
 
 # Calibration of record (search_problem, 2026-08-22)
 STRIDE = 0.025          # chord probe spacing (E92 used 0.02; 0.025 trims ~20% cost)
@@ -67,6 +68,9 @@ class Crossing:
     # cloud mode ran here.
     cloud: dict | None = None
     cloud_pts: list | None = None
+    # both bracket ends carry FULL-fidelity labels already (staged probes: resumed images), so the
+    # certify half's rebracket has nothing to re-render for this crossing
+    exact: bool = False
 
 
 @dataclass
@@ -98,6 +102,15 @@ class CascadeRun:
     # recall, 94% certified recall vs full steps, 1 spurious; bracket endpoints
     # are re-rendered at full fidelity before bisection). None = full steps.
     probe_steps: int | None = 4
+    # how chord probes read their label (services/staged.py). "steps" = a complete probe_steps
+    # image per probe (the behaviour above, unchanged). "staged" = the full schedule to step
+    # staged_t, DINOv2 of the predicted clean image x̂0, the latent cached; chord segments whose
+    # x̂0 readouts are >= staged_theta apart have both probes RESUMED to the full image, and only
+    # those exact labels are tested against COS_T. probe_steps is unused for chords then, and the
+    # high-resolution pass renders at full fidelity (its probes compare against exact ends).
+    probe_mode: str = "steps"
+    staged_t: int = st.T_DEFAULT
+    staged_theta: float = st.THETA_DEFAULT
     # full pipeline per detected crossing (rebracket, bisection, coupled-seed B, patches), or
     # detection alone. OFF by default: detection leaves every crossing on its cheap bracket --
     # mid quoted at bracket precision (+-stride/2), b None, significant False -- and skips
@@ -174,6 +187,13 @@ class CascadeRun:
     recent_thumbs: list = field(default_factory=list)   # last ~12 generated indices
     probe_div: list = field(default_factory=list)       # local divergence per cloud point
     _geo_pos: dict = field(default_factory=dict, repr=False)  # gi -> index in probe_geo
+    # staged probes: x̂0 readout embedding, recipe and latent-cache key per read-out image index;
+    # the indices whose thumbnail is still the x̂0 preview (not a finished image); the cost ledger
+    xhat: dict = field(default_factory=dict, repr=False)
+    staged_w: dict = field(default_factory=dict, repr=False)
+    staged_lat: dict = field(default_factory=dict, repr=False)
+    staged_preview: set = field(default_factory=set, repr=False)
+    staged_ledger: object = field(default=None, repr=False)
     # Two concurrent walks (or a walk racing a status poll) share this run; the index
     # allocator is the one read-modify-write that must be atomic.
     _lock: object = field(default_factory=threading.Lock, repr=False)
@@ -557,7 +577,7 @@ def _hires_cloud(app, run, pool, sel_x, rng):
             pts.append(p)
             meta.append(si)
     run.phase_total, run.phase_done = len(pts), 0
-    gh = evaluate(app, run, pool, pts, run.seed, "hires", steps=run.probe_steps)
+    gh = evaluate(app, run, pool, pts, run.seed, "hires", steps=_extra_steps(run))
     if run.status != "running":
         return
     for si, p, gi in zip(meta, pts, gh):
@@ -1358,6 +1378,59 @@ def _set_div(run, gi, d):
         run.probe_div[pos] = float(d) if cur is None else max(cur, float(d))
 
 
+def _staged(run):
+    return getattr(run, "probe_mode", "steps") == "staged"
+
+
+def _extra_steps(run):
+    """Steps for the high-resolution pass's probes: the cheap field beside cheap chord probes,
+    full fidelity beside staged ones (their bracket ends are exact labels, and a sub-probe must be
+    read on the same field as the ends it is compared with)."""
+    return None if _staged(run) else run.probe_steps
+
+
+def _staged_chords(app, run, pool, pts, meta, label, skip_first):
+    """The chord probes of one generation in staged mode: x̂0 readouts of every probe, then the
+    flagged segments' probes resumed to full fidelity (services/staged.py). Returns one image
+    index per probe like evaluate(); only the RESUMED ones carry a label (run.embeddings), so
+    _detect tests exactly the segments whose two ends were finished.
+
+    The map is coloured by the x̂0 divergence as readouts land; a resumed probe's colour is then
+    cleared so _detect's exact divergences replace it."""
+    arrived = {}
+
+    def _live(li, gi):
+        arrived[li] = gi
+        ci, ii = meta[li]
+        for nb in (li - 1, li + 1):
+            gj = arrived.get(nb)
+            if gj is None:
+                continue
+            cj, jj = meta[nb]
+            if cj != ci or abs(jj - ii) != 1:
+                continue
+            e1, e2 = run.xhat.get(gi), run.xhat.get(gj)
+            if e1 is not None and e2 is not None:
+                dd = _cosd(e1, e2)
+                _set_div(run, gi, dd)
+                _set_div(run, gj, dd)
+
+    gidx = st.readout(app, run, pool, pts, label, on_arrival=_live)
+    if run.status != "running":
+        return gidx
+    per = {}
+    for li, (ci, i) in enumerate(meta):
+        per.setdefault(ci, []).append((i, li))
+    seqs = [[gidx[li] for _i, li in sorted(per[ci])] for ci in sorted(per)]
+    _flags, sel = st.run_sequences(app, run, pool, seqs, label + "r",
+                                   skip_first=[skip_first] * len(seqs))
+    for gi in sel:
+        pos = run._geo_pos.get(gi)
+        if pos is not None and gi in run.embeddings:
+            run.probe_div[pos] = None
+    return gidx
+
+
 def run_cascade(app, run, pool):
     """The full cascade. Called from the router's guarded thread body."""
     rng = np.random.default_rng(run.seed if run.chord_seed is None else run.chord_seed)
@@ -1544,9 +1617,13 @@ def run_cascade(app, run, pool):
                     _set_div(run, gi, dd)
                     _set_div(run, gj, dd)
 
-        gidx = evaluate(app, run, pool, chord_pts, run.seed,
-                        "chords" if g == 0 else f"chords{g}",
-                        on_arrival=_live_div, steps=run.probe_steps)
+        if _staged(run):
+            gidx = _staged_chords(app, run, pool, chord_pts, chord_meta,
+                                  "chords" if g == 0 else f"chords{g}", skip_first=g > 0)
+        else:
+            gidx = evaluate(app, run, pool, chord_pts, run.seed,
+                            "chords" if g == 0 else f"chords{g}",
+                            on_arrival=_live_div, steps=run.probe_steps)
         if run.status != "running":
             return
         found_prev = _detect(gidx, chord_meta, g, skip_first=g > 0)
@@ -1619,7 +1696,7 @@ def run_cascade(app, run, pool):
                     _set_div(run, gj, dd)
 
         gh = evaluate(app, run, pool, pts, run.seed, "hires",
-                      on_arrival=_live_hires, steps=run.probe_steps)
+                      on_arrival=_live_hires, steps=_extra_steps(run))
         if run.status != "running":
             return
         by_sel = {}
@@ -1651,15 +1728,35 @@ def run_cascade(app, run, pool):
             f"(top {run.hires_top_pct} %), ×{f}, {n_split} split, {n_diffuse} diffuse; "
             f"median width {mb:.4f}→{ma:.4f}")
 
-    if cand and run.certify and run.probe_steps is not None and run.probe_steps != run.steps:
-        # detection ran on the cheap field; hand bisection full-fidelity side images
-        ws = []
+    if _staged(run):
+        # every bracket a staged survey quotes sits between two RESUMED probes (or full-fidelity
+        # high-res sub-probes): its side labels are already the full-fidelity ones
         for x in cand:
+            x.exact = True
+        lg = st.ledger(run)
+        rep = lg.report()
+        run.notes.append(
+            f"staged readout at step {run.staged_t}/{run.steps}, θ {run.staged_theta:g}: "
+            f"{rep['flagged']}/{rep['segments']} segments flagged, {rep['resumed'] + rep['from_scratch']}"
+            f"/{rep['readouts']} probes resumed"
+            + (f" ({100 * rep['resumed_share']:.0f} %)" if rep['resumed_share'] is not None else "")
+            + f", {rep['image_eq']:.1f} image-eq; crossings tested on exact labels only")
+    if cand and run.certify and (_staged(run) or (run.probe_steps is not None
+                                                  and run.probe_steps != run.steps)):
+        # detection ran on the cheap field; hand bisection full-fidelity side images -- except for
+        # brackets whose ends already are full-fidelity images (staged probes): nothing to redo
+        todo = [x for x in cand if not x.exact]
+        if len(todo) < len(cand):
+            st.ledger(run).rebracket_skipped += len(cand) - len(todo)
+            run.notes.append(f"rebracket skipped for {len(cand) - len(todo)} brackets whose ends "
+                             "are resumed full-fidelity images")
+        ws = []
+        for x in todo:
             ws.append(np.clip(x.wa, 0, None))
             ws.append(np.clip(x.wb, 0, None))
         run.phase_total += len(ws)
-        gi2 = evaluate(app, run, pool, ws, run.seed, "rebracket")
-        for i, x in enumerate(cand):
+        gi2 = evaluate(app, run, pool, ws, run.seed, "rebracket") if ws else []
+        for i, x in enumerate(todo):
             ea = run.embeddings.get(gi2[2 * i]) if gi2[2 * i] is not None else None
             eb = run.embeddings.get(gi2[2 * i + 1]) if gi2[2 * i + 1] is not None else None
             if ea is not None:

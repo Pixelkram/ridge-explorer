@@ -9,11 +9,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from backend import config
-from backend.services.gpu_pool import GPUPool, CellResult, LatentResult, LatentBatchResult, ProbeResult
+from backend.services.gpu_pool import GPUPool, CellResult, LatentResult, LatentBatchResult, ProbeResult, StagedResult
 from backend.services.ridge_detector import compute_sensitivity, compute_clusters, classify_ridges, measured_mask
 from backend.services.visualization import render_heatmap, assemble_image_grid, render_overlay, render_clusters
 from backend.cache.thumbnail_cache import ThumbnailCache
-from backend.routers import health, grid, discover, cascade, amr, metro, microscope, desk, probe
+from backend.routers import health, grid, discover, cascade, amr, metro, microscope, desk, probe, staged
 
 import numpy as np
 
@@ -76,6 +76,13 @@ async def result_collector(app: FastAPI):
 
         results = pool.collect_results()
         for r in results:
+            if isinstance(r, StagedResult):
+                # staged probes (services/staged.py) are never grid jobs: every submitter
+                # registered its shard id in the inbox before submitting
+                lst = getattr(app.state, "hike_inbox", {}).get(r.job_id)
+                if lst is not None:
+                    lst.append(r)
+                continue
             if isinstance(r, ProbeResult):
                 entry = jobs.get(r.probe_id)
                 if entry is not None:
@@ -808,3 +815,4 @@ app.include_router(metro.router)
 app.include_router(microscope.router)
 app.include_router(desk.router)
 app.include_router(probe.router)
+app.include_router(staged.router)

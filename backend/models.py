@@ -448,6 +448,14 @@ class CascadeStartRequest(BaseModel):
     # tier-1 detection steps (gated: 93%/94% recall at 4 vs 8; ~2x faster probes).
     # null = probe at full fidelity.
     probe_steps: int | None = Field(4, ge=1, le=50)
+    # how chord probes read their label. "steps" (default, unchanged): a complete probe_steps-step
+    # image per probe. "staged": the full-fidelity schedule up to step staged_t, DINOv2 of the
+    # predicted clean image x̂0; segments whose x̂0 readouts are >= staged_theta apart are resumed
+    # from the cached latent to the full image (exact labels) and only those are tested for
+    # crossings (services/staged.py). staged_theta is provisional until the h27 calibration.
+    probe_mode: Literal["steps", "staged"] = "steps"
+    staged_t: int = Field(4, ge=1, le=49)
+    staged_theta: float = Field(0.10, gt=0.0, lt=2.0)
     # chord probe spacing in weight space; 0.025 (~1 fine cell) is the protocol of record.
     # Finer resolves boundaries closer together than one stride at a cost ~1/stride; coarser
     # merges them. Detection only -- the continuation walk's corrector spacing is unaffected.
@@ -498,12 +506,15 @@ class CascadeStartRequest(BaseModel):
     height: int = Field(config.DEFAULT_HEIGHT, ge=64, le=1024)
     width: int = Field(config.DEFAULT_WIDTH, ge=64, le=1024)
     guidance_scale: float = Field(config.DEFAULT_GUIDANCE_SCALE, ge=0.0, le=20.0)
+    _staged = model_validator(mode="after")(lambda r: _check_staged_t(r) if r.probe_mode == "staged" else r)
 
 
 class CascadePointInfo(BaseModel):
     # the recipe behind any generated thumbnail; null if the index is unknown
     weights: list[float] | None = None
     div: float | None = None
+    # staged runs: this image is still the x̂0 PREVIEW of an unfinished probe (no label)
+    preview: bool = False
 
 
 class CascadeStartResponse(BaseModel):
@@ -703,6 +714,13 @@ class CascadeStatus(BaseModel):
     # default here is the back-compatible reading (a status without the field predates the
     # flag, so it ran the full pipeline); the REQUEST's default is off.
     certify: bool = True
+    # the probe mode this run was started with ("steps" | "staged"), its readout step and flag
+    # threshold, and -- staged only -- the run's staged ledger: readouts, resumed (and resumed
+    # share), segments flagged, image-eq spent (measured and nominal), rebracket renders skipped
+    probe_mode: str = "steps"
+    staged_t: int | None = None
+    staged_theta: float | None = None
+    staged: dict | None = None
     crossings: list[CascadeCrossing] = []
     bg_mean: float | None = None
     bg_p95: float | None = None
@@ -1410,9 +1428,15 @@ class DeskStartRequest(BaseModel):
     steps: int = Field(config.DEFAULT_NUM_INFERENCE_STEPS, ge=1, le=50)
     # line samples run on the cheap field, as the Cascade's chord probes do; null = full fidelity
     probe_steps: int | None = Field(4, ge=1, le=50)
+    # "steps" (default) = the cheap probes above; "staged" = readout at staged_t of the full
+    # schedule, resume only the segments whose x̂0 readouts differ by >= staged_theta
+    probe_mode: Literal["steps", "staged"] = "steps"
+    staged_t: int = Field(4, ge=1, le=49)
+    staged_theta: float = Field(0.10, gt=0.0, lt=2.0)
     height: int = Field(config.DEFAULT_HEIGHT, ge=64, le=1024)
     width: int = Field(config.DEFAULT_WIDTH, ge=64, le=1024)
     guidance_scale: float = Field(config.DEFAULT_GUIDANCE_SCALE, ge=0.0, le=20.0)
+    _staged = model_validator(mode="after")(lambda r: _check_staged_t(r) if r.probe_mode == "staged" else r)
 
 
 class DeskMoveRequest(BaseModel):
@@ -1471,6 +1495,11 @@ class DeskLine(BaseModel):
     divs: list[float | None]
     flips: list[DeskFlip] = []
     segments: list[DeskSegment] = []
+    # staged desks: per sample, whether it was finished (a full-fidelity label), and per segment,
+    # whether its x̂0 readouts were flagged (>= theta). divs are exact where both ends were
+    # finished and the x̂0 divergence elsewhere. Empty for a steps desk.
+    resumed: list[bool] = []
+    flagged: list[bool] = []
 
 
 class DeskFlipRef(BaseModel):
@@ -1505,6 +1534,10 @@ class DeskStatus(BaseModel):
     seed: int = 0
     steps: int = 0
     probe_steps: int | None = None
+    probe_mode: str = "steps"
+    staged_t: int | None = None
+    staged_theta: float | None = None
+    staged: dict | None = None
     position: int = -1
     w0: list[float] = []
     w0_image: int = -1
@@ -1522,3 +1555,70 @@ class DeskStatus(BaseModel):
     generated: int = 0
     notes: list[str] = []
     error: str | None = None
+
+
+# ---- staged early-readout probes (services/staged.py, routers/staged.py) ---------------------
+
+def _check_staged_t(req):
+    """The readout step must leave something to resume: 1 <= t <= steps - 1."""
+    t = getattr(req, "staged_t", None)
+    if t is None:
+        t = getattr(req, "t", None)
+    if t is not None and not (1 <= int(t) <= int(req.steps) - 1):
+        raise ValueError(f"t = {t} must lie in 1..steps-1 (steps = {req.steps})")
+    return req
+
+
+class StagedTraceRequest(BaseModel):
+    """Research (h27): ONE chord per request -- the k prompts, the ordered probe points along the
+    chord (each a k-weight vector, used verbatim: no renormalisation, as the Cascade's chord
+    probes), and the image settings. See routers/staged.py for the result format."""
+    prompts: list[str] = Field(..., min_length=2, max_length=12)
+    weights: list[list[float]] = Field(..., min_length=2, max_length=400)
+    seed: int = 42
+    steps: int = Field(config.DEFAULT_NUM_INFERENCE_STEPS, ge=2, le=50)
+    guidance_scale: float = Field(config.DEFAULT_GUIDANCE_SCALE, ge=0.0, le=20.0)
+    height: int = Field(config.DEFAULT_HEIGHT, ge=64, le=1024)
+    width: int = Field(config.DEFAULT_WIDTH, ge=64, le=1024)
+    # the complete short-schedule arm (today's Cascade probe = 4); 0 = skip it
+    fourstep_steps: int = Field(4, ge=0, le=50)
+    # the Fast-Scan 1-pass readout along the chord (one extra worker call per chord)
+    onepass: bool = True
+    # embeddings as base64 little-endian float16 / float32 arrays, or plain nested lists
+    encoding: Literal["f16", "f32", "list"] = "f16"
+    # spread the points over the GPUs (default); False = all on one worker (one GPU's timings)
+    shard: bool = True
+
+
+class StagedParityRequest(BaseModel):
+    """Research (h27 V1): per point, readout to t -> cached latent -> resume to S, against the
+    direct S-step run (and, pipe_check, against pipe() itself)."""
+    prompts: list[str] = Field(..., min_length=2, max_length=12)
+    points: list[list[float]] = Field(..., min_length=1, max_length=400)
+    t: int = Field(4, ge=1)
+    seed: int = 42
+    steps: int = Field(config.DEFAULT_NUM_INFERENCE_STEPS, ge=2, le=50)
+    guidance_scale: float = Field(config.DEFAULT_GUIDANCE_SCALE, ge=0.0, le=20.0)
+    height: int = Field(config.DEFAULT_HEIGHT, ge=64, le=1024)
+    width: int = Field(config.DEFAULT_WIDTH, ge=64, le=1024)
+    pipe_check: bool = True
+    _t = model_validator(mode="after")(_check_staged_t)
+
+
+class StagedJobStart(BaseModel):
+    job_id: str
+    status: str
+    total: int = 0
+    error: str | None = None
+
+
+class StagedJobStatus(BaseModel):
+    job_id: str
+    kind: str = ""
+    status: str                 # running | done | error | unknown
+    done: int = 0
+    total: int = 0
+    elapsed_s: float = 0.0
+    notes: list[str] = []
+    error: str | None = None
+    result: dict | None = None

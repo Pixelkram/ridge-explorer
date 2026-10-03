@@ -155,6 +155,94 @@ class ProbeResult:
 
 
 @dataclass
+class StagedReadoutTask:
+    """Staged probes, phase 1 (services/staged.py): for each point run steps 1..t of the FULL
+    schedule (steps = S), read DINOv2 of the predicted clean image x̂0 at step t, and return the
+    latent the t-th step produced (bf16 bytes) so the main process can cache it.
+    `points` = [(index, k weights)]; mixing is the Discover/Cascade probe's affine mix."""
+    job_id: str
+    basis: list
+    points: list
+    seed: int
+    height: int
+    width: int
+    steps: int
+    t: int
+    guidance_scale: float
+    epoch: int = 0
+
+
+@dataclass
+class StagedResumeTask:
+    """Staged probes, phase 2: finish read-out probes from their cached latents (steps t+1..S)
+    and return the final image + DINOv2 -- exactly the full-fidelity image of the point.
+    `points` = [(index, (weights, latent bytes | None, shape | None, dtype | None))]; a None
+    latent (evicted) is re-run from noise."""
+    job_id: str
+    basis: list
+    points: list
+    seed: int
+    height: int
+    width: int
+    steps: int
+    t: int
+    guidance_scale: float
+    epoch: int = 0
+
+
+@dataclass
+class StagedTraceTask:
+    """Research (h27): per point the full S-step run with DINOv2 of x̂0 after every step 1..S-1
+    and of the final image, per-component wall-clock, and DINOv2 of the complete probe_steps-step
+    image through the Cascade probe's own code path (_discover_point; fourstep_steps 0 = skip).
+    `onepass_points` (the WHOLE chord, in order) additionally runs the tool's Fast-Scan 1-pass
+    readout on this worker and returns its consecutive-pair cosine distances."""
+    job_id: str
+    basis: list
+    points: list
+    seed: int
+    height: int
+    width: int
+    steps: int
+    guidance_scale: float
+    fourstep_steps: int = 4
+    onepass_points: list | None = None
+    epoch: int = 0
+
+
+@dataclass
+class StagedParityTask:
+    """Research (h27 V1): per point, readout to t -> latent bytes -> resume to S, against the
+    direct S-step run of the same loop and (pipe_check) against pipe() itself."""
+    job_id: str
+    basis: list
+    points: list
+    seed: int
+    height: int
+    width: int
+    steps: int
+    t: int
+    guidance_scale: float
+    pipe_check: bool = True
+    epoch: int = 0
+
+
+@dataclass
+class StagedResult:
+    """One point of a staged task (kind: readout | resume | trace | parity | onepass). `index`
+    is the point's index as submitted (-1 for the chord-level onepass record)."""
+    job_id: str
+    gpu_id: int
+    kind: str
+    index: int
+    data: dict
+    error: str = ""
+
+
+_STAGED_TASKS = (StagedReadoutTask, StagedResumeTask, StagedTraceTask, StagedParityTask)
+
+
+@dataclass
 class HQTask:
     """Re-render specific cells at high quality."""
     job_id: str
@@ -280,6 +368,9 @@ def worker_main(gpu_id: int, task_queue, result_queue, cancel_epoch=None):
                 _process_hq(gpu_id, device, pipe, dino, dino_transform, task, result_queue, cancel_epoch)
             elif isinstance(task, (ProbeTask, TokenProbeTask)):
                 _process_probe(gpu_id, device, pipe, dino, task, result_queue)
+            elif isinstance(task, _STAGED_TASKS):
+                _process_staged(gpu_id, device, pipe, dino, dino_transform, task, result_queue,
+                                cancel_epoch)
         except Exception as exc:
             import traceback
             print(f"[GPU {gpu_id}] task {getattr(task, 'job_id', '?')} failed: "
@@ -614,6 +705,24 @@ def _process_hike(gpu_id, device, pipe, dino, dino_transform, task, result_queue
     print(f"[GPU {gpu_id}] hike {task.job_id}: {len(task.points)} points", flush=True)
 
 
+def _discover_point(pipe, dino, dino_transform, device, base, weights, seed, height, width,
+                    steps, guidance_scale):
+    """ONE Discover / Cascade probe: the affine mix of the encoded basis, one pipe() call with
+    the cached empty negative embedding and a device generator seeded per point, DINOv2 of the
+    PIL image. (image, unit embedding tensor). The Cascade's chord probes (probe_steps = 4), its
+    full-fidelity renders, and the h27 trace's 4-step-schedule arm all go through here."""
+    emb = sum(float(w) * base[n] for n, w in enumerate(weights) if w != 0.0)
+    gen = torch.Generator(device=device).manual_seed(seed)
+    with torch.no_grad():
+        image = pipe(prompt_embeds=emb, height=height, width=width,
+                     num_inference_steps=steps,
+                     negative_prompt_embeds=getattr(pipe, "_cached_neg_embeds", None),
+                     guidance_scale=guidance_scale, generator=gen).images[0]
+        e = dino(dino_transform(image).unsqueeze(0).to(device))
+        e = e / e.norm(dim=-1, keepdim=True)
+    return image, e
+
+
 def _process_discover(gpu_id, device, pipe, dino, dino_transform, task, result_queue,
                       cancel_epoch=None):
     """Generate one batch of the discovery loop: k-way affine mixtures of a prompt basis.
@@ -630,21 +739,77 @@ def _process_discover(gpu_id, device, pipe, dino, dino_transform, task, result_q
         if _cancelled(task, cancel_epoch):
             print(f"[GPU {gpu_id}] Cancelled mid-discover", flush=True)
             return
-        emb = sum(float(w) * base[n] for n, w in enumerate(weights) if w != 0.0)
-        gen = torch.Generator(device=device).manual_seed(task.seed)
-        with torch.no_grad():
-            image = pipe(prompt_embeds=emb, height=task.height, width=task.width,
-                         num_inference_steps=task.steps,
-                         negative_prompt_embeds=getattr(pipe, "_cached_neg_embeds", None),
-                         guidance_scale=task.guidance_scale, generator=gen).images[0]
-            e = dino(dino_transform(image).unsqueeze(0).to(device))
-            e = e / e.norm(dim=-1, keepdim=True)
+        image, e = _discover_point(pipe, dino, dino_transform, device, base, weights, task.seed,
+                                   task.height, task.width, task.steps, task.guidance_scale)
         tb = _image_to_thumbnail(image)
         result_queue.put(CellResult(
             job_id=task.job_id, gpu_id=gpu_id, row=int(idx), col=0,
             thumbnail_bytes=tb, thumbnail_hash=hashlib.md5(tb).hexdigest(),
             dino_embedding=e.cpu().numpy().flatten()))
     print(f"[GPU {gpu_id}] discover {task.job_id}: {len(task.points)} points", flush=True)
+
+
+def _process_staged(gpu_id, device, pipe, dino, dino_transform, task, result_queue,
+                    cancel_epoch=None):
+    """The four staged task types (services/staged.py holds the bodies). One StagedResult per
+    point; a point that fails is reported in its result's `error` and the task goes on, unless
+    the failure means the CUDA context is gone (then it propagates to the worker loop)."""
+    from . import staged as st
+    t_start = time.time()
+    base = st.encode_basis(pipe, task.basis)
+    kind = {StagedReadoutTask: "readout", StagedResumeTask: "resume",
+            StagedTraceTask: "trace", StagedParityTask: "parity"}[type(task)]
+    if isinstance(task, StagedTraceTask) and task.onepass_points:
+        st._sync(device)
+        t0 = time.perf_counter()
+        lat = st.worker_onepass(pipe, device, task.basis, task.onepass_points, task.seed,
+                                task.height, task.width)
+        st._sync(device)
+        dt = time.perf_counter() - t0
+        divs = [float(1.0 - np.dot(lat[i], lat[i + 1])) for i in range(len(lat) - 1)]
+        result_queue.put(StagedResult(job_id=task.job_id, gpu_id=gpu_id, kind="onepass", index=-1,
+                                      data={"divs": divs, "onepass_s": dt, "n": len(lat)}))
+    fourstep = None
+    if isinstance(task, StagedTraceTask) and task.fourstep_steps:
+        def fourstep(w):
+            img, e = _discover_point(pipe, dino, dino_transform, device, base, w, task.seed,
+                                     task.height, task.width, task.fourstep_steps,
+                                     task.guidance_scale)
+            return img, e.cpu().numpy().flatten()
+    for idx, payload in task.points:
+        if _cancelled(task, cancel_epoch):
+            print(f"[GPU {gpu_id}] Cancelled mid-staged {kind}", flush=True)
+            return
+        common = (pipe, dino, dino_transform, device, base)
+        try:
+            if kind == "readout":
+                d = st.worker_readout(*common, payload, task.seed, task.height, task.width,
+                                      task.steps, task.t, task.guidance_scale)
+            elif kind == "resume":
+                w, lat_b, shape, dt_name = payload
+                d = st.worker_resume(*common, w, task.seed, task.height, task.width, task.steps,
+                                     task.t, task.guidance_scale, lat_b, shape, dt_name)
+            elif kind == "trace":
+                d = st.worker_trace_point(*common, payload, task.seed, task.height, task.width,
+                                          task.steps, task.guidance_scale, fourstep)
+            else:
+                d = st.worker_parity(*common, payload, task.seed, task.height, task.width,
+                                     task.steps, task.t, task.guidance_scale, task.pipe_check)
+            d["gpu_id"] = gpu_id
+            result_queue.put(StagedResult(job_id=task.job_id, gpu_id=gpu_id, kind=kind,
+                                          index=int(idx), data=d))
+        except Exception as exc:
+            msg = f"{type(exc).__name__}: {exc}"
+            if any(m in msg for m in _CUDA_FATAL):
+                raise
+            import traceback
+            traceback.print_exc()
+            result_queue.put(StagedResult(job_id=task.job_id, gpu_id=gpu_id, kind=kind,
+                                          index=int(idx), data={}, error=msg))
+            if "out of memory" in msg:
+                torch.cuda.empty_cache()
+    print(f"[GPU {gpu_id}] staged {kind} {task.job_id}: {len(task.points)} points in "
+          f"{time.time() - t_start:.1f}s", flush=True)
 
 
 def _process_probe(gpu_id, device, pipe, dino, task, result_queue):
@@ -823,7 +988,8 @@ class GPUPool:
         while not self.result_queue.empty():
             try:
                 r = self.result_queue.get_nowait()
-                if isinstance(r, (CellResult, LatentResult, LatentBatchResult, ProbeResult)):
+                if isinstance(r, (CellResult, LatentResult, LatentBatchResult, ProbeResult,
+                                  StagedResult)):
                     results.append(r)
                 elif isinstance(r, dict) and r.get("type") in ("task_error", "worker_died"):
                     # keep worker-side failures reachable: without this a crashed task

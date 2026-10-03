@@ -23,6 +23,7 @@ from backend.models import (
                             WalkStartRequest, WalkStep, WalkStatus, RenderRequest,
                             CascadePointInfo, LocalSvChord, LocalSvMap)
 from backend.services import cascade as cs
+from backend.services import staged as st
 from backend.services import local_sv as lsv
 from backend.cache.thumbnail_cache import ThumbnailStore
 
@@ -63,6 +64,7 @@ async def start(req: CascadeStartRequest, request: Request):
         guidance_scale=req.guidance_scale, n_chords=req.n_chords,
         n_patches=req.n_patches, focus=req.focus, focus_radius=req.focus_radius,
         probe_steps=req.probe_steps, stride=req.stride, certify=req.certify,
+        probe_mode=req.probe_mode, staged_t=req.staged_t, staged_theta=req.staged_theta,
         branch=req.branch, depth=req.depth, branch_top_pct=req.branch_top_pct,
         hires=req.hires, hires_top_pct=req.hires_top_pct, hires_factor=req.hires_factor,
         hires_mode=req.hires_mode, hires_cloud_n=req.hires_cloud_n,
@@ -138,6 +140,12 @@ async def status(run_id: str, request: Request):
         hires_cloud_r=float(getattr(run, "hires_cloud_r", 0.05)),
         hires_cloud_k=int(getattr(run, "hires_cloud_k", 4)),
         certify=bool(getattr(run, "certify", True)),
+        probe_mode=str(getattr(run, "probe_mode", "steps")),
+        staged_t=int(run.staged_t) if getattr(run, "probe_mode", "steps") == "staged" else None,
+        staged_theta=(float(run.staged_theta) if getattr(run, "probe_mode", "steps") == "staged"
+                      else None),
+        staged=(st.ledger(run).report() if getattr(run, "probe_mode", "steps") == "staged"
+                else None),
         crossings=[CascadeCrossing(
             cid=x.cid, weights=[float(v) for v in x.mid] if x.mid is not None
             else [float(v) for v in (x.wa + x.wb) / 2],
@@ -366,7 +374,8 @@ async def point_info(run_id: str, index: int, request: Request):
         return CascadePointInfo()
     return CascadePointInfo(
         weights=[float(v) for v in run.probe_geo[pos]],
-        div=run.probe_div[pos])
+        div=run.probe_div[pos],
+        preview=index in getattr(run, "staged_preview", ()))
 
 
 @router.get("/{run_id}/{index}.jpg")

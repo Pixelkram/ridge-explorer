@@ -307,6 +307,32 @@ export interface CascadeStartRequest {
   trace?: boolean;
   trace_steps?: number;
   trace_certify?: boolean;
+  // how chord probes read their label: 'steps' (complete probe_steps-step images, the backend
+  // default) or 'staged' (full schedule to step staged_t, x̂0 readout, flagged segments finished
+  // to exact labels). The panel always sends it, from frontend/src/probeDefaults.ts
+  probe_mode?: 'steps' | 'staged';
+  staged_t?: number;
+  staged_theta?: number;
+}
+
+/** A staged run's ledger (services/staged.py Ledger.report). */
+export interface StagedStats {
+  t: number;
+  steps: number;
+  readouts: number;
+  resumed: number;               // finished from a cached latent
+  from_scratch: number;          // finished from noise (latent evicted from the LRU)
+  resumed_share: number | null;  // finished per readout
+  segments: number;
+  flagged: number;
+  flagged_share: number | null;
+  image_eq: number;              // measured: worker seconds over one full image's seconds
+  image_eq_nominal: number;      // t/S per readout + (S-t)/S per finish
+  image_eq_per_readout: number | null;
+  decode_share: number | null;   // decode + DINOv2 as a share of one full image
+  unit_s: number | null;
+  rebracket_skipped: number;
+  cache_misses: number;
 }
 
 // one walk of the trace phase: origin crossing first, then the stations
@@ -322,6 +348,8 @@ export interface CascadeTrace {
 export interface CascadePointInfo {
   weights: number[] | null;
   div: number | null;
+  // staged runs: the image is still the x̂0 preview of an unfinished probe
+  preview?: boolean;
 }
 
 export interface CascadeStartResponse {
@@ -454,6 +482,11 @@ export interface CascadeStatus {
   // false = detection only: the crossings were never bisected or scored, so their positions
   // carry bracket precision (+-stride/2) and b/significant mean nothing
   certify?: boolean;
+  // the probe mode this run was started with, and (staged) its readout step, threshold, ledger
+  probe_mode?: 'steps' | 'staged';
+  staged_t?: number | null;
+  staged_theta?: number | null;
+  staged?: StagedStats | null;
   crossings: CascadeCrossing[];
   bg_mean: number | null;
   bg_p95: number | null;
@@ -1072,6 +1105,9 @@ export interface DeskStartRequest {
   seed?: number;
   steps?: number;
   probe_steps?: number | null;        // cheap field (4); null = full fidelity
+  probe_mode?: 'steps' | 'staged';    // see CascadeStartRequest
+  staged_t?: number;
+  staged_theta?: number;
 }
 
 /** A new current mix: outright (`w0`) or a released marker (`line` + `alpha`). */
@@ -1124,6 +1160,9 @@ export interface DeskLine {
   divs: (number | null)[];
   flips: DeskFlip[];
   segments: DeskSegment[];
+  // staged desks: per sample, finished (exact label)?; per segment, flagged by the readout?
+  resumed?: boolean[];
+  flagged?: boolean[];
 }
 
 export interface DeskFlipRef {
@@ -1156,6 +1195,10 @@ export interface DeskStatus {
   seed: number;
   steps: number;
   probe_steps: number | null;
+  probe_mode?: 'steps' | 'staged';
+  staged_t?: number | null;
+  staged_theta?: number | null;
+  staged?: StagedStats | null;
   position: number;
   w0: number[];
   w0_image: number;
