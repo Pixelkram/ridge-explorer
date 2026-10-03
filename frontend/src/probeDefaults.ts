@@ -13,8 +13,10 @@
  *               from the cached latent to the full image, so their labels are exact. Crossings
  *               are only ever claimed between two finished probes. theta = 0.047 is the h27
  *               calibration at t = 4 (k = 4: ~90% of full-fidelity crossings at ~0.72 of a full
- *               image per probe; today's 4-step probes find ~23% at ~0.58). The DEFAULT mode stays
- *               'steps' by h27's pre-registered rule (staged missed its AUC bar) until the owner decides.
+ *               image per probe; today's 4-step probes find ~23% at ~0.58). DEFAULT = 'staged' by
+ *               owner decision 2026-10-03, after h27: staged missed its own pre-registered bars (AUC
+ *               0.905 vs 0.95 at t = 4), but the incumbent 'steps' failed its validation (23% recall)
+ *               and staged finds ~4x more full-fidelity crossings at ~1.3x the probe cost.
  */
 export type ProbeMode = 'steps' | 'staged';
 
@@ -27,14 +29,14 @@ export interface ProbeDefaults {
 }
 
 export const PROBE_DEFAULTS: ProbeDefaults = {
-  mode: 'steps',
+  mode: 'staged',
   stagedT: 4,
   stagedTheta: 0.047,
 };
 
 export const PROBE_MODES: { value: ProbeMode; label: string }[] = [
-  { value: 'steps', label: '4-step probes (current)' },
-  { value: 'staged', label: 'Staged readout — exact labels where flagged' },
+  { value: 'steps', label: '4-step probes (faster; finds ~23% of full-fidelity crossings, h27)' },
+  { value: 'staged', label: 'Staged readout (default) — exact labels where flagged' },
 ];
 
 /** The one-line explanation both panels show under the advanced settings. */

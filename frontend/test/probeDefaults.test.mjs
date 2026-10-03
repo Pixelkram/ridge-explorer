@@ -32,7 +32,7 @@ console.log('probeDefaults');
 const modes = PROBE_MODES.map((m) => m.value);
 check('the two modes, in order', modes, ['steps', 'staged']);
 check('labels as specified', PROBE_MODES.map((m) => m.label),
-  ['4-step probes (current)', 'Staged readout — exact labels where flagged']);
+  ['4-step probes (faster; finds ~23% of full-fidelity crossings, h27)', 'Staged readout (default) — exact labels where flagged']);
 check('the default mode is one of them', modes.includes(PROBE_DEFAULTS.mode), true);
 check('default t is an integer in 1..7 of the 8-step schedule',
   Number.isInteger(PROBE_DEFAULTS.stagedT) && PROBE_DEFAULTS.stagedT >= 1
